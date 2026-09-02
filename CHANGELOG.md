@@ -35,6 +35,14 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `invalidEnvelope` rather than `invalidURI`. Callers can distinguish an SDK/core mismatch from a
   bad scanned URI without asking the user to rescan.
 
+## Changed
+
+- `RustErrorKind` has a new case, `anchorNotFound`: creating transactions from a proposal failed
+  because the wallet has not scanned to a height it can anchor them on. Such failures were reported
+  as `proposalInvalid`, and a wallet could only tell them apart by the upstream error text, which
+  redaction now removes; the new case lets it say "scan further and retry". An exhaustive `switch`
+  over `RustErrorKind` stops compiling until the new case is handled.
+
 ## Removed
 
 - `ZcashEip681Backend` and the `zcashlc_eip681_*` FFI are gone. `PaymentURIParser` now handles
