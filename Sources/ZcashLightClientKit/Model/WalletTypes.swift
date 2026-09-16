@@ -25,6 +25,11 @@ extension Account {
     /// case-insensitively. It sizes that account's Orchard→Ironwood migration runs to one 96-action
     /// QR signing round; any other value, or `nil`, keeps the default 50-note-per-run sizing.
     public static let keystoneKeySource = "keystone"
+
+    /// The `keySource` marking an account a Ledger hardware wallet signs, for a wallet to recognize
+    /// its Ledger accounts. The SDK itself reads nothing from it: a Ledger account keeps the default
+    /// migration run sizing, since no batch signing round bounds its runs.
+    public static let ledgerKeySource = "ledger"
 }
 
 public struct UnifiedSpendingKey: Equatable, Undescribable {

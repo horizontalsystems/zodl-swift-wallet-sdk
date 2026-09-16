@@ -10,6 +10,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Ledger hardware wallets over Bluetooth
 
+- Pairing accounts on, and signing PCZTs with, a Ledger device running the Zcash app (3.6.0 or newer;
+  3.9.0 or newer for a transaction with Ironwood outputs) over Bluetooth LE. `docs/LEDGER.md` walks
+  through the whole flow.
 - `LedgerBluetoothScanner` finds Ledger devices (`devices()`, an `AsyncThrowingStream` of
   `LedgerBluetoothDevice`: identifier, advertised name, `LedgerDeviceModel`, RSSI) and opens a
   `LedgerBluetoothTransport` with `connect(to:timeout:)`. The app must declare
@@ -18,13 +21,32 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Bluetooth pairing. A transport closes itself, and every later call throws
   `ZcashError.ledgerTransportClosed`, once an exchange fails after its command reached the device
   (timeout, disconnect, malformed reply) or its task is cancelled; open a new connection then.
-- `LedgerAPDUTransport`, the protocol a Ledger transport conforms to (`exchange(_:timeout:)`,
-  `close()`), for custom transports and test doubles.
-- `LedgerDeviceIdentity`, the `tpk0-…` name of a Ledger device's seed on one network, validated on
-  construction (`init(encoding:)`, and when decoded). It is linkable to the device's first
-  transparent address once that address has spent on chain, so a wallet stores it and never logs it.
-  Its `description` prints a placeholder. `LedgerAppVersion` is the Zcash app version a device
-  reports, with `supportsPczt`.
+- `LedgerAPDUTransport`, the protocol the pairing and signing code depends on
+  (`exchange(_:timeout:)`, `close()`), for custom transports and test doubles.
+- `LedgerDevice(transport:networkType:)`: `appVersion()` (a `LedgerAppVersion`),
+  `deviceIdentity()` (a `LedgerDeviceIdentity`), `pairAccount(zip32AccountIndex:)` (a
+  `LedgerAccountPairing` carrying the account's `UnifiedFullViewingKey`, the
+  `LedgerAccountBinding` to store with the imported account, and the app version) and
+  `displayUnifiedAddress(zip32AccountIndex:transparentAddressIndex:)`. `pairAccount` asks the user
+  to approve the export on the device, refuses an app that cannot sign, and reads the device's
+  identity before and after the export, failing unless both reads name the same device. The address
+  the device displays and returns holds only the account's Orchard receiver at diversifier index 0,
+  whatever the transparent address index: compare it with a unified address holding that receiver,
+  not with the account's default unified address.
+- `LedgerDeviceIdentity` is validated on construction (`init(encoding:)`, and when decoded), and
+  `LedgerAccountBinding` is `Codable`. The identity names the device's seed on one network; it is
+  linkable to the device's first transparent address once that address has spent on chain, so a
+  wallet stores it and never logs it. Its `description` prints a placeholder.
+- `Synchronizer.signPCZTWithLedger(pczt:accountUUID:binding:transport:progress:)` signs the PCZT
+  `createPCZTFromProposal` returned, reporting `LedgerSigningProgress`; pass its result, with the
+  result of `addProofsToPCZT` on the same PCZT, to `createTransactionFromPCZT`. Before anything is
+  sent it checks that the device runs a Zcash app that can sign and is the device in the binding,
+  and that the transaction breaks none of the device's rules; the user then reviews the
+  transaction on the device, with no timeout. The method has a default implementation that
+  reports the capability as unavailable, so custom `Synchronizer` conformers and test doubles keep
+  compiling unchanged; `SDKSynchronizer` and `SlipstreamSynchronizer` implement it.
+- `Account.ledgerKeySource` (`"ledger"`), the `keySource` to import a Ledger account with. The SDK
+  reads nothing from it: a Ledger account keeps the default migration run sizing.
 - New `ZcashError` cases `ZLEDG0001`–`ZLEDG0021`, one per Ledger failure the wallet handles
   differently (user rejection, wrong app, app too old, device mismatch, derivation budget spent,
   device refusal with its status word, transaction not signable, and the Bluetooth failures), and
