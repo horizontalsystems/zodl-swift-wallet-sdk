@@ -110,6 +110,7 @@ mod ffi;
 mod liberated_payment;
 mod gift_ffi;
 mod interactive_qos;
+mod ledger;
 mod migration;
 mod migration_engine;
 mod migration_finalize;

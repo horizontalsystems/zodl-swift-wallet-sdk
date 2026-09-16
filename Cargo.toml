@@ -58,6 +58,14 @@ ur-registry = { git = "https://github.com/KeystoneHQ/keystone-sdk-rust", rev = "
     "std",
 ] }
 
+# Ledger hardware-wallet signing over Bluetooth LE (`rust/src/ledger.rs`).
+#
+# The sans-I/O APDU engine for the Ledger Zcash app: pairing commands, BLE framing and the PCZT
+# signing session. Default features only (`std`); the USB HID and speculos transports stay off,
+# since the platform layer moves the bytes. Published from the public zodl-inc/pczt-ledger
+# repository.
+pczt_ledger = "=0.1.0-pre.0"
+
 # EIP-681
 eip681 = "0.1.0"
 
@@ -142,6 +150,8 @@ hex = "0.4"
 [dev-dependencies]
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+# Plays the device in the Ledger signing tests (`rust/src/ledger/tests.rs`).
+secp256k1 = "0.29"
 tempfile = "3"
 tokio = { version = "1", features = ["io-util", "net", "test-util"] }
 
