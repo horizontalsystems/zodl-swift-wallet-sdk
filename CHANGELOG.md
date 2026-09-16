@@ -6,6 +6,32 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 # Unreleased
 
+## Added
+
+### Ledger hardware wallets over Bluetooth
+
+- `LedgerBluetoothScanner` finds Ledger devices (`devices()`, an `AsyncThrowingStream` of
+  `LedgerBluetoothDevice`: identifier, advertised name, `LedgerDeviceModel`, RSSI) and opens a
+  `LedgerBluetoothTransport` with `connect(to:timeout:)`. The app must declare
+  `NSBluetoothAlwaysUsageDescription`, and a sandboxed macOS app the
+  `com.apple.security.device.bluetooth` entitlement. The first connection to a device brings up
+  Bluetooth pairing. A transport closes itself, and every later call throws
+  `ZcashError.ledgerTransportClosed`, once an exchange fails after its command reached the device
+  (timeout, disconnect, malformed reply) or its task is cancelled; open a new connection then.
+- `LedgerAPDUTransport`, the protocol a Ledger transport conforms to (`exchange(_:timeout:)`,
+  `close()`), for custom transports and test doubles.
+- `LedgerDeviceIdentity`, the `tpk0-…` name of a Ledger device's seed on one network, validated on
+  construction (`init(encoding:)`, and when decoded). It is linkable to the device's first
+  transparent address once that address has spent on chain, so a wallet stores it and never logs it.
+  Its `description` prints a placeholder. `LedgerAppVersion` is the Zcash app version a device
+  reports, with `supportsPczt`.
+- New `ZcashError` cases `ZLEDG0001`–`ZLEDG0021`, one per Ledger failure the wallet handles
+  differently (user rejection, wrong app, app too old, device mismatch, derivation budget spent,
+  device refusal with its status word, transaction not signable, and the Bluetooth failures), and
+  `ZcashError.ledgerIsRestartable`, which says whether a fresh attempt could succeed. No error
+  reason carries command or reply bytes, a PCZT, a viewing key, an address, a device identity or a
+  signature.
+
 # 5.1.0 - 2026-10-07
 
 ## Added
