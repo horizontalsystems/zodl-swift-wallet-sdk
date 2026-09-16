@@ -55,6 +55,11 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     when `has_status_word` is set; `is_transient` and `is_restartable` say whether the device
     condition can clear and whether a fresh ceremony could succeed. `reason` never carries APDU or
     reply bytes, a PCZT, a viewing key, an address, a device identity or a signature.
+  - Transport policy, taken from the engine so a platform runner applies the same one:
+    `zcashlc_ledger_max_cmd_not_accepted_retries` (resends allowed after consecutive `0x6901`
+    refusals of one command), `zcashlc_ledger_cmd_not_accepted_backoff_ms` (the pause before each
+    resend) and `zcashlc_ledger_default_timeout_ms` (the timeout for a reply that does not wait on
+    the user).
   - App version: `zcashlc_ledger_firmware_version_apdu`, and `zcashlc_ledger_parse_app_version`
     returning `FfiLedgerAppVersion` (`major`, `minor`, `patch`, `supports_pczt`; free with
     `zcashlc_ledger_free_app_version`).

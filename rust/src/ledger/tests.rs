@@ -110,6 +110,17 @@ fn firmware_version_reply(major: u8, minor: u8, patch: u8) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// Transport policy
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_transport_policy_is_the_engines() {
+    assert_eq!(zcashlc_ledger_max_cmd_not_accepted_retries(), 32);
+    assert_eq!(zcashlc_ledger_cmd_not_accepted_backoff_ms(), 50);
+    assert_eq!(zcashlc_ledger_default_timeout_ms(), 120_000);
+}
+
+// ---------------------------------------------------------------------------
 // Framing
 // ---------------------------------------------------------------------------
 

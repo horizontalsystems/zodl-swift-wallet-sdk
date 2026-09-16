@@ -406,6 +406,35 @@ pub unsafe extern "C" fn zcashlc_ledger_free_error(ptr: *mut FfiLedgerError) {
 }
 
 // ---------------------------------------------------------------------------
+// Transport policy
+// ---------------------------------------------------------------------------
+
+/// Returns how many consecutive `0x6901` refusals a one-shot command is resent after: the budget
+/// the signing session and the viewing key export apply to themselves, and which the caller of a
+/// one-shot parser applies by hand. A command is sent at most this many times plus one.
+#[unsafe(no_mangle)]
+pub extern "C" fn zcashlc_ledger_max_cmd_not_accepted_retries() -> u32 {
+    pczt_ledger::session::MAX_CMD_NOT_ACCEPTED_RETRIES
+}
+
+/// Returns the pause, in milliseconds, between a `0x6901` refusal and the resend of the identical
+/// command.
+#[unsafe(no_mangle)]
+pub extern "C" fn zcashlc_ledger_cmd_not_accepted_backoff_ms() -> u32 {
+    u32::try_from(pczt_ledger::ceremony::CMD_NOT_ACCEPTED_BACKOFF.as_millis()).unwrap_or(u32::MAX)
+}
+
+/// Returns the timeout, in milliseconds, for a reply the device produces without waiting on the
+/// user. A reply that waits on the user has no timeout.
+///
+/// Generous by two orders of magnitude on purpose: a timeout ends the connection, and a spurious
+/// one costs the user a restart of the ceremony.
+#[unsafe(no_mangle)]
+pub extern "C" fn zcashlc_ledger_default_timeout_ms() -> u32 {
+    u32::try_from(pczt_ledger::transport::DEFAULT_TIMEOUT.as_millis()).unwrap_or(u32::MAX)
+}
+
+// ---------------------------------------------------------------------------
 // App version
 // ---------------------------------------------------------------------------
 
