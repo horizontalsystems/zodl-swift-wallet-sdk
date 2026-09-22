@@ -61,9 +61,10 @@ let accountUUID = try await synchronizer.importAccount(
 ```
 
 `pairAccount` reads the app version (and refuses an app that cannot sign), reads the device's
-identity, asks the user to approve the viewing key export on the device, and reads the identity
-again. It fails with `ZcashError.ledgerDeviceMismatch` unless both reads name the same device, so
-the key and the binding cannot come from two different devices.
+identity, and asks the user to approve the viewing key export on the device. The identity is
+read once, before the export: the Zcash app leaves a status screen up after the export and drops
+the next command until the user dismisses it, and a transport speaks to exactly one peripheral,
+so the device that answered the probe is the device that exported the key.
 
 Pass `nil` for the seed fingerprint and the ZIP 32 account index: a Ledger never reveals its seed
 fingerprint, and the binding carries the account index the signing session needs.

@@ -235,7 +235,9 @@ final class LedgerDeviceTests: XCTestCase {
             instructions,
             [LedgerReplies.getFirmwareVersion, LedgerReplies.getWalletPublicKey]
                 + Array(repeating: LedgerReplies.getVK, count: chunkCount)
-                + [LedgerReplies.getWalletPublicKey, LedgerReplies.getWalletPublicKey]
+                // The trailing probe is this test's own `deviceIdentity()` call: pairing itself
+                // reads the identity once, before the export.
+                + [LedgerReplies.getWalletPublicKey]
         )
 
         // Only the request that shows the approval screen waits on the user.
@@ -245,20 +247,22 @@ final class LedgerDeviceTests: XCTestCase {
         XCTAssertNotNil(timeouts[0])
     }
 
-    func testPairAccountRefusesAnIdentityThatChangesAcrossTheExport() async throws {
+    func testPairAccountProbesTheIdentityOnceBeforeTheExport() async throws {
         let ufvk = try testnetUFVK()
+        // A second probe would answer a different key; the pairing must never issue one — the Zcash
+        // app leaves a status screen up after the export and drops the next command — so the binding
+        // must carry the identity the first probe answered.
         let transport = device(ufvk: ufvk.stringEncoded) { probe in
             probe == 0 ? LedgerReplies.generatorPoint : LedgerReplies.doubledGeneratorPoint
         }
         let ledger = LedgerDevice(transport: transport, networkType: .testnet)
 
-        do {
-            _ = try await ledger.pairAccount(zip32AccountIndex: Zip32AccountIndex(0))
-            XCTFail("A pairing whose identity changed must be refused")
-        } catch let error as ZcashError {
-            XCTAssertEqual(error, .ledgerDeviceMismatch)
-            XCTAssertEqual(error.ledgerIsRestartable, false)
-        }
+        let pairing = try await ledger.pairAccount(zip32AccountIndex: Zip32AccountIndex(0))
+
+        let reference = LedgerDevice(transport: device(ufvk: ufvk.stringEncoded), networkType: .testnet)
+        let referencePairing = try await reference.pairAccount(zip32AccountIndex: Zip32AccountIndex(0))
+        XCTAssertEqual(pairing.binding.deviceIdentity, referencePairing.binding.deviceIdentity)
+        XCTAssertEqual(pairing.ufvk, referencePairing.ufvk)
     }
 
     func testPairAccountRefusesAnAppThatCannotSign() async throws {

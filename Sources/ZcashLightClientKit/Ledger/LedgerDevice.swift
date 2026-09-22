@@ -54,7 +54,6 @@ public actor LedgerDevice {
     /// - Parameter zip32AccountIndex: The account to export.
     /// - Throws: ``ZcashError/ledgerAppTooOld(_:)`` when the app cannot sign transactions for this SDK,
     ///   ``ZcashError/ledgerUserRejected`` when the user declines the export,
-    ///   ``ZcashError/ledgerDeviceMismatch`` when the identity changes across the export,
     ///   ``ZcashError/ledgerDerivationBudgetExhausted`` when the user must reopen the Zcash app first.
     public func pairAccount(zip32AccountIndex: Zip32AccountIndex) async throws -> LedgerAccountPairing {
         let networkType = self.networkType
@@ -64,12 +63,13 @@ public actor LedgerDevice {
                 throw ZcashError.ledgerAppTooOld("the Zcash app is v\(appVersion), which predates PCZT signing")
             }
 
+            // The identity is read once, before the export. The Zcash app (3.9.3 on a Nano Gen5) leaves
+            // a status screen up after the viewing-key export and drops the next command until the
+            // user dismisses it, so a probe sent right after the export never gets its reply; and a
+            // transport speaks to exactly one peripheral, so the device that answered this probe is
+            // the device that exports the key on the same connection.
             let identity = try await self.readDeviceIdentity()
             let encodedUFVK = try await self.exportUFVK(zip32AccountIndex: zip32AccountIndex)
-            let identityAfterExport = try await self.readDeviceIdentity()
-            guard identity == identityAfterExport else {
-                throw ZcashError.ledgerDeviceMismatch
-            }
 
             let ufvk: UnifiedFullViewingKey
             do {

@@ -29,7 +29,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LedgerAccountBinding` to store with the imported account, and the app version) and
   `displayUnifiedAddress(zip32AccountIndex:transparentAddressIndex:)`. `pairAccount` asks the user
   to approve the export on the device, refuses an app that cannot sign, and reads the device's
-  identity before and after the export, failing unless both reads name the same device. The address
+  identity once, before the export (the Zcash app leaves a status screen up after the export and
+  drops the next command, so a second probe never gets its reply). The address
   the device displays and returns holds only the account's Orchard receiver at diversifier index 0,
   whatever the transparent address index: compare it with a unified address holding that receiver,
   not with the account's default unified address.
