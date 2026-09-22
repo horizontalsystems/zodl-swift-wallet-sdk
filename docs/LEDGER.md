@@ -140,6 +140,15 @@ The ceremony, reported through `LedgerSigningProgress`:
 
 The device's signatures are verified before the signed PCZT is returned.
 
+### Change outputs
+
+The Ledger Zcash app signs exactly one change output per transaction; a PCZT with two or more fails
+the `identifyingDevice` check above with `ZcashError.ledgerTransactionNotSignable` before anything is
+sent. The proposal itself already avoids this: `proposeTransfer`, `proposefulfillingPaymentURI` and
+`proposeShielding` build at most one change output for an account whose `keySource` is
+`Account.ledgerKeySource` (compared case-insensitively). Every other account keeps splitting change
+into up to four outputs of at least 0.1 ZEC each, unchanged.
+
 ## Errors
 
 Every Ledger failure is a `ZcashError` from the `ledger` family (`ZLEDG0001`–`ZLEDG0021`), or

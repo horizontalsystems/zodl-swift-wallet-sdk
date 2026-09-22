@@ -46,8 +46,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transaction on the device, with no timeout. The method has a default implementation that
   reports the capability as unavailable, so custom `Synchronizer` conformers and test doubles keep
   compiling unchanged; `SDKSynchronizer` and `SlipstreamSynchronizer` implement it.
-- `Account.ledgerKeySource` (`"ledger"`), the `keySource` to import a Ledger account with. The SDK
-  reads nothing from it: a Ledger account keeps the default migration run sizing.
+- `Account.ledgerKeySource` (`"ledger"`), the `keySource` to import a Ledger account with.
+  `proposeTransfer`, `proposefulfillingPaymentURI` and `proposeShielding` read it to keep a
+  Ledger-tagged account's proposals to at most one change output, matching the Ledger Zcash app's
+  one-change-output limit; migration run sizing is unaffected and stays the default.
 - New `ZcashError` cases `ZLEDG0001`–`ZLEDG0021`, one per Ledger failure the wallet handles
   differently (user rejection, wrong app, app too old, device mismatch, derivation budget spent,
   device refusal with its status word, transaction not signable, and the Bluetooth failures), and

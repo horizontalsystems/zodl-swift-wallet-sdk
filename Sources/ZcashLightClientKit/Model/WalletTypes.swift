@@ -26,9 +26,10 @@ extension Account {
     /// QR signing round; any other value, or `nil`, keeps the default 50-note-per-run sizing.
     public static let keystoneKeySource = "keystone"
 
-    /// The `keySource` marking an account a Ledger hardware wallet signs, for a wallet to recognize
-    /// its Ledger accounts. The SDK itself reads nothing from it: a Ledger account keeps the default
-    /// migration run sizing, since no batch signing round bounds its runs.
+    /// The `keySource` marking an account a Ledger hardware wallet signs, compared
+    /// case-insensitively. A Ledger-tagged account's proposals carry at most one change output,
+    /// because the Ledger Zcash app signs only one; its migration runs keep the default sizing,
+    /// since no batch signing round bounds them.
     public static let ledgerKeySource = "ledger"
 }
 
