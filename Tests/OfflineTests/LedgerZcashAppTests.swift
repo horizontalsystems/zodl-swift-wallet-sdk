@@ -194,7 +194,7 @@ final class LedgerZcashAppTests: XCTestCase {
         let originalReceived = await original.received
         XCTAssertEqual(originalReceived[1], openZcashAPDU)
         let originalCloseCount = await original.closeCount
-        XCTAssertGreaterThan(originalCloseCount, 0, "the replaced transport is closed")
+        XCTAssertEqual(originalCloseCount, 1, "the dropped transport is closed once")
         let afterSwitchCloseCount = await afterSwitch.closeCount
         XCTAssertEqual(afterSwitchCloseCount, 0)
         let afterSwitchReceived = await afterSwitch.received
@@ -212,7 +212,7 @@ final class LedgerZcashAppTests: XCTestCase {
 
         XCTAssertTrue(isSame(result, afterSwitch))
         let originalCloseCount = await original.closeCount
-        XCTAssertGreaterThan(originalCloseCount, 0)
+        XCTAssertEqual(originalCloseCount, 1)
     }
 
     func testDecliningToOpenTheAppIsRestartable() async throws {
@@ -312,9 +312,42 @@ final class LedgerZcashAppTests: XCTestCase {
         }
 
         let originalCloseCount = await original.closeCount
-        XCTAssertGreaterThan(originalCloseCount, 0)
+        XCTAssertEqual(originalCloseCount, 1)
         let replacementCloseCount = await replacement.closeCount
-        XCTAssertGreaterThan(replacementCloseCount, 0)
+        XCTAssertEqual(replacementCloseCount, 1)
+    }
+
+    func testADroppedReplacementIsClosedOnceWhenTheSwitchTimesOut() async throws {
+        let original = ScriptedLedgerTransport { _, history in
+            if history.count == 1 { throw ZcashError.ledgerBluetoothDisconnected }
+            return dashboardReply
+        }
+        let dropped = ScriptedLedgerTransport { _, history in
+            if history.count == 1 { throw ZcashError.ledgerBluetoothDisconnected }
+            return dashboardReply
+        }
+        let replacement = ScriptedLedgerTransport { _, _ in dashboardReply }
+        let transports = [dropped, replacement]
+        let reconnects = CallCounter()
+
+        do {
+            _ = try await launcher.ensureZcashAppOpen(transport: original) {
+                let count = await reconnects.increment()
+                return transports[count - 1]
+            }
+            XCTFail("A switch that never reaches the Zcash app must time out")
+        } catch let error as ZcashError {
+            guard case .ledgerWrongApp = error else {
+                return XCTFail("Unexpected error \(error.code)")
+            }
+        }
+
+        let originalCloseCount = await original.closeCount
+        XCTAssertEqual(originalCloseCount, 1)
+        let droppedCloseCount = await dropped.closeCount
+        XCTAssertEqual(droppedCloseCount, 1, "the first replacement, dropped in turn, is not closed again")
+        let replacementCloseCount = await replacement.closeCount
+        XCTAssertEqual(replacementCloseCount, 1)
     }
 
     func testAFatalReconnectFailurePropagates() async throws {
@@ -351,7 +384,7 @@ final class LedgerZcashAppTests: XCTestCase {
         let reconnectCount = await reconnects.count
         XCTAssertEqual(reconnectCount, 1)
         let stalledCloseCount = await stalled.closeCount
-        XCTAssertGreaterThan(stalledCloseCount, 0, "the stalled transport is closed")
+        XCTAssertEqual(stalledCloseCount, 1, "the stalled transport is closed")
         let freshReceived = await fresh.received
         XCTAssertEqual(freshReceived, [getAppAPDU])
     }
@@ -378,7 +411,7 @@ final class LedgerZcashAppTests: XCTestCase {
         let stalledAgainReceived = await stalledAgain.received
         XCTAssertEqual(stalledAgainReceived.count, 1)
         let stalledAgainCloseCount = await stalledAgain.closeCount
-        XCTAssertGreaterThan(stalledAgainCloseCount, 0, "the fresh transport is closed when the call fails")
+        XCTAssertEqual(stalledAgainCloseCount, 1, "the fresh transport is closed when the call fails")
     }
 
     func testALockedDeviceIsNotRetriedOnAFreshConnection() async throws {

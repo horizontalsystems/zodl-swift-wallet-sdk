@@ -41,9 +41,9 @@ public enum LedgerZcashApp {
     /// Bluetooth link may drop while the device switches apps; a dropped link is then replaced with a
     /// transport from `reconnect`, and the transport returned may be one of those.
     ///
-    /// A transport this replaces is closed, whatever happens. The caller closes the one returned, and
-    /// `transport` if the call fails; a transport opened through `reconnect` is closed here when the
-    /// call fails.
+    /// A transport whose link fails during the call is closed when it fails, before it is replaced.
+    /// The caller closes the one returned, and `transport` if the call fails; a transport opened
+    /// through `reconnect` is closed here when the call fails.
     ///
     /// - Parameters:
     ///   - transport: A transport connected to the device.
@@ -213,7 +213,8 @@ private final class AppSwitch {
         }
     }
 
-    /// Replaces the dropped transport with a new one; `false` if the device cannot be reached yet.
+    /// Replaces the dropped transport, which `markUnusable()` already closed, with a new one; `false`
+    /// if the device cannot be reached yet.
     private func replace() async throws -> Bool {
         let replacement: any LedgerAPDUTransport
         do {
@@ -223,7 +224,6 @@ private final class AppSwitch {
             return false
         }
 
-        await closeQuietly(current)
         current = replacement
         didReplaceTransport = true
         usable = true
@@ -245,8 +245,10 @@ private final class AppSwitch {
         await closeQuietly(current)
     }
 
+    /// Closes a transport opened through `reconnect` that is still open; one that failed was closed
+    /// then.
     func closeReplacement() async {
-        guard didReplaceTransport else { return }
+        guard didReplaceTransport, usable else { return }
         await closeQuietly(current)
     }
 }
