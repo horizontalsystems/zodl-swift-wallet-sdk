@@ -76,6 +76,28 @@ read once, before the export: the Zcash app leaves a status screen up after the 
 the next command until the user dismisses it, and a transport speaks to exactly one peripheral,
 so the device that answered the probe is the device that exported the key.
 
+The app-version and identity reads before the export answer at once on a healthy link, so each gets
+`readTimeout` (`LedgerDevice.defaultReadTimeout`, the engine's normal timeout, by default; pass
+`LedgerDevice.defaultPairingReadTimeout`, 10 s, to detect a stalled device early) rather than waiting
+on the user. Pass `reconnect`, a function
+that opens a fresh connection to the same device, and a read that fails on the connection (a timeout,
+a disconnect, a connection failure, or the device not being found) is asked once more over a new
+transport before anything else is sent; a second such failure propagates, and so does a refusal.
+Nothing is retried once the export command has been sent.
+
+```swift
+let pairing = try await device.pairAccount(
+    zip32AccountIndex: Zip32AccountIndex(0),
+    readTimeout: LedgerDevice.defaultPairingReadTimeout,
+    reconnect: { try await scanner.connect(to: bluetoothDevice) }
+)
+// device.transport is the reconnected transport when pairAccount reconnected; close it once done.
+```
+
+The app owns every transport, the reconnected ones included: `device.transport` is the one the
+device talks over now, and the app closes each transport it opened (closing is idempotent; the SDK
+has already closed any whose exchange failed).
+
 Pass `nil` for the seed fingerprint and the ZIP 32 account index: a Ledger never reveals its seed
 fingerprint, and the binding carries the account index the signing session needs.
 `Account.ledgerKeySource` (`"ledger"`) lets the wallet recognize its Ledger accounts; the SDK reads

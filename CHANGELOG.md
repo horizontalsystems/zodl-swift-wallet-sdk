@@ -24,16 +24,24 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `LedgerAPDUTransport`, the protocol the pairing and signing code depends on
   (`exchange(_:timeout:)`, `close()`), for custom transports and test doubles.
 - `LedgerDevice(transport:networkType:)`: `appVersion()` (a `LedgerAppVersion`),
-  `deviceIdentity()` (a `LedgerDeviceIdentity`), `pairAccount(zip32AccountIndex:)` (a
-  `LedgerAccountPairing` carrying the account's `UnifiedFullViewingKey`, the
-  `LedgerAccountBinding` to store with the imported account, and the app version) and
-  `displayUnifiedAddress(zip32AccountIndex:transparentAddressIndex:)`. `pairAccount` asks the user
-  to approve the export on the device, refuses an app that cannot sign, and reads the device's
-  identity once, before the export (the Zcash app leaves a status screen up after the export and
-  drops the next command, so a second probe never gets its reply). The address
-  the device displays and returns holds only the account's Orchard receiver at diversifier index 0,
-  whatever the transparent address index: compare it with a unified address holding that receiver,
-  not with the account's default unified address.
+  `deviceIdentity()` (a `LedgerDeviceIdentity`),
+  `pairAccount(zip32AccountIndex:readTimeout:reconnect:)` (a `LedgerAccountPairing` carrying the
+  account's `UnifiedFullViewingKey`, the `LedgerAccountBinding` to store with the imported account,
+  and the app version) and `displayUnifiedAddress(zip32AccountIndex:transparentAddressIndex:)`.
+  `pairAccount` asks the user to approve the export on the device, refuses an app that cannot sign,
+  and reads the device's identity once, before the export (the Zcash app leaves a status screen up
+  after the export and drops the next command, so a second probe never gets its reply). The
+  app-version and identity reads before the export take `readTimeout` (`LedgerDevice.defaultReadTimeout`,
+  the engine's normal timeout, by default; `LedgerDevice.defaultPairingReadTimeout`, 10 seconds,
+  detects a stalled device early).
+  When one of those reads fails on the connection and `reconnect` is given, the failed transport
+  (already closed) is replaced with one from `reconnect` and both reads are asked again from the
+  start; a second such failure, or a refusal, is not retried, and nothing is retried once the export
+  command has been sent. `LedgerDevice.transport` names the transport the device currently talks
+  over; the caller owns every transport, the reconnected ones included, and closes each one it
+  opened. The address the device displays and returns holds only the account's Orchard receiver at
+  diversifier index 0, whatever the transparent address index: compare it with a unified address
+  holding that receiver, not with the account's default unified address.
 - `LedgerDeviceIdentity` is validated on construction (`init(encoding:)`, and when decoded), and
   `LedgerAccountBinding` is `Codable`. The identity names the device's seed on one network; it is
   linkable to the device's first transparent address once that address has spent on chain, so a

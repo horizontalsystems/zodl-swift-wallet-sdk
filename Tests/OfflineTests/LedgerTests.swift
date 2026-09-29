@@ -176,6 +176,13 @@ private extension Data {
     }
 }
 
+private struct UnexpectedReconnect: Error {}
+
+/// A `reconnect` that fails the test if it is ever called.
+private func noReconnect() -> @Sendable () async throws -> any LedgerAPDUTransport {
+    { throw UnexpectedReconnect() }
+}
+
 // MARK: - Pairing
 
 final class LedgerDeviceTests: XCTestCase {
@@ -244,7 +251,7 @@ final class LedgerDeviceTests: XCTestCase {
         let timeouts = await transport.timeouts
         XCTAssertNil(timeouts[2])
         XCTAssertNotNil(timeouts[3])
-        XCTAssertNotNil(timeouts[0])
+        XCTAssertEqual(timeouts[0], ZcashLedgerBackend.defaultTimeout, "readTimeout defaults to the engine's normal timeout")
     }
 
     func testPairAccountProbesTheIdentityOnceBeforeTheExport() async throws {
@@ -342,6 +349,138 @@ final class LedgerDeviceTests: XCTestCase {
 
         let closeCount = await transport.closeCount
         XCTAssertEqual(closeCount, 1)
+    }
+
+    // MARK: Reconnecting before the export
+
+    func testAStalledReadBeforeTheExportIsRetriedOnceOnAFreshConnection() async throws {
+        let ufvk = try testnetUFVK()
+        let stalled = ScriptedLedgerTransport { _, _ in throw ZcashError.ledgerTimeout }
+        let fresh = device(ufvk: ufvk.stringEncoded)
+        let ledger = LedgerDevice(transport: stalled, networkType: .testnet)
+
+        let pairing = try await ledger.pairAccount(zip32AccountIndex: Zip32AccountIndex(0), reconnect: { fresh })
+
+        XCTAssertEqual(pairing.ufvk, ufvk)
+        let stalledInstructions = await stalled.instructions
+        XCTAssertEqual(stalledInstructions, [LedgerReplies.getFirmwareVersion], "nothing else is sent on the stalled transport")
+        let stalledCloseCount = await stalled.closeCount
+        XCTAssertEqual(stalledCloseCount, 1)
+        let freshInstructions = await fresh.instructions
+        let chunkCount = LedgerReplies.viewingKeyChunks(ufvk.stringEncoded).count
+        XCTAssertEqual(
+            freshInstructions,
+            [LedgerReplies.getFirmwareVersion, LedgerReplies.getWalletPublicKey] + Array(repeating: LedgerReplies.getVK, count: chunkCount),
+            "both reads, and the export, run from the start on the fresh transport"
+        )
+        let freshCloseCount = await fresh.closeCount
+        XCTAssertEqual(freshCloseCount, 0, "the caller closes the reconnected transport")
+        let liveTransport = await ledger.transport
+        XCTAssertTrue((liveTransport as AnyObject) === (fresh as AnyObject))
+    }
+
+    func testADisconnectOnTheIdentityReadAsksBothReadsAgain() async throws {
+        let ufvk = try testnetUFVK()
+        let dropped = ScriptedLedgerTransport { apdu, _ in
+            guard apdu[1] == LedgerReplies.getFirmwareVersion else {
+                throw ZcashError.ledgerBluetoothDisconnected
+            }
+            return LedgerReplies.firmwareVersion(3, 9, 3)
+        }
+        let fresh = device(ufvk: ufvk.stringEncoded)
+        let ledger = LedgerDevice(transport: dropped, networkType: .testnet)
+
+        let pairing = try await ledger.pairAccount(zip32AccountIndex: Zip32AccountIndex(0), reconnect: { fresh })
+
+        XCTAssertEqual(pairing.ufvk, ufvk)
+        let droppedInstructions = await dropped.instructions
+        XCTAssertEqual(droppedInstructions, [LedgerReplies.getFirmwareVersion, LedgerReplies.getWalletPublicKey])
+        let droppedCloseCount = await dropped.closeCount
+        XCTAssertEqual(droppedCloseCount, 1)
+        let freshInstructions = await fresh.instructions
+        XCTAssertEqual(freshInstructions.first, LedgerReplies.getFirmwareVersion, "both reads are asked again from the start")
+    }
+
+    func testASecondStallBeforeTheExportFails() async throws {
+        let stalled = ScriptedLedgerTransport { _, _ in throw ZcashError.ledgerTimeout }
+        let stalledAgain = ScriptedLedgerTransport { _, _ in throw ZcashError.ledgerTimeout }
+        let ledger = LedgerDevice(transport: stalled, networkType: .testnet)
+
+        do {
+            _ = try await ledger.pairAccount(zip32AccountIndex: Zip32AccountIndex(0), reconnect: { stalledAgain })
+            XCTFail("A second stall before the export must fail")
+        } catch let error as ZcashError {
+            guard case .ledgerTimeout = error else {
+                return XCTFail("Unexpected error \(error.code)")
+            }
+        }
+
+        let stalledCloseCount = await stalled.closeCount
+        XCTAssertEqual(stalledCloseCount, 1)
+        let stalledAgainCloseCount = await stalledAgain.closeCount
+        XCTAssertEqual(stalledAgainCloseCount, 1)
+        let stalledAgainReceived = await stalledAgain.received
+        XCTAssertEqual(stalledAgainReceived.count, 1, "nothing is sent after the second failure")
+    }
+
+    func testAFailureAfterTheExportCommandIsNotRetried() async throws {
+        let transport = ScriptedLedgerTransport { apdu, _ in
+            switch apdu[1] {
+            case LedgerReplies.getFirmwareVersion:
+                return LedgerReplies.firmwareVersion(3, 9, 3)
+            case LedgerReplies.getWalletPublicKey:
+                return LedgerReplies.walletPublicKey(LedgerReplies.generatorPoint)
+            default:
+                throw ZcashError.ledgerTimeout
+            }
+        }
+        let ledger = LedgerDevice(transport: transport, networkType: .testnet)
+
+        do {
+            _ = try await ledger.pairAccount(zip32AccountIndex: Zip32AccountIndex(0), reconnect: noReconnect())
+            XCTFail("A failure after the export command must fail")
+        } catch let error as ZcashError {
+            guard case .ledgerTimeout = error else {
+                return XCTFail("Unexpected error \(error.code)")
+            }
+        }
+
+        let instructions = await transport.instructions
+        XCTAssertEqual(instructions, [LedgerReplies.getFirmwareVersion, LedgerReplies.getWalletPublicKey, LedgerReplies.getVK])
+        let closeCount = await transport.closeCount
+        XCTAssertEqual(closeCount, 1)
+    }
+
+    func testARefusalBeforeTheExportIsNotRetried() async throws {
+        let transport = ScriptedLedgerTransport { _, _ in LedgerReplies.status(0x6E00) }
+        let ledger = LedgerDevice(transport: transport, networkType: .testnet)
+
+        do {
+            _ = try await ledger.pairAccount(zip32AccountIndex: Zip32AccountIndex(0), reconnect: noReconnect())
+            XCTFail("A refusal before the export must fail")
+        } catch let error as ZcashError {
+            guard case let .ledgerWrongApp(statusWord) = error else {
+                return XCTFail("Unexpected error \(error.code)")
+            }
+            XCTAssertEqual(statusWord, 0x6E00)
+        }
+
+        let closeCount = await transport.closeCount
+        XCTAssertEqual(closeCount, 0, "a device refusal leaves the connection usable")
+    }
+
+    func testTheReadsBeforeTheExportTakeTheCallersDeadline() async throws {
+        let ufvk = try testnetUFVK()
+        let transport = device(ufvk: ufvk.stringEncoded)
+        let ledger = LedgerDevice(transport: transport, networkType: .testnet)
+
+        _ = try await ledger.pairAccount(zip32AccountIndex: Zip32AccountIndex(0), readTimeout: 3)
+
+        let timeouts = await transport.timeouts
+        XCTAssertEqual(timeouts[0], 3)
+        XCTAssertEqual(timeouts[1], 3)
+        XCTAssertNil(timeouts[2], "the export request waits on the user")
+        XCTAssertEqual(timeouts[3], ZcashLedgerBackend.defaultTimeout)
     }
 }
 
