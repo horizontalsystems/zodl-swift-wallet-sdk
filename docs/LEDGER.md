@@ -18,7 +18,10 @@ bytes, and every protocol rule, pre-flight check and parser lives in the engine.
 - The first connection to a device brings up Bluetooth pairing: the system shows a pairing request and
   the device shows a code for the user to confirm. A device that was reset, or unpaired on the phone,
   fails with `ZcashError.ledgerBluetoothPairingRefused`; the user removes it from the system Bluetooth
-  settings and pairs again.
+  settings and pairs again. A device that is merely slow to answer, still bonded but not yet awake,
+  instead times out with `ZcashError.ledgerTimeout`, worth a retry rather than a reason to unpair it:
+  CoreBluetooth has no signal for a pairing request actually in progress, so connecting cannot tell the
+  two apart by anything but a real pairing failure.
 
 ## Connecting
 
