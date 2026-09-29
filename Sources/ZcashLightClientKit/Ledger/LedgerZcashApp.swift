@@ -30,6 +30,10 @@ public enum LedgerZcashApp {
     /// Makes sure the device is running the Zcash app, opening it if needed, and returns the
     /// transport to keep using.
     ///
+    /// The first query waits up to 10 seconds; if it stalls or the link fails, it is asked once more
+    /// on a fresh connection from `reconnect` before anything else is sent. The open command itself is
+    /// never sent twice.
+    ///
     /// If the Zcash app is already open, nothing is sent beyond the query and the transport it was
     /// answered on is returned. Otherwise any other app is closed, the device is asked to open the
     /// Zcash app — it asks the user to confirm, and the reply waits for that without a timeout — and
@@ -86,15 +90,13 @@ final class LedgerAppLauncher {
     }
 
     /// Makes sure the device is running the Zcash app; see `LedgerZcashApp.ensureZcashAppOpen(transport:reconnect:)`.
-    ///
-    /// The first query is a plain query on `transport`: no retry on a fresh connection.
     func ensureZcashAppOpen(
         transport: any LedgerAPDUTransport,
         reconnect: @escaping @Sendable () async throws -> any LedgerAPDUTransport
     ) async throws -> any LedgerAPDUTransport {
         let appSwitch = AppSwitch(original: transport, reconnect: reconnect, launcher: self)
         do {
-            let running = try await currentApp(transport: transport)
+            let running = try await appSwitch.queryOnFreshConnectionOnce()
             if running.isZcash {
                 return appSwitch.current
             }
@@ -137,6 +139,20 @@ private final class AppSwitch {
         self.reconnect = reconnect
         self.launcher = launcher
         self.current = original
+    }
+
+    /// The running app before anything else is sent. A query that stalls past its deadline or loses
+    /// the link is asked once more on a fresh connection from `reconnect`; a second failure, and any
+    /// answer from the device, is final.
+    func queryOnFreshConnectionOnce() async throws -> LedgerRunningApp {
+        if let running = try await queryAllowingDisconnect() {
+            return running
+        }
+
+        current = try await reconnect()
+        didReplaceTransport = true
+        usable = true
+        return try await launcher.currentApp(transport: current)
     }
 
     func closeRunningApp() async throws {

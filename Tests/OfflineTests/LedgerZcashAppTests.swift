@@ -334,4 +334,63 @@ final class LedgerZcashAppTests: XCTestCase {
             }
         }
     }
+
+    // MARK: First-query retry
+
+    func testAStalledFirstQueryIsAskedOnceMoreOnAFreshConnection() async throws {
+        let stalled = ScriptedLedgerTransport { _, _ in throw ZcashError.ledgerTimeout }
+        let fresh = scripted([zcashReply])
+        let reconnects = CallCounter()
+
+        let result = try await launcher.ensureZcashAppOpen(transport: stalled) {
+            await reconnects.increment()
+            return fresh
+        }
+
+        XCTAssertTrue(isSame(result, fresh))
+        let reconnectCount = await reconnects.count
+        XCTAssertEqual(reconnectCount, 1)
+        let stalledCloseCount = await stalled.closeCount
+        XCTAssertGreaterThan(stalledCloseCount, 0, "the stalled transport is closed")
+        let freshReceived = await fresh.received
+        XCTAssertEqual(freshReceived, [getAppAPDU])
+    }
+
+    func testAFirstQueryThatStallsTwiceFailsWithoutSendingAnythingElse() async throws {
+        let stalled = ScriptedLedgerTransport { _, _ in throw ZcashError.ledgerTimeout }
+        let stalledAgain = ScriptedLedgerTransport { _, _ in throw ZcashError.ledgerTimeout }
+        let reconnects = CallCounter()
+
+        do {
+            _ = try await launcher.ensureZcashAppOpen(transport: stalled) {
+                await reconnects.increment()
+                return stalledAgain
+            }
+            XCTFail("A first query that stalls twice must fail")
+        } catch let error as ZcashError {
+            guard case .ledgerTimeout = error else {
+                return XCTFail("Unexpected error \(error.code)")
+            }
+        }
+
+        let reconnectCount = await reconnects.count
+        XCTAssertEqual(reconnectCount, 1)
+        let stalledAgainReceived = await stalledAgain.received
+        XCTAssertEqual(stalledAgainReceived.count, 1)
+        let stalledAgainCloseCount = await stalledAgain.closeCount
+        XCTAssertGreaterThan(stalledAgainCloseCount, 0, "the fresh transport is closed when the call fails")
+    }
+
+    func testALockedDeviceIsNotRetriedOnAFreshConnection() async throws {
+        let locked = scripted([LedgerReplies.status(0x5515)])
+
+        do {
+            _ = try await launcher.ensureZcashAppOpen(transport: locked, reconnect: noReconnect())
+            XCTFail("A locked device must fail without a retry")
+        } catch let error as ZcashError {
+            guard case .ledgerDeviceRefused = error else {
+                return XCTFail("Unexpected error \(error.code)")
+            }
+        }
+    }
 }

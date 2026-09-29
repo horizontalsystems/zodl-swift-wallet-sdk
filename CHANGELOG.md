@@ -62,7 +62,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its dashboard, as it is after a first Bluetooth pairing, or in another app, which it closes first
   — once the user confirms on the device, and returns the transport to keep using: the Bluetooth
   link may drop while the device switches apps, and a dropped link is replaced through `reconnect`.
-  It waits up to 10 seconds for the Zcash app after the user's confirmation.
+  It waits up to 10 seconds for the Zcash app after the user's confirmation. The first app query
+  waits up to 10 seconds; if it stalls or the link fails, it is asked once more on a fresh
+  connection before anything else is sent, and the open command is never sent twice.
 - `ZcashError.ledgerAppNotInstalled`, when the device has no Zcash app to open, and
   `ZcashError.ledgerAppOpenRejected` (restartable), when the user declines opening it on the
   device. A device that does not reach the Zcash app in time fails with `ledgerWrongApp`.
