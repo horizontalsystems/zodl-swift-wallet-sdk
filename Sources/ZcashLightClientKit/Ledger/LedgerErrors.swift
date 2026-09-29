@@ -5,6 +5,11 @@
 
 import Foundation
 
+/// The status word the device answers from its dashboard, with no app open.
+private let swDeviceDashboard: UInt16 = 0x6E01
+/// The status word the device answers while another app is open.
+private let swAnotherAppOpen: UInt16 = 0x6511
+
 extension LedgerFFIError {
     /// The public error for this failure.
     ///
@@ -25,6 +30,12 @@ extension LedgerFFIError {
         case .derivationBudgetExhausted:
             return .ledgerDerivationBudgetExhausted
         case .deviceRefused:
+            // The engine reports a refusal from the dashboard or from another running app as a plain,
+            // unclassified refusal; both mean the Zcash app is not running, so they are `ledgerWrongApp`
+            // like any other unrecognized command, not a device condition.
+            if statusWord == swDeviceDashboard || statusWord == swAnotherAppOpen {
+                return .ledgerWrongApp(statusWord ?? 0)
+            }
             return .ledgerDeviceRefused(statusWord ?? 0, isTransient)
         case .cmdNotAccepted:
             return .ledgerDeviceRefused(statusWord ?? 0x6901, true)
@@ -57,22 +68,24 @@ extension ZcashError {
     /// Whether a fresh attempt at the same Ledger operation could succeed, or `nil` for an error that
     /// did not come from the Ledger integration.
     ///
-    /// `true` after the user declined on the device (they may approve on a second attempt) and after a
-    /// device refusal whose condition can clear, such as a locked device. `false` for every failure
-    /// that is a function of the transaction or the device, where a retry fails the same way. A
-    /// transport failure is `true`: the connection is closed, and a new one may succeed. It never means
-    /// "resend the last command": a fresh attempt starts over.
+    /// `true` after the user declined on the device (they may approve on a second attempt), after the
+    /// device is not running the Zcash app or has exhausted its derivation budget (opening or
+    /// reopening the app on the device lets a fresh attempt succeed), and after a device refusal whose
+    /// condition can clear, such as a locked device. `false` for every failure that is a function of
+    /// the transaction or the device, where a retry fails the same way. A transport failure is `true`:
+    /// the connection is closed, and a new one may succeed. It never means "resend the last command": a
+    /// fresh attempt starts over.
     public var ledgerIsRestartable: Bool? {
         switch self {
-        case .ledgerUserRejected, .ledgerAppOpenRejected:
+        case .ledgerUserRejected, .ledgerAppOpenRejected, .ledgerWrongApp, .ledgerDerivationBudgetExhausted:
             return true
         case let .ledgerDeviceRefused(_, isTransient):
             return isTransient
         case .ledgerBluetoothDisconnected, .ledgerTimeout, .ledgerTransportClosed, .ledgerTransportFailed,
             .ledgerBluetoothConnectionFailed, .ledgerDeviceNotFound, .ledgerBluetoothPoweredOff:
             return true
-        case .ledgerWrongApp, .ledgerAppTooOld, .ledgerDeviceMismatch, .ledgerCapsMismatch,
-            .ledgerDerivationBudgetExhausted, .ledgerTransactionNotSignable, .ledgerMalformedReply,
+        case .ledgerAppTooOld, .ledgerDeviceMismatch, .ledgerCapsMismatch,
+            .ledgerTransactionNotSignable, .ledgerMalformedReply,
             .ledgerInvalidInput, .ledgerInternal, .ledgerBluetoothUnsupported, .ledgerBluetoothUnauthorized,
             .ledgerBluetoothPairingRefused, .ledgerAppNotInstalled:
             return false

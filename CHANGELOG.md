@@ -67,7 +67,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection before anything else is sent, and the open command is never sent twice.
 - `ZcashError.ledgerAppNotInstalled`, when the device has no Zcash app to open, and
   `ZcashError.ledgerAppOpenRejected` (restartable), when the user declines opening it on the
-  device. A device that does not reach the Zcash app in time fails with `ledgerWrongApp`.
+  device. A device that does not reach the Zcash app in time, that reports its dashboard or another
+  running app, or that reports any other unrecognized command, fails with `ledgerWrongApp`; opening
+  or reopening the Zcash app on the device lets a fresh attempt succeed, so it and
+  `ledgerDerivationBudgetExhausted` are always `ledgerIsRestartable`.
 
 # 5.1.0 - 2026-10-07
 

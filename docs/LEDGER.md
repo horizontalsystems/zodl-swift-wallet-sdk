@@ -159,16 +159,18 @@ into up to four outputs of at least 0.1 ZEC each, unchanged.
 
 Every Ledger failure is a `ZcashError` from the `ledger` family (`ZLEDG0001`–`ZLEDG0023`), or
 `CancellationError`. `ZcashError.ledgerIsRestartable` says whether a fresh attempt could succeed:
-after the user declined, after a device condition that clears (a locked device), and after a
-transport failure on a new connection. It never means "resend the last command".
+after the user declined, after the device is not running the Zcash app or has exhausted its
+derivation budget (opening or reopening it lets a fresh attempt succeed), after a device condition
+that clears (a locked device), and after a transport failure on a new connection. It never means
+"resend the last command".
 
 | Error | Meaning and remedy |
 |---|---|
-| `ledgerWrongApp` | Another app, or the dashboard, is open, or it did not switch in time: call `LedgerZcashApp.ensureZcashAppOpen`. |
+| `ledgerWrongApp` | The dashboard, or another app, is open (also when the device reports either directly rather than as a plain refusal), or the device did not switch in time: call `LedgerZcashApp.ensureZcashAppOpen`. Restartable. |
 | `ledgerAppNotInstalled` | The Zcash app is not installed: the user installs it on the device with Ledger Live. |
 | `ledgerAppOpenRejected` | The user declined opening the Zcash app on the device; restartable. |
 | `ledgerAppTooOld` | Update the Zcash app. |
-| `ledgerDerivationBudgetExhausted` | The Zcash app ran out of key derivations for this run: close and reopen it on the device. |
+| `ledgerDerivationBudgetExhausted` | The Zcash app ran out of key derivations for this run: close and reopen it on the device. Restartable. |
 | `ledgerDeviceMismatch` | Connect the paired device. |
 | `ledgerCapsMismatch` | The app version changed during the ceremony: try again. |
 | `ledgerDeviceRefused(statusWord, isTransient)` | Any other refusal; `isTransient` for a condition that clears, such as a locked device. |

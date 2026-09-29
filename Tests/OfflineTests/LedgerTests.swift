@@ -345,6 +345,52 @@ final class LedgerDeviceTests: XCTestCase {
     }
 }
 
+// MARK: - Error mapping
+
+final class LedgerErrorMappingTests: XCTestCase {
+    private func deviceRefusal(_ statusWord: UInt16) -> LedgerFFIError {
+        LedgerFFIError(kind: .deviceRefused, statusWord: statusWord, isTransient: false, isRestartable: false, reason: "")
+    }
+
+    func testARefusalFromTheDashboardOrAnotherAppIsAWrongApp() {
+        for statusWord: UInt16 in [0x6E01, 0x6511] {
+            let error = deviceRefusal(statusWord).zcashError
+            guard case let .ledgerWrongApp(mappedStatusWord) = error else {
+                return XCTFail("Unexpected error \(error.code) for status word \(statusWord)")
+            }
+            XCTAssertEqual(mappedStatusWord, statusWord)
+            XCTAssertEqual(error.ledgerIsRestartable, true)
+        }
+    }
+
+    func testAnUnknownCommandOrClassKeepsTheEngineVerdict() {
+        for statusWord: UInt16 in [0x6E00, 0x6D00] {
+            let error = LedgerFFIError(kind: .wrongApp, statusWord: statusWord, isTransient: false, isRestartable: false, reason: "")
+                .zcashError
+            guard case let .ledgerWrongApp(mappedStatusWord) = error else {
+                return XCTFail("Unexpected error \(error.code) for status word \(statusWord)")
+            }
+            XCTAssertEqual(mappedStatusWord, statusWord)
+        }
+
+        let refused = deviceRefusal(0x6985).zcashError
+        guard case let .ledgerDeviceRefused(statusWord, _) = refused else {
+            return XCTFail("Unexpected error \(refused.code)")
+        }
+        XCTAssertEqual(statusWord, 0x6985)
+    }
+
+    func testAWrongAppAndAnExhaustedDerivationBudgetAreRestartable() {
+        let wrongApp = LedgerFFIError(kind: .wrongApp, statusWord: nil, isTransient: false, isRestartable: false, reason: "")
+            .zcashError
+        XCTAssertEqual(wrongApp.ledgerIsRestartable, true)
+
+        let budgetExhausted = LedgerFFIError(kind: .derivationBudgetExhausted, statusWord: nil, isTransient: false, isRestartable: false, reason: "")
+            .zcashError
+        XCTAssertEqual(budgetExhausted.ledgerIsRestartable, true)
+    }
+}
+
 // MARK: - Values
 
 final class LedgerValueTests: XCTestCase {
