@@ -42,6 +42,12 @@ command could otherwise be read as the reply to the next one. Every later call t
 `ZcashError.ledgerTransportClosed`, and the recovery is a new connection. A refusal from the device
 (the user declining, a locked device, another app open) leaves the transport open.
 
+After a first pairing the device is on its dashboard rather than the Zcash app, and any command then
+fails with `ledgerWrongApp`. Before creating a `LedgerDevice` or signing, call
+`LedgerZcashApp.ensureZcashAppOpen(transport:reconnect:)` on a fresh connection and use the transport
+it returns instead of the one passed in: the Bluetooth link can drop while the device switches apps,
+and `ensureZcashAppOpen` reconnects through `reconnect` when it does.
+
 ## Pairing an account
 
 ```swift
@@ -151,14 +157,16 @@ into up to four outputs of at least 0.1 ZEC each, unchanged.
 
 ## Errors
 
-Every Ledger failure is a `ZcashError` from the `ledger` family (`ZLEDG0001`–`ZLEDG0021`), or
+Every Ledger failure is a `ZcashError` from the `ledger` family (`ZLEDG0001`–`ZLEDG0023`), or
 `CancellationError`. `ZcashError.ledgerIsRestartable` says whether a fresh attempt could succeed:
 after the user declined, after a device condition that clears (a locked device), and after a
 transport failure on a new connection. It never means "resend the last command".
 
 | Error | Meaning and remedy |
 |---|---|
-| `ledgerWrongApp` | Another app, or the dashboard, is open: open the Zcash app. |
+| `ledgerWrongApp` | Another app, or the dashboard, is open, or it did not switch in time: call `LedgerZcashApp.ensureZcashAppOpen`. |
+| `ledgerAppNotInstalled` | The Zcash app is not installed: the user installs it on the device with Ledger Live. |
+| `ledgerAppOpenRejected` | The user declined opening the Zcash app on the device; restartable. |
 | `ledgerAppTooOld` | Update the Zcash app. |
 | `ledgerDerivationBudgetExhausted` | The Zcash app ran out of key derivations for this run: close and reopen it on the device. |
 | `ledgerDeviceMismatch` | Connect the paired device. |

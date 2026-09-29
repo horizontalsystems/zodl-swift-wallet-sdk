@@ -1271,4 +1271,12 @@ enum ZcashErrorDefinition {
     /// - `error` is the error the transport threw. The transport has been closed.
     // sourcery: code="ZLEDG0021"
     case ledgerTransportFailed(_ error: Error)
+    /// The Zcash app is not installed on the Ledger.
+    /// The user has to install it on the device, with Ledger Live, first.
+    // sourcery: code="ZLEDG0022"
+    case ledgerAppNotInstalled
+    /// The user declined opening the Zcash app.
+    /// A fresh attempt may succeed if the user approves it.
+    // sourcery: code="ZLEDG0023"
+    case ledgerAppOpenRejected
 }

@@ -50,12 +50,22 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `proposeTransfer`, `proposefulfillingPaymentURI` and `proposeShielding` read it to keep a
   Ledger-tagged account's proposals to at most one change output, matching the Ledger Zcash app's
   one-change-output limit; migration run sizing is unaffected and stays the default.
-- New `ZcashError` cases `ZLEDG0001`–`ZLEDG0021`, one per Ledger failure the wallet handles
+- New `ZcashError` cases `ZLEDG0001`–`ZLEDG0023`, one per Ledger failure the wallet handles
   differently (user rejection, wrong app, app too old, device mismatch, derivation budget spent,
   device refusal with its status word, transaction not signable, and the Bluetooth failures), and
   `ZcashError.ledgerIsRestartable`, which says whether a fresh attempt could succeed. No error
   reason carries command or reply bytes, a PCZT, a viewing key, an address, a device identity or a
   signature.
+- `LedgerZcashApp`, which drives the device's dashboard commands. `currentApp(transport:)` returns
+  the `LedgerRunningApp` (`name`, `version`, `isDashboard`, `isZcash`) the device is running.
+  `ensureZcashAppOpen(transport:reconnect:)` opens the Zcash app when the device is elsewhere — on
+  its dashboard, as it is after a first Bluetooth pairing, or in another app, which it closes first
+  — once the user confirms on the device, and returns the transport to keep using: the Bluetooth
+  link may drop while the device switches apps, and a dropped link is replaced through `reconnect`.
+  It waits up to 10 seconds for the Zcash app after the user's confirmation.
+- `ZcashError.ledgerAppNotInstalled`, when the device has no Zcash app to open, and
+  `ZcashError.ledgerAppOpenRejected` (restartable), when the user declines opening it on the
+  device. A device that does not reach the Zcash app in time fails with `ledgerWrongApp`.
 
 # 5.1.0 - 2026-10-07
 

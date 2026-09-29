@@ -1158,6 +1158,14 @@ public enum ZcashError: Equatable, Error {
     /// - `error` is the error the transport threw. The transport has been closed.
     /// ZLEDG0021
     case ledgerTransportFailed(_ error: Error)
+    /// The Zcash app is not installed on the Ledger.
+    /// The user has to install it on the device, with Ledger Live, first.
+    /// ZLEDG0022
+    case ledgerAppNotInstalled
+    /// The user declined opening the Zcash app.
+    /// A fresh attempt may succeed if the user approves it.
+    /// ZLEDG0023
+    case ledgerAppOpenRejected
 
     public var message: String {
         switch self {
@@ -1477,6 +1485,8 @@ public enum ZcashError: Equatable, Error {
         case .ledgerTimeout: return "The Ledger device did not reply in time. The connection is closed."
         case .ledgerTransportClosed: return "The connection to the Ledger device is closed or no longer usable. Open a new connection."
         case .ledgerTransportFailed: return "The Ledger transport failed."
+        case .ledgerAppNotInstalled: return "The Zcash app is not installed on the Ledger."
+        case .ledgerAppOpenRejected: return "The user declined opening the Zcash app."
         }
     }
 
@@ -1815,6 +1825,8 @@ public enum ZcashError: Equatable, Error {
         case .ledgerTimeout: return .ledgerTimeout
         case .ledgerTransportClosed: return .ledgerTransportClosed
         case .ledgerTransportFailed: return .ledgerTransportFailed
+        case .ledgerAppNotInstalled: return .ledgerAppNotInstalled
+        case .ledgerAppOpenRejected: return .ledgerAppOpenRejected
         }
     }
 

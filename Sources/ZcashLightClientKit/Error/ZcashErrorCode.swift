@@ -641,4 +641,8 @@ public enum ZcashErrorCode: String {
     case ledgerTransportClosed = "ZLEDG0020"
     /// The Ledger transport failed.
     case ledgerTransportFailed = "ZLEDG0021"
+    /// The Zcash app is not installed on the Ledger.
+    case ledgerAppNotInstalled = "ZLEDG0022"
+    /// The user declined opening the Zcash app.
+    case ledgerAppOpenRejected = "ZLEDG0023"
 }

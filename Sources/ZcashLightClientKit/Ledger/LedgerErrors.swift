@@ -64,7 +64,7 @@ extension ZcashError {
     /// "resend the last command": a fresh attempt starts over.
     public var ledgerIsRestartable: Bool? {
         switch self {
-        case .ledgerUserRejected:
+        case .ledgerUserRejected, .ledgerAppOpenRejected:
             return true
         case let .ledgerDeviceRefused(_, isTransient):
             return isTransient
@@ -74,7 +74,7 @@ extension ZcashError {
         case .ledgerWrongApp, .ledgerAppTooOld, .ledgerDeviceMismatch, .ledgerCapsMismatch,
             .ledgerDerivationBudgetExhausted, .ledgerTransactionNotSignable, .ledgerMalformedReply,
             .ledgerInvalidInput, .ledgerInternal, .ledgerBluetoothUnsupported, .ledgerBluetoothUnauthorized,
-            .ledgerBluetoothPairingRefused:
+            .ledgerBluetoothPairingRefused, .ledgerAppNotInstalled:
             return false
         default:
             return nil
