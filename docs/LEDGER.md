@@ -49,11 +49,22 @@ After a first pairing the device is on its dashboard rather than the Zcash app, 
 fails with `ledgerWrongApp`. Before creating a `LedgerDevice` or signing, call
 `LedgerZcashApp.ensureZcashAppOpen(transport:reconnect:)` on a fresh connection and use the transport
 it returns instead of the one passed in: the Bluetooth link can drop while the device switches apps,
-and `ensureZcashAppOpen` reconnects through `reconnect` when it does. Each such reconnect gets
-10 seconds of its own and is cancelled past them; a reconnect that fails starts the wait for the app
-over, since the device may still be rebooting into it, and the third one that fails propagates its
-own failure (typically `ledgerBluetoothConnectionFailed`) instead of the generic `ledgerWrongApp`
-timeout.
+and `ensureZcashAppOpen` reconnects through `reconnect` when it does. The same holds for a
+`LedgerDevice` that already exists: it keeps talking over its own `device.transport`, which
+`ensureZcashAppOpen` cannot reach, so build a new `LedgerDevice` over the transport it returns rather
+than keep using one built over the original. The device has 10 seconds to
+reach the Zcash app after the user confirms, polled every 200 ms with up to 3 seconds for each
+answer; a poll that loses the link or gets no answer is always followed by a reconnect before those
+10 seconds can end the wait, and the time a reconnect that succeeds takes does not count towards
+them. Each such reconnect gets 10 seconds of its own, enforced for a `reconnect` that honors
+cancellation; one that ignores it is waited for, and any transport it then produces is closed
+rather than used. A reconnect that fails starts the wait for
+the app over, since the device may still be
+rebooting into it, and is tried again after 500 milliseconds, then after twice the previous wait, at
+most 2 seconds. It keeps trying for 10 seconds from the first of the reconnects that failed in a row,
+and the first one that fails once they have passed propagates its own failure (typically
+`ledgerBluetoothConnectionFailed`) instead of the generic `ledgerWrongApp` timeout; a reconnect that
+succeeds ends the row, so a later failure starts again from 500 milliseconds.
 
 ## Pairing an account
 

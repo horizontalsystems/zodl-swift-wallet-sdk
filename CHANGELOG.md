@@ -70,12 +70,21 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its dashboard, as it is after a first Bluetooth pairing, or in another app, which it closes first
   — once the user confirms on the device, and returns the transport to keep using: the Bluetooth
   link may drop while the device switches apps, and a dropped link is replaced through `reconnect`.
-  It waits up to 10 seconds for the Zcash app after the user's confirmation. Each reconnect during
-  that wait has 10 seconds of its own and is cancelled past them; a failed one restarts the
-  10-second wait, since the device may still be rebooting into the app, and the third one that fails
-  propagates its own failure instead of the generic timeout. The first app query waits up to
-  10 seconds; if it stalls or the link fails, it is asked once more on a fresh connection before
-  anything else is sent, and the open command is never sent twice.
+  It waits up to 10 seconds for the Zcash app after the user's confirmation, each poll waiting up
+  to 3 seconds for its answer; a poll that loses the link or gets no answer is always followed by
+  a reconnect before those 10 seconds can end the wait, and the time a reconnect that succeeds
+  takes does not count towards them. Each reconnect during that wait has 10 seconds of its own,
+  enforced for a `reconnect` that honors cancellation; one that ignores it is waited for, and any
+  transport it then produces is closed rather than used. A
+  failed one restarts the 10-second wait, since
+  the device may still be rebooting into the app, and is tried again after 500 milliseconds, then
+  after twice the previous wait, at most 2 seconds. It keeps trying for 10 seconds from the first
+  of the reconnects that failed in a row, and the first one that fails once they have passed
+  propagates its own failure instead of the generic timeout; a reconnect that succeeds ends the
+  row, so a later failure starts again from 500 milliseconds. The first app query waits up to
+  10 seconds; if it stalls or the link fails, it is asked once more on a fresh connection, which
+  `reconnect` has 10 seconds to open, before anything else is sent, and the open command is never
+  sent twice.
 - `ZcashError.ledgerAppNotInstalled`, when the device has no Zcash app to open, and
   `ZcashError.ledgerAppOpenRejected` (restartable), when the user declines opening it on the
   device. A device that does not reach the Zcash app in time, that reports its dashboard or another

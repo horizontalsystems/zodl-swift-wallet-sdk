@@ -15,9 +15,14 @@ import Foundation
 /// Nothing handled here is logged: not the commands, not the replies, not the app names.
 public enum LedgerZcashApp {
     private static let queryTimeout: TimeInterval = 10
+    private static let pollTimeout: TimeInterval = 3
     private static let pollInterval: TimeInterval = 0.2
     private static let appTransitionTimeout: TimeInterval = 10
     private static let switchReconnectTimeout: TimeInterval = 10
+    private static let switchReconnectWindow: TimeInterval = 10
+    private static let switchReconnectFirstBackoff: TimeInterval = 0.5
+    private static let switchReconnectMaxBackoff: TimeInterval = 2
+    private static let switchOverallTimeout: TimeInterval = 60
 
     /// Reads which app the device is running. Works on the dashboard and in any app.
     ///
@@ -38,14 +43,23 @@ public enum LedgerZcashApp {
     /// If the Zcash app is already open, nothing is sent beyond the query and the transport it was
     /// answered on is returned. Otherwise any other app is closed, the device is asked to open the
     /// Zcash app — it asks the user to confirm, and the reply waits for that without a timeout — and
-    /// the device is polled until it reports the Zcash app, for up to 10 seconds after the reply. The
-    /// Bluetooth link may drop while the device switches apps; a dropped link is then replaced with a
-    /// transport from `reconnect`, and the transport returned may be one of those. Each of those
-    /// reconnects gets 10 seconds of its own and is cancelled past them: the phone has already bonded
-    /// with the device, so none of it waits on Bluetooth pairing. A reconnect that fails starts the
-    /// 10 seconds of polling over, since the device may still be rebooting into the app; the third one
-    /// that fails while waiting for an app propagates its own failure instead of the generic timeout.
-    /// The reconnect after a failed first query is not bounded this way.
+    /// the device is polled until it reports the Zcash app, for up to 10 seconds after the reply, each
+    /// poll waiting up to 3 seconds for its answer. The time a reconnect that succeeds takes does not
+    /// count towards those 10 seconds. The Bluetooth link may drop while the device switches apps; a
+    /// dropped link is then replaced with a transport from `reconnect`, and the transport returned may
+    /// be one of those. A poll that loses the link or gets no answer is always
+    /// followed by such a reconnect before the 10 seconds can end the wait; once they have passed, a
+    /// link replaced after them gets one more poll. Each of those reconnects gets 10 seconds of its own,
+    /// enforced for a `reconnect` that honors cancellation: past them it is cancelled, and any transport
+    /// it still produces is closed rather than used. One that ignores cancellation is waited for. None
+    /// of it waits on Bluetooth pairing, since the phone has already bonded with the device. A
+    /// reconnect that fails is tried again, since the device may still be
+    /// rebooting into the app: first after 500 milliseconds, then after twice the previous wait, at
+    /// most 2 seconds, and never past 10 seconds from the first of the reconnects that failed in a row.
+    /// The first reconnect that fails once those 10 seconds have passed propagates its own failure; one
+    /// that succeeds ends the row, and the next failure starts over from 500 milliseconds and a new
+    /// 10 seconds. A reconnect that fails also starts the 10 seconds of polling over. The reconnect
+    /// after a failed first query also has 10 seconds, and is not retried.
     ///
     /// A transport whose link fails during the call is closed when it fails, before it is replaced.
     /// The caller closes the one returned, and `transport` if the call fails; a transport opened
@@ -59,9 +73,9 @@ public enum LedgerZcashApp {
     ///   ``ZcashError/ledgerDeviceRefused(_:_:)`` if the device is locked (transient) or refuses a
     ///   command. ``ZcashError/ledgerWrongApp(_:)`` if the device does not reach the Zcash app in
     ///   time, or cannot open it; the user has to open it on the device.
-    ///   ``ZcashError/ledgerBluetoothConnectionFailed(_:)`` if the third reconnect while waiting for an
-    ///   app runs out of its own 10 seconds; another failure from `reconnect` propagates as it is. A
-    ///   ``ZcashError`` for any other failure.
+    ///   ``ZcashError/ledgerBluetoothConnectionFailed(_:)`` if the reconnect after a failed first
+    ///   query, or the last reconnect during the switch, runs out of its own 10 seconds; another
+    ///   failure from `reconnect` propagates as it is. A ``ZcashError`` for any other failure.
     public static func ensureZcashAppOpen(
         transport: any LedgerAPDUTransport,
         reconnect: @escaping @Sendable () async throws -> any LedgerAPDUTransport
@@ -72,31 +86,69 @@ public enum LedgerZcashApp {
     private static func launcher() -> LedgerAppLauncher {
         LedgerAppLauncher(
             queryTimeout: queryTimeout,
+            pollTimeout: pollTimeout,
             pollInterval: pollInterval,
             transitionTimeout: appTransitionTimeout,
-            switchReconnectTimeout: switchReconnectTimeout
+            switchReconnectTimeout: switchReconnectTimeout,
+            switchReconnectWindow: switchReconnectWindow,
+            switchReconnectFirstBackoff: switchReconnectFirstBackoff,
+            switchReconnectMaxBackoff: switchReconnectMaxBackoff,
+            switchOverallTimeout: switchOverallTimeout
         )
     }
 }
 
-/// `LedgerZcashApp`'s orchestration, with its timings as parameters.
+/// `LedgerZcashApp`'s orchestration, with its timings and its clock as parameters.
 final class LedgerAppLauncher {
-    // Not `private`: `AppSwitch` below, a separate sibling type in this same file, reads these three
-    // and calls `transitionDeadline()`.
+    // Not `private`: `AppSwitch` and `SwitchWait` below, separate sibling types in this same file,
+    // read these and call `transitionDeadline()`.
     let queryTimeout: TimeInterval
+    let pollTimeout: TimeInterval
     let pollInterval: TimeInterval
     let switchReconnectTimeout: TimeInterval
+    let switchReconnectWindow: TimeInterval
+    let switchReconnectFirstBackoff: TimeInterval
+    let switchReconnectMaxBackoff: TimeInterval
+    let switchOverallTimeout: TimeInterval
+    let now: @Sendable () -> TimeInterval
+    let sleep: @Sendable (TimeInterval) async throws -> Void
     private let transitionTimeout: TimeInterval
 
-    init(queryTimeout: TimeInterval, pollInterval: TimeInterval, transitionTimeout: TimeInterval, switchReconnectTimeout: TimeInterval) {
+    init(
+        queryTimeout: TimeInterval,
+        pollTimeout: TimeInterval,
+        pollInterval: TimeInterval,
+        transitionTimeout: TimeInterval,
+        switchReconnectTimeout: TimeInterval,
+        switchReconnectWindow: TimeInterval,
+        switchReconnectFirstBackoff: TimeInterval,
+        switchReconnectMaxBackoff: TimeInterval,
+        switchOverallTimeout: TimeInterval,
+        now: @escaping @Sendable () -> TimeInterval = { TimeInterval(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000 },
+        sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { try await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) }
+    ) {
         self.queryTimeout = queryTimeout
+        self.pollTimeout = pollTimeout
         self.pollInterval = pollInterval
         self.transitionTimeout = transitionTimeout
         self.switchReconnectTimeout = switchReconnectTimeout
+        self.switchReconnectWindow = switchReconnectWindow
+        self.switchReconnectFirstBackoff = switchReconnectFirstBackoff
+        self.switchReconnectMaxBackoff = switchReconnectMaxBackoff
+        self.switchOverallTimeout = switchOverallTimeout
+        self.now = now
+        self.sleep = sleep
     }
 
     func currentApp(transport: any LedgerAPDUTransport) async throws -> LedgerRunningApp {
-        let reply = try await transport.exchange(getAppAndVersionAPDU(), timeout: queryTimeout)
+        try await queryApp(transport: transport, timeout: queryTimeout)
+    }
+
+    /// Queries which app is running, with its own timeout: `queryTimeout` for `currentApp(transport:)`
+    /// and the first query in `AppSwitch.queryOnFreshConnectionOnce()`, `pollTimeout` for a poll inside
+    /// `AppSwitch.awaitApp(reached:)`.
+    func queryApp(transport: any LedgerAPDUTransport, timeout: TimeInterval) async throws -> LedgerRunningApp {
+        let reply = try await exchangeWithoutClosing(getAppAndVersionAPDU(), timeout: timeout, on: transport)
         let bytes = [UInt8](reply)
         let statusWord = try dashboardStatusWord(bytes)
         guard statusWord == swOK else {
@@ -130,8 +182,8 @@ final class LedgerAppLauncher {
     }
 
     /// A fresh deadline for a wait of `transitionTimeout`, starting now.
-    func transitionDeadline() -> DispatchTime {
-        DispatchTime.now() + transitionTimeout
+    func transitionDeadline() -> TimeInterval {
+        now() + transitionTimeout
     }
 }
 
@@ -159,14 +211,15 @@ private final class AppSwitch {
     }
 
     /// The running app before anything else is sent. A query that stalls past its deadline or loses
-    /// the link is asked once more on a fresh connection from `reconnect`; a second failure, and any
-    /// answer from the device, is final.
+    /// the link is asked once more on a fresh connection from `reconnect`, which has the same
+    /// `launcher.switchReconnectTimeout` cap as a reconnect during `awaitApp(reached:)`; a second
+    /// failure, and any answer from the device, is final.
     func queryOnFreshConnectionOnce() async throws -> LedgerRunningApp {
-        if let running = try await queryAllowingDisconnect() {
+        if let running = try await queryAllowingDisconnect(timeout: launcher.queryTimeout) {
             return running
         }
 
-        current = try await reconnect()
+        current = try await raceReconnect()
         didReplaceTransport = true
         usable = true
         return try await launcher.currentApp(transport: current)
@@ -195,38 +248,58 @@ private final class AppSwitch {
 
     /// Polls the device, reconnecting when the link is down, until it runs an app `reached` accepts.
     ///
-    /// The wait has `launcher`'s transition timeout from this call, checked after each query, so it
-    /// ends at most one query past it. A reconnect that fails resets that wait from the failure, since
-    /// the device may still be rebooting into the app; the `maxReconnectFailures`-th failed reconnect
-    /// in this call throws its own failure instead of the generic timeout.
+    /// The wait has `launcher`'s transition timeout from this call, not counting the time a
+    /// successful reconnect itself takes, checked after each poll the device answers, so it ends at
+    /// most one poll past it. A poll that loses the link or stalls past `launcher.pollTimeout` is
+    /// always followed by a reconnect instead, however late it ends; once the transition timeout has
+    /// passed, a link replaced after it gets one more poll. A reconnect that fails resets that wait
+    /// from the failure, since the device may still be rebooting into the app, and is retried after a
+    /// backoff that starts at `launcher.switchReconnectFirstBackoff` and doubles up to
+    /// `launcher.switchReconnectMaxBackoff`. Once `launcher.switchReconnectWindow` has passed since
+    /// the wait's first failed reconnect, the next one to fail throws its own failure instead of the
+    /// generic timeout; a reconnect that succeeds ends that run of failures, and the next one starts a
+    /// new window, with the first backoff.
+    ///
+    /// None of that alone is bounded: a link that alternates a stalled or lost poll with a reconnect
+    /// that fails, backs off, and then succeeds never trips the transition deadline or the reconnect
+    /// window, since each success resets both. `launcher.switchOverallTimeout` is the outer bound for
+    /// that — measured once, from this call's own start, and never reset or extended by anything
+    /// above. It is checked at the top of every loop iteration, so it ends the wait at most one more
+    /// poll or reconnect past it; once it has passed, this throws the most recent reconnect's own
+    /// failure if the last reconnect failed, or `ZcashError.ledgerWrongApp(0)` otherwise.
     func awaitApp(reached: (LedgerRunningApp) -> Bool) async throws {
-        var deadline = launcher.transitionDeadline()
-        var failedReconnects = 0
+        let wait = SwitchWait(launcher: launcher)
+        let overallDeadline = launcher.now() + launcher.switchOverallTimeout
+        var lastReconnectFailure: ZcashError?
         while true {
-            let reconnectFailure = usable ? nil : try await replace()
-            if let reconnectFailure {
-                failedReconnects += 1
-                if failedReconnects >= maxReconnectFailures {
-                    throw reconnectFailure
-                }
-                deadline = launcher.transitionDeadline()
-            } else {
-                let running = try await queryAllowingDisconnect()
+            if launcher.now() >= overallDeadline {
+                throw lastReconnectFailure ?? ZcashError.ledgerWrongApp(0)
+            }
+            if usable {
+                let running = try await queryAllowingDisconnect(timeout: launcher.pollTimeout)
                 if let running, reached(running) {
                     return
                 }
-                if DispatchTime.now() >= deadline {
-                    throw ZcashError.ledgerWrongApp(0)
+                if running != nil || wait.replacedPastDeadline {
+                    try await wait.beforeNextPoll()
+                }
+            } else {
+                let reconnectStart = launcher.now()
+                let reconnectFailure = try await replace()
+                lastReconnectFailure = reconnectFailure
+                if let reconnectFailure {
+                    try await wait.reconnectFailed(reconnectFailure)
+                } else {
+                    wait.reconnected(took: launcher.now() - reconnectStart)
                 }
             }
-            try await Task.sleep(nanoseconds: UInt64(launcher.pollInterval * 1_000_000_000))
         }
     }
 
-    /// The running app, or `nil` if the link dropped.
-    private func queryAllowingDisconnect() async throws -> LedgerRunningApp? {
+    /// The running app, or `nil` if the link dropped or no answer came within `timeout`.
+    private func queryAllowingDisconnect(timeout: TimeInterval) async throws -> LedgerRunningApp? {
         do {
-            return try await launcher.currentApp(transport: current)
+            return try await launcher.queryApp(transport: current, timeout: timeout)
         } catch {
             guard isLinkFailure(error) else { throw error }
             await markUnusable()
@@ -250,55 +323,14 @@ private final class AppSwitch {
         }
     }
 
-    /// Races `reconnect()` against `launcher.switchReconnectTimeout`; the first to finish cancels the
-    /// other. A transport `reconnect` still produces after losing the race is closed rather than
-    /// leaked, which is why the loser is drained explicitly instead of left to the task group's own
-    /// implicit cleanup. The caller's own cancellation is read from `Task.checkCancellation()` so a
-    /// coincidental race at the deadline is never misreported as this timeout firing.
+    /// Races `reconnect()` against `launcher.switchReconnectTimeout`. See `raceReconnect(_:timeout:)`.
     private func raceReconnect() async throws -> any LedgerAPDUTransport {
-        let reconnect = self.reconnect
-        let timeout = launcher.switchReconnectTimeout
-        return try await withThrowingTaskGroup(of: ReconnectOutcome.self) { group in
-            group.addTask {
-                .connected(try await reconnect())
-            }
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                return .timedOut
-            }
-
-            guard let outcome = try await group.next() else {
-                // Unreachable: exactly two child tasks were just added, so a first result always exists.
-                throw ZcashError.ledgerInternal("the reconnect race produced no result")
-            }
-            group.cancelAll()
-
-            switch outcome {
-            case .connected(let transport):
-                return transport
-            case .timedOut:
-                // The reconnect may still complete, now cancelled, after losing the race; close what
-                // it produces rather than let a live transport leak.
-                while let result = await group.nextResult() {
-                    if case .success(.connected(let late)) = result {
-                        await late.close()
-                    }
-                }
-                try Task.checkCancellation()
-                throw ZcashError.ledgerBluetoothConnectionFailed(nil)
-            }
-        }
-    }
-
-    /// The result of racing `reconnect()` against its own timeout in `raceReconnect()`.
-    private enum ReconnectOutcome {
-        case connected(any LedgerAPDUTransport)
-        case timedOut
+        try await ZcashLightClientKit.raceReconnect(reconnect, timeout: launcher.switchReconnectTimeout)
     }
 
     private func exchangeAllowingDisconnect(_ apdu: Data, timeout: TimeInterval?) async throws -> Data? {
         do {
-            return try await current.exchange(apdu, timeout: timeout)
+            return try await exchangeWithoutClosing(apdu, timeout: timeout, on: current)
         } catch {
             guard isLinkFailure(error) else { throw error }
             await markUnusable()
@@ -316,6 +348,70 @@ private final class AppSwitch {
     func closeReplacement() async {
         guard didReplaceTransport, usable else { return }
         await closeQuietly(current)
+    }
+}
+
+/// The clock of one `AppSwitch.awaitApp(reached:)` wait: its deadline, and the run of reconnects that
+/// failed in a row.
+///
+/// A failed reconnect is tried again after a backoff that starts at
+/// `launcher.switchReconnectFirstBackoff` and doubles up to `launcher.switchReconnectMaxBackoff`.
+/// Once `launcher.switchReconnectWindow` has passed since the first of the failed reconnects in a
+/// row, the next failed reconnect propagates its failure. A reconnect that succeeds ends the row:
+/// the next failure starts a new window, with the first backoff; the time the successful reconnect
+/// itself took does not count against the deadline.
+///
+/// `deadline` here is this wait's own, reset by `reconnectFailed(_:)` and pushed forward by
+/// `reconnected(took:)`; neither bounds the wait by itself, since a link that keeps recovering just
+/// before each of those resets it again. `awaitApp(reached:)` holds a separate, outer
+/// `switchOverallTimeout` deadline of its own for that, fixed once at the wait's start and never
+/// touched by this class.
+private final class SwitchWait {
+    private let launcher: LedgerAppLauncher
+    private var deadline: TimeInterval
+    private var failingSince: TimeInterval?
+    private var backoff: TimeInterval
+
+    /// Whether the link was last replaced once the deadline had passed; it then gets one more poll.
+    private(set) var replacedPastDeadline = false
+
+    init(launcher: LedgerAppLauncher) {
+        self.launcher = launcher
+        self.deadline = launcher.transitionDeadline()
+        self.backoff = launcher.switchReconnectFirstBackoff
+    }
+
+    /// Throws once the deadline has passed, and otherwise waits the poll interval.
+    func beforeNextPoll() async throws {
+        if launcher.now() >= deadline {
+            throw ZcashError.ledgerWrongApp(0)
+        }
+        try await launcher.sleep(launcher.pollInterval)
+    }
+
+    /// Ends the run of failures, since a reconnect just succeeded, moves the deadline by the time it
+    /// `took` so that time is not charged against the wait, and records whether it landed after the
+    /// (moved) deadline.
+    func reconnected(took: TimeInterval) {
+        failingSince = nil
+        backoff = launcher.switchReconnectFirstBackoff
+        deadline += took
+        replacedPastDeadline = launcher.now() >= deadline
+    }
+
+    /// Throws `failure` once the retry window has passed; otherwise starts the deadline over and
+    /// waits the backoff, never past the end of the window.
+    func reconnectFailed(_ failure: ZcashError) async throws {
+        let now = launcher.now()
+        let since = failingSince ?? now
+        failingSince = since
+        let remaining = launcher.switchReconnectWindow - (now - since)
+        guard remaining > 0 else {
+            throw failure
+        }
+        deadline = launcher.transitionDeadline()
+        try await launcher.sleep(min(backoff, remaining))
+        backoff = min(backoff * 2, launcher.switchReconnectMaxBackoff)
     }
 }
 
@@ -409,10 +505,90 @@ func isLinkFailure(_ error: Error) -> Bool {
     }
 }
 
-/// How many consecutive failed reconnects `AppSwitch.awaitApp(reached:)` allows while waiting for an
-/// app before it gives up and throws the last one's own failure, instead of the generic transition
-/// timeout.
-private let maxReconnectFailures = 3
+/// The result of racing `reconnect()` against its own timeout in `raceReconnect(_:timeout:)`.
+private enum ReconnectOutcome {
+    case connected(any LedgerAPDUTransport)
+    case timedOut
+}
+
+/// Races `reconnect` against `timeout`; the first to finish cancels the other. `reconnect` is
+/// caller-supplied and may ignore that cancellation, so a transport it still produces after losing the
+/// race — to the timeout, or to an error such as the caller's own cancellation — is drained explicitly
+/// so it can be closed rather than leaked; the task group's own implicit cleanup would await that
+/// transport just the same, but only this explicit drain closes it. The caller's own cancellation is
+/// read from `Task.checkCancellation()` so a coincidental race at the deadline is never misreported as
+/// this timeout firing.
+///
+/// Not `private`: shared by `AppSwitch`'s own app-switch reconnects and by `LedgerDevice`'s
+/// pairing-read reconnect, rather than duplicating this race in both places.
+func raceReconnect(
+    _ reconnect: @escaping @Sendable () async throws -> any LedgerAPDUTransport,
+    timeout: TimeInterval
+) async throws -> any LedgerAPDUTransport {
+    try await withThrowingTaskGroup(of: ReconnectOutcome.self) { group in
+        group.addTask {
+            .connected(try await reconnect())
+        }
+        group.addTask {
+            try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            return .timedOut
+        }
+
+        let firstResult: ReconnectOutcome?
+        do {
+            firstResult = try await group.next()
+        } catch {
+            // The first result is an error rather than a timeout or a connected transport — most
+            // often the caller's own cancellation. `reconnect` may still ignore that and produce a
+            // transport later; drain for it here too, the same as the `.timedOut` branch below,
+            // rather than let the group's implicit cleanup await and silently drop it.
+            group.cancelAll()
+            while let result = await group.nextResult() {
+                if case .success(.connected(let late)) = result {
+                    await late.close()
+                }
+            }
+            throw error
+        }
+        guard let outcome = firstResult else {
+            // Unreachable: exactly two child tasks were just added, so a first result always exists.
+            throw ZcashError.ledgerInternal("the reconnect race produced no result")
+        }
+        group.cancelAll()
+
+        switch outcome {
+        case .connected(let transport):
+            return transport
+        case .timedOut:
+            // The reconnect may still complete, now cancelled, after losing the race; close what it
+            // produces rather than let a live transport leak.
+            while let result = await group.nextResult() {
+                if case .success(.connected(let late)) = result {
+                    await late.close()
+                }
+            }
+            try Task.checkCancellation()
+            throw ZcashError.ledgerBluetoothConnectionFailed(nil)
+        }
+    }
+}
+
+/// Exchanges one command on `transport` without closing it on failure: unlike `LedgerCommands.exchange`,
+/// closing stays with `AppSwitch.markUnusable()`, exactly once, so this must not be used where that
+/// exclusive ownership does not hold.
+///
+/// Checks `Task.checkCancellation()` before the command is put on the wire, and normalizes a thrown
+/// error through `ledgerZcashError(_:)`, so a third-party ``LedgerAPDUTransport`` that throws
+/// something other than a ``ZcashError`` still meets this file's `ZcashError` contract instead of
+/// propagating verbatim and being silently treated as not a link failure.
+private func exchangeWithoutClosing(_ apdu: Data, timeout: TimeInterval?, on transport: any LedgerAPDUTransport) async throws -> Data {
+    try Task.checkCancellation()
+    do {
+        return try await transport.exchange(apdu, timeout: timeout)
+    } catch {
+        throw ledgerZcashError(error)
+    }
+}
 
 private func closeQuietly(_ transport: any LedgerAPDUTransport) async {
     await transport.close()

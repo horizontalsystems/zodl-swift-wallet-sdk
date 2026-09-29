@@ -18,8 +18,16 @@ import Foundation
 /// The caller owns every transport: the one passed to `init` and every one a `pairAccount`
 /// `reconnect` function returns. This closes a transport whose exchange failed (closing is idempotent)
 /// but never closes one otherwise, so the caller closes each transport it opened, whether the call
-/// succeeded or failed. ``transport`` is the one this device currently talks over; once `pairAccount`
-/// has reconnected, it is the reconnected one, and later calls use it.
+/// succeeded or failed — unlike `LedgerZcashApp.ensureZcashAppOpen(transport:reconnect:)`, which closes
+/// a replacement transport itself when the call fails, `pairAccount` closes a transport its `reconnect`
+/// produced only when an exchange on it fails. A failure after the reads answered (the version check,
+/// the viewing key parse) leaves it open on ``transport``, and the caller closes it then, as it would
+/// its own. ``transport`` is the one this device currently
+/// talks over; once `pairAccount` has reconnected, it is the reconnected one, and later calls use it.
+///
+/// Nothing here changes `transport` in response to `ensureZcashAppOpen`: that call may close the
+/// transport it is given and return another, so call it before constructing a device, or build a new
+/// device over the transport it returns rather than keep using one built over the original.
 public actor LedgerDevice {
     /// The default for `pairAccount`'s `readTimeout`: the reads before the export answer at once on a
     /// healthy link, so a device silent this long is stalled. It is not the default value of
@@ -33,6 +41,8 @@ public actor LedgerDevice {
 
     /// The transport this device talks over: the one passed to `init`, or the last one a
     /// `pairAccount` `reconnect` function returned. The caller closes it; see the class documentation.
+    /// A transport `LedgerZcashApp.ensureZcashAppOpen(transport:reconnect:)` returns never replaces
+    /// this; build a new device over that one.
     public private(set) var transport: LedgerAPDUTransport
     private let networkType: NetworkType
     private let gate = LedgerSerialGate()
@@ -80,17 +90,24 @@ public actor LedgerDevice {
     ///
     /// A transport `reconnect` returns becomes ``transport``, whatever the outcome, and belongs to the
     /// caller like the one passed to `init`; a failure `reconnect` itself throws propagates as it is.
+    /// The call is raced against `readTimeout`: a `reconnect` still running once that time is up fails
+    /// as ``ZcashError/ledgerBluetoothConnectionFailed(_:)`` instead, and a transport it produces after
+    /// losing that race is closed rather than adopted.
     ///
     /// - Parameters:
     ///   - zip32AccountIndex: The account to export.
-    ///   - readTimeout: How long each read before the export may take. Defaults to
-    ///     ``defaultReadTimeout``, the timeout every other read uses; pass
+    ///   - readTimeout: How long each read before the export may take, and the cap on one retry's own
+    ///     `reconnect`. Defaults to ``defaultReadTimeout``, the timeout every other read uses; pass
     ///     ``defaultPairingReadTimeout`` to detect a stalled device early.
     ///   - reconnect: Opens a fresh connection to the same device, for one retry of the reads before
-    ///     the export. `nil` for no retry.
+    ///     the export. `nil` for no retry. It runs while this device holds its serializing gate, which
+    ///     is not reentrant: it must not call this device, directly or through anything that waits on
+    ///     it, or it deadlocks.
     /// - Throws: ``ZcashError/ledgerAppTooOld(_:)`` when the app cannot sign transactions for this SDK,
     ///   ``ZcashError/ledgerUserRejected`` when the user declines the export,
-    ///   ``ZcashError/ledgerDerivationBudgetExhausted`` when the user must reopen the Zcash app first.
+    ///   ``ZcashError/ledgerDerivationBudgetExhausted`` when the user must reopen the Zcash app first,
+    ///   ``ZcashError/ledgerBluetoothConnectionFailed(_:)`` when a retry's own `reconnect` does not
+    ///   finish within `readTimeout`.
     public func pairAccount(
         zip32AccountIndex: Zip32AccountIndex,
         readTimeout: TimeInterval = defaultReadTimeout,
@@ -156,7 +173,10 @@ public actor LedgerDevice {
     // MARK: - Commands
 
     /// The reads before the export, retried once over a transport from `reconnect` when the first
-    /// attempt fails on the connection.
+    /// attempt fails on the connection. `reconnect` is raced against `readTimeout`, the same race
+    /// `LedgerZcashApp` runs during the app switch: a `reconnect` that is still running once that time
+    /// is up fails as ``ZcashError/ledgerBluetoothConnectionFailed(_:)``, and a transport it produces
+    /// after losing that race is closed rather than adopted.
     private func readBeforeExport(
         readTimeout: TimeInterval,
         reconnect: (@Sendable () async throws -> any LedgerAPDUTransport)?
@@ -165,7 +185,7 @@ public actor LedgerDevice {
             return try await readAppVersionAndIdentity(timeout: readTimeout)
         } catch {
             guard let reconnect, isLinkFailure(error) else { throw error }
-            transport = try await reconnect()
+            transport = try await raceReconnect(reconnect, timeout: readTimeout)
             return try await readAppVersionAndIdentity(timeout: readTimeout)
         }
     }

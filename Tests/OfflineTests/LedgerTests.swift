@@ -482,6 +482,52 @@ final class LedgerDeviceTests: XCTestCase {
         XCTAssertNil(timeouts[2], "the export request waits on the user")
         XCTAssertEqual(timeouts[3], ZcashLedgerBackend.defaultTimeout)
     }
+
+    // MARK: Bounding the reconnect with the reconnect race
+
+    /// The reviewer's scenario: a `reconnect` that never returns must not hang pairing.
+    /// `readBeforeExport` now races its retry's `reconnect` against `readTimeout`, the same race
+    /// `LedgerZcashApp` runs during the app switch, instead of awaiting it with no bound of its own.
+    func testAReconnectThatNeverReturnsIsBoundedByTheReadTimeout() async throws {
+        let stalled = ScriptedLedgerTransport { _, _ in throw ZcashError.ledgerTimeout }
+        let ledger = LedgerDevice(transport: stalled, networkType: .testnet)
+
+        let task = Task {
+            try await ledger.pairAccount(
+                zip32AccountIndex: Zip32AccountIndex(0),
+                readTimeout: 0.05,
+                reconnect: {
+                    // Cancellation-aware, like the live Bluetooth connect: a never-resumed continuation
+                    // would also hang the task group's own implicit cleanup on the fixed code, not just
+                    // the old code this red run is meant to exercise.
+                    try await Task.sleep(nanoseconds: 30_000_000_000)
+                    fatalError("unreachable: the reconnect race must cut this off well under 1 s")
+                }
+            )
+        }
+        // A test-side backstop: old code awaits `reconnect()` with no bound of its own, so without this
+        // the red run would hang the whole suite instead of failing this one test.
+        let watchdog = Task {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            task.cancel()
+        }
+        let started = DispatchTime.now()
+
+        do {
+            _ = try await task.value
+            XCTFail("A reconnect that never returns must not let pairing succeed")
+        } catch let error as ZcashError {
+            guard case .ledgerBluetoothConnectionFailed(nil) = error else {
+                return XCTFail("Unexpected error \(error.code)")
+            }
+        } catch {
+            XCTFail("Unexpected error \(error)")
+        }
+        watchdog.cancel()
+
+        let elapsedSeconds = TimeInterval(DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds) / 1_000_000_000
+        XCTAssertLessThan(elapsedSeconds, 1, "the reconnect race must cut this off in well under the 5 s the brief allows")
+    }
 }
 
 // MARK: - Error mapping

@@ -33,15 +33,50 @@ private let dashboardReply = app("BOLOS", version: "2.2.3", flags: [0x02])
 private let zcashReply = app("Zcash", version: "4.2.0")
 
 /// A transport that answers each call with the next reply in `replies`, in order.
+///
+/// Throws `ZcashError.ledgerTransportClosed` once `replies` runs out, rather than indexing past the
+/// end of the array: a test whose timing assumption turns out wrong then fails with a clear, catchable
+/// error instead of trapping the whole test process.
 private func scripted(_ replies: [Data]) -> ScriptedLedgerTransport {
-    ScriptedLedgerTransport { _, history in replies[history.count] }
+    ScriptedLedgerTransport { _, history in
+        guard history.count < replies.count else { throw ZcashError.ledgerTransportClosed }
+        return replies[history.count]
+    }
 }
 
 private struct UnexpectedReconnect: Error {}
 
+/// The scripted reconnect's own safety limit in the overall-switch-timeout tests: proof that the
+/// overall cap, not this sentinel, is what ends a flapping link's wait. Against code that does not yet
+/// enforce the cap, a flapping link never ends on its own, so this is what turns that red run into a
+/// clear, fast failure instead of a hang.
+private struct WaitNeverEnded: Error {}
+
 /// A `reconnect` that fails the test if it is ever called.
 private func noReconnect() -> @Sendable () async throws -> any LedgerAPDUTransport {
     { throw UnexpectedReconnect() }
+}
+
+private struct TestTimedOut: Error {}
+
+/// Races `operation` against a real wall-clock `seconds`, so a red run against code that never ends
+/// fails this test at once instead of hanging the whole suite.
+private func withTestTimeout<T: Sendable>(
+    _ seconds: TimeInterval,
+    _ operation: @escaping @Sendable () async throws -> T
+) async throws -> T {
+    try await withThrowingTaskGroup(of: T.self) { group in
+        group.addTask { try await operation() }
+        group.addTask {
+            try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            throw TestTimedOut()
+        }
+        guard let result = try await group.next() else {
+            throw ZcashError.ledgerInternal("withTestTimeout produced no result")
+        }
+        group.cancelAll()
+        return result
+    }
 }
 
 private func isSame(_ lhs: any LedgerAPDUTransport, _ rhs: any LedgerAPDUTransport) -> Bool {
@@ -59,19 +94,72 @@ private actor CallCounter {
     }
 }
 
+/// A monotonic clock a test drives by hand: `sleep` advances `now` by exactly the requested amount
+/// instead of waiting, so a test asserts exact timings without running in real time. `NSLock`
+/// supports the SDK's iOS 13/macOS 12 minimums, like `LedgerAppLauncher`'s own default clock.
+private final class VirtualClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var elapsed: TimeInterval = 0
+
+    func now() -> TimeInterval {
+        lock.withLock { elapsed }
+    }
+
+    func sleep(_ seconds: TimeInterval) async throws {
+        lock.withLock { elapsed += seconds }
+    }
+}
+
+/// A distinct failure per reconnect attempt, so a test can prove by reference which attempt's own
+/// error propagated.
+private final class ReconnectAttemptFailure: Error {}
+
+/// Records each reconnect attempt's virtual time and its own `ReconnectAttemptFailure`, from a
+/// `@Sendable` closure such as a `reconnect` callback.
+private actor ReconnectAttemptLog {
+    private(set) var attempts: [(time: TimeInterval, failure: ReconnectAttemptFailure)] = []
+
+    func record(at time: TimeInterval) -> ReconnectAttemptFailure {
+        let failure = ReconnectAttemptFailure()
+        attempts.append((time, failure))
+        return failure
+    }
+}
+
+/// Records each call's virtual time, from a `@Sendable` closure such as a `reconnect` callback.
+private actor TimeLog {
+    private(set) var times: [TimeInterval] = []
+
+    @discardableResult
+    func record(_ time: TimeInterval) -> Int {
+        times.append(time)
+        return times.count
+    }
+}
+
 // MARK: - Tests
 
 final class LedgerZcashAppTests: XCTestCase {
     private let queryTimeout: TimeInterval = 5
+    private let pollTimeout: TimeInterval = 3
     private let pollInterval: TimeInterval = 0.001
     private let transitionTimeout: TimeInterval = 0.2
     private let switchReconnectTimeout: TimeInterval = 1
+    private let switchReconnectWindow: TimeInterval = 0.2
+    private let switchReconnectFirstBackoff: TimeInterval = 0.001
+    private let switchReconnectMaxBackoff: TimeInterval = 0.004
+    private let switchOverallTimeout: TimeInterval = 60
 
     private lazy var launcher = LedgerAppLauncher(
         queryTimeout: queryTimeout,
+        pollTimeout: pollTimeout,
         pollInterval: pollInterval,
         transitionTimeout: transitionTimeout,
-        switchReconnectTimeout: switchReconnectTimeout
+        switchReconnectTimeout: switchReconnectTimeout,
+        switchReconnectWindow: switchReconnectWindow,
+        switchReconnectFirstBackoff: switchReconnectFirstBackoff,
+        switchReconnectMaxBackoff: switchReconnectMaxBackoff,
+        switchOverallTimeout: switchOverallTimeout
     )
 
     // MARK: currentApp
@@ -163,6 +251,10 @@ final class LedgerZcashAppTests: XCTestCase {
         for command in received[2...] {
             XCTAssertEqual(command, getAppAPDU)
         }
+        XCTAssertEqual(timeouts[0], queryTimeout, "the first query keeps queryTimeout")
+        for timeout in timeouts[2...] {
+            XCTAssertEqual(timeout, pollTimeout, "a poll inside awaitApp uses pollTimeout")
+        }
         let closeCount = await transport.closeCount
         XCTAssertEqual(closeCount, 0)
     }
@@ -217,6 +309,46 @@ final class LedgerZcashAppTests: XCTestCase {
         let result = try await launcher.ensureZcashAppOpen(transport: original) { afterSwitch }
 
         XCTAssertTrue(isSame(result, afterSwitch))
+        let originalCloseCount = await original.closeCount
+        XCTAssertEqual(originalCloseCount, 1)
+    }
+
+    /// John's scenario: the deadline must not be checked in the same iteration in which a poll lost
+    /// the link. `pollTimeout` is pinned to the transition timeout (10 s) so this isolates the loop
+    /// fix from the shorter poll timeout `LedgerZcashApp` actually uses.
+    func testAPollThatStallsThroughTheWholeTransitionIsFollowedByAReconnect() async throws {
+        let clock = VirtualClock()
+        let original = ScriptedLedgerTransport(
+            stallBeforeFailing: { try await clock.sleep($0 ?? 0) },
+            script: { _, history in
+                if history.count == 2 { throw ZcashError.ledgerTimeout }
+                return history.isEmpty ? dashboardReply : LedgerReplies.status(0x9000)
+            }
+        )
+        let afterSwitch = scripted([zcashReply])
+        let stallLauncher = LedgerAppLauncher(
+            queryTimeout: 10,
+            pollTimeout: 10,
+            pollInterval: 0.2,
+            transitionTimeout: 10,
+            switchReconnectTimeout: 10,
+            switchReconnectWindow: 10,
+            switchReconnectFirstBackoff: 0.5,
+            switchReconnectMaxBackoff: 2,
+            switchOverallTimeout: 60,
+            now: { clock.now() },
+            sleep: { try await clock.sleep($0) }
+        )
+        let reconnects = CallCounter()
+
+        let result = try await stallLauncher.ensureZcashAppOpen(transport: original) {
+            await reconnects.increment()
+            return afterSwitch
+        }
+
+        XCTAssertTrue(isSame(result, afterSwitch))
+        let reconnectCount = await reconnects.count
+        XCTAssertEqual(reconnectCount, 1)
         let originalCloseCount = await original.closeCount
         XCTAssertEqual(originalCloseCount, 1)
     }
@@ -412,9 +544,14 @@ final class LedgerZcashAppTests: XCTestCase {
         let afterSwitch = scripted([zcashReply])
         let hangingLauncher = LedgerAppLauncher(
             queryTimeout: queryTimeout,
+            pollTimeout: pollTimeout,
             pollInterval: pollInterval,
             transitionTimeout: transitionTimeout,
-            switchReconnectTimeout: 0.05
+            switchReconnectTimeout: 0.05,
+            switchReconnectWindow: switchReconnectWindow,
+            switchReconnectFirstBackoff: switchReconnectFirstBackoff,
+            switchReconnectMaxBackoff: switchReconnectMaxBackoff,
+            switchOverallTimeout: 60
         )
         let reconnects = CallCounter()
 
@@ -446,9 +583,14 @@ final class LedgerZcashAppTests: XCTestCase {
         let afterSwitch = scripted([zcashReply])
         let hangingLauncher = LedgerAppLauncher(
             queryTimeout: queryTimeout,
+            pollTimeout: pollTimeout,
             pollInterval: pollInterval,
             transitionTimeout: transitionTimeout,
-            switchReconnectTimeout: 0.02
+            switchReconnectTimeout: 0.05,
+            switchReconnectWindow: switchReconnectWindow,
+            switchReconnectFirstBackoff: switchReconnectFirstBackoff,
+            switchReconnectMaxBackoff: switchReconnectMaxBackoff,
+            switchOverallTimeout: 60
         )
         let reconnects = CallCounter()
 
@@ -457,8 +599,9 @@ final class LedgerZcashAppTests: XCTestCase {
             if count == 1 {
                 // Unlike the live Bluetooth connect (see the report), ignores its own cancellation and
                 // returns a transport anyway after losing the race: proves the loser is drained and
-                // closed rather than leaked.
-                try? await Task.sleep(nanoseconds: 100_000_000)
+                // closed rather than leaked. 2 s against the 50 ms cap is a 40x margin, so scheduling
+                // noise on a loaded runner cannot flip which one wins.
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
                 return late
             }
             return afterSwitch
@@ -471,29 +614,179 @@ final class LedgerZcashAppTests: XCTestCase {
         XCTAssertEqual(lateReceived.count, 0, "the loser is closed before anything is sent on it")
     }
 
-    func testTheThirdFailedReconnectPropagatesItsFailure() async throws {
+    /// The caller's own cancellation, not the race's timeout, is what the reconnect ignores here: the
+    /// race's first result is `CancellationError` from the timeout child (cancellation reaches it
+    /// immediately), while the reconnect itself keeps running on a detached task — unaffected by the
+    /// caller's cancellation, since a detached task is not its child — and later produces a transport
+    /// anyway. That transport must be drained and closed like any other loser, not left for the task
+    /// group's implicit cleanup to silently await and drop.
+    func testACancelledCallerClosesALateTransportFromAReconnectThatIgnoresCancellation() async throws {
+        actor Entered {
+            private(set) var didEnter = false
+            func mark() { didEnter = true }
+        }
+        let entered = Entered()
         let original = ScriptedLedgerTransport { _, history in
             if history.count == 1 { throw ZcashError.ledgerBluetoothDisconnected }
             return dashboardReply
         }
-        let reconnects = CallCounter()
+        let late = scripted([dashboardReply])
+
+        let task = Task {
+            try await launcher.ensureZcashAppOpen(transport: original) {
+                await entered.mark()
+                // Unlike the live Bluetooth connect, ignores the caller's own cancellation: a detached
+                // task does not inherit it, so this keeps running past the caller's cancel and proves
+                // the late transport it eventually produces is drained and closed rather than leaked.
+                await Task.detached {
+                    try? await Task.sleep(nanoseconds: 300_000_000)
+                }.value
+                return late
+            }
+        }
+        // Spins until the reconnect has actually started, so the cancel below always lands while the
+        // race is in flight — deterministic, unlike racing a fixed delay against it.
+        while await !entered.didEnter {
+            await Task.yield()
+        }
+        task.cancel()
 
         do {
-            _ = try await launcher.ensureZcashAppOpen(transport: original) {
-                await reconnects.increment()
-                throw ZcashError.ledgerBluetoothConnectionFailed(nil)
+            _ = try await task.value
+            XCTFail("The caller's own cancellation must propagate")
+        } catch is CancellationError {
+            // Expected: the cancellation reaches the caller unchanged.
+        }
+
+        let lateCloseCount = await late.closeCount
+        XCTAssertEqual(lateCloseCount, 1, "a transport produced after the caller cancels is closed, not leaked")
+        let lateReceived = await late.received
+        XCTAssertEqual(lateReceived.count, 0, "the loser is closed before anything is sent on it")
+    }
+
+    func testAnInstantlyFailingReconnectIsRetriedWithBackoffUntilTheWindowRunsOut() async throws {
+        let original = ScriptedLedgerTransport { _, history in
+            if history.count == 1 { throw ZcashError.ledgerBluetoothDisconnected }
+            return dashboardReply
+        }
+        let clock = VirtualClock()
+        let attempts = ReconnectAttemptLog()
+        let backoffLauncher = LedgerAppLauncher(
+            queryTimeout: 10,
+            pollTimeout: 10,
+            pollInterval: 0.2,
+            transitionTimeout: 10,
+            switchReconnectTimeout: 10,
+            switchReconnectWindow: 10,
+            switchReconnectFirstBackoff: 0.5,
+            switchReconnectMaxBackoff: 2,
+            switchOverallTimeout: 60,
+            now: { clock.now() },
+            sleep: { try await clock.sleep($0) }
+        )
+
+        do {
+            _ = try await backoffLauncher.ensureZcashAppOpen(transport: original) {
+                let failure = await attempts.record(at: clock.now())
+                throw ZcashError.ledgerBluetoothConnectionFailed(failure)
             }
-            XCTFail("The third failed reconnect must propagate")
+            XCTFail("Reconnects that keep failing instantly must propagate once the window runs out")
         } catch let error as ZcashError {
-            guard case .ledgerBluetoothConnectionFailed = error else {
+            guard case .ledgerBluetoothConnectionFailed(let underlying) = error else {
                 return XCTFail("Unexpected error \(error.code)")
+            }
+            let recorded = await attempts.attempts
+            XCTAssertTrue(
+                (underlying as? ReconnectAttemptFailure) === recorded.last?.failure,
+                "the last attempt's own error instance propagates"
+            )
+        }
+
+        let recorded = await attempts.attempts
+        XCTAssertEqual(recorded.map(\.time), [0, 0.5, 1.5, 3.5, 5.5, 7.5, 9.5, 10.0])
+        XCTAssertEqual(clock.now(), 10.0)
+        let originalCloseCount = await original.closeCount
+        XCTAssertEqual(originalCloseCount, 1)
+    }
+
+    func testARecoveredLinkStartsTheReconnectBackoffAndWindowOver() async throws {
+        let original = ScriptedLedgerTransport { _, history in
+            if history.count == 2 { throw ZcashError.ledgerBluetoothDisconnected }
+            return history.isEmpty ? dashboardReply : LedgerReplies.status(0x9000)
+        }
+        let recovered = ScriptedLedgerTransport { _, history in
+            if history.count == 12 { throw ZcashError.ledgerBluetoothDisconnected }
+            return dashboardReply
+        }
+        let afterSwitch = scripted([zcashReply])
+        let clock = VirtualClock()
+        let attempts = TimeLog()
+        let productionTimedLauncher = LedgerAppLauncher(
+            queryTimeout: 10,
+            pollTimeout: 3,
+            pollInterval: 0.2,
+            transitionTimeout: 10,
+            switchReconnectTimeout: 10,
+            switchReconnectWindow: 10,
+            switchReconnectFirstBackoff: 0.5,
+            switchReconnectMaxBackoff: 2,
+            switchOverallTimeout: 60,
+            now: { clock.now() },
+            sleep: { try await clock.sleep($0) }
+        )
+
+        let result = try await productionTimedLauncher.ensureZcashAppOpen(transport: original) {
+            let count = await attempts.record(clock.now())
+            switch count {
+            case 1...6, 8: throw ZcashError.ledgerBluetoothConnectionFailed(nil)
+            case 7: return recovered
+            default: return afterSwitch
             }
         }
 
-        let reconnectCount = await reconnects.count
-        XCTAssertEqual(reconnectCount, 3)
-        let originalCloseCount = await original.closeCount
-        XCTAssertEqual(originalCloseCount, 1)
+        XCTAssertTrue(isSame(result, afterSwitch))
+        let recordedTimes = await attempts.times
+        let expectedTimes: [TimeInterval] = [0, 0.5, 1.5, 3.5, 5.5, 7.5, 9.5, 11.9, 12.4]
+        XCTAssertEqual(recordedTimes.count, expectedTimes.count)
+        for (index, expected) in expectedTimes.enumerated() where index < recordedTimes.count {
+            XCTAssertEqual(
+                recordedTimes[index],
+                expected,
+                accuracy: 0.000_001,
+                "the failure after the recovery waits the first backoff, in a window of its own (attempt \(index))"
+            )
+        }
+    }
+
+    func testASlowSuccessfulReconnectLeavesTheWholePollingTime() async throws {
+        let original = ScriptedLedgerTransport { _, history in
+            if history.count == 2 { throw ZcashError.ledgerBluetoothDisconnected }
+            return history.isEmpty ? dashboardReply : LedgerReplies.status(0x9000)
+        }
+        let afterSwitch = scripted(Array(repeating: dashboardReply, count: 25) + [zcashReply])
+        let clock = VirtualClock()
+        let productionTimedLauncher = LedgerAppLauncher(
+            queryTimeout: 10,
+            pollTimeout: 3,
+            pollInterval: 0.2,
+            transitionTimeout: 10,
+            switchReconnectTimeout: 10,
+            switchReconnectWindow: 10,
+            switchReconnectFirstBackoff: 0.5,
+            switchReconnectMaxBackoff: 2,
+            switchOverallTimeout: 60,
+            now: { clock.now() },
+            sleep: { try await clock.sleep($0) }
+        )
+
+        let result = try await productionTimedLauncher.ensureZcashAppOpen(transport: original) {
+            try await clock.sleep(9)
+            return afterSwitch
+        }
+
+        XCTAssertTrue(isSame(result, afterSwitch))
+        let sent = await afterSwitch.received
+        XCTAssertEqual(sent.count, 26, "the 9-second reconnect left the whole 10 seconds to poll the 25 dashboards before the Zcash app")
     }
 
     func testTheCallersOwnTimeoutDuringAReconnectPropagatesAsCancellation() async throws {
@@ -522,6 +815,154 @@ final class LedgerZcashAppTests: XCTestCase {
 
         let reconnectCount = await reconnects.count
         XCTAssertEqual(reconnectCount, 1, "the caller's own cancellation is not a failed reconnect to retry")
+    }
+
+    // MARK: Overall switch timeout
+
+    /// John's flapping link: a poll that stalls and loses the link, a reconnect that fails, a backoff,
+    /// a reconnect that then succeeds, and the cycle repeats. Each success clears `SwitchWait`'s own
+    /// run of failures and each failure restarts its transition deadline, so neither ever throws on its
+    /// own — only `switchOverallTimeout`, measured once from the wait's own start, can end this. The
+    /// cutoff lands right after a poll (the reconnect before it succeeded), so the thrown error is the
+    /// generic `ledgerWrongApp(0)`, not a reconnect failure; `testAFlappingLinkThatEndsOnAFailedReconnectThrowsIt`
+    /// below covers the other half of that choice.
+    ///
+    /// The scripted reconnect refuses its own 501st attempt with `WaitNeverEnded`: against code that
+    /// does not yet enforce the cap this flapping link never ends, and without that limit the call
+    /// would spin forever on the virtual clock rather than fail. 34 reconnects are expected once the
+    /// cap is enforced, so 500 is a comfortable margin that proves the new cap, not this backstop, is
+    /// what ends the wait. `withTestTimeout` adds a real 5 s backstop of its own, so a logic error that
+    /// defeats both of the above still fails this test instead of hanging the whole suite.
+    func testAFlappingLinkIsCutOffByTheOverallSwitchTimeout() async throws {
+        let clock = VirtualClock()
+        let original = ScriptedLedgerTransport(
+            stallBeforeFailing: { try await clock.sleep($0 ?? 0) },
+            script: { _, history in
+                switch history.count {
+                case 0: return dashboardReply
+                case 1: return LedgerReplies.status(0x9000)
+                default: throw ZcashError.ledgerTimeout
+                }
+            }
+        )
+        let flapping = ScriptedLedgerTransport(
+            stallBeforeFailing: { try await clock.sleep($0 ?? 0) },
+            script: { _, _ in throw ZcashError.ledgerTimeout }
+        )
+        let capLauncher = LedgerAppLauncher(
+            queryTimeout: 10,
+            pollTimeout: 3,
+            pollInterval: 0.2,
+            transitionTimeout: 10,
+            switchReconnectTimeout: 10,
+            switchReconnectWindow: 10,
+            switchReconnectFirstBackoff: 0.5,
+            switchReconnectMaxBackoff: 2,
+            switchOverallTimeout: 60,
+            now: { clock.now() },
+            sleep: { try await clock.sleep($0) }
+        )
+        let attemptCount = CallCounter()
+
+        do {
+            _ = try await withTestTimeout(5) {
+                try await capLauncher.ensureZcashAppOpen(transport: original) {
+                    let count = await attemptCount.increment()
+                    guard count <= 500 else { throw WaitNeverEnded() }
+                    if count % 2 == 1 {
+                        throw ZcashError.ledgerBluetoothConnectionFailed(nil)
+                    }
+                    return flapping
+                }
+            }
+            XCTFail("A flapping link must not let the switch succeed")
+        } catch let error as ZcashError {
+            guard case let .ledgerWrongApp(statusWord) = error else {
+                return XCTFail("Unexpected error \(error.code)")
+            }
+            XCTAssertEqual(statusWord, 0, "the cutoff lands right after a poll, with no reconnect failure of its own")
+        } catch is WaitNeverEnded {
+            XCTFail("The overall switch timeout must cut a flapping link off; the wait never ended")
+        } catch is TestTimedOut {
+            XCTFail("The overall switch timeout must cut a flapping link off well under the test's own 5 s backstop")
+        }
+
+        let finalCount = await attemptCount.count
+        XCTAssertEqual(finalCount, 34, "the overall cap, not the test's own 500-attempt safety limit, must end the wait")
+        XCTAssertGreaterThanOrEqual(clock.now(), 60, "the wait runs at least the whole overall cap")
+        XCTAssertLessThanOrEqual(clock.now(), 63, "the wait ends within the overall cap, plus at most one more poll")
+    }
+
+    /// The same flapping link, with the overall cap set to land right after a failed reconnect instead
+    /// of after a poll: proves the other half of the choice — the thrown error is that reconnect's own
+    /// failure, by reference, not a fresh `ledgerWrongApp(0)`.
+    func testAFlappingLinkThatEndsOnAFailedReconnectThrowsIt() async throws {
+        let clock = VirtualClock()
+        let original = ScriptedLedgerTransport(
+            stallBeforeFailing: { try await clock.sleep($0 ?? 0) },
+            script: { _, history in
+                switch history.count {
+                case 0: return dashboardReply
+                case 1: return LedgerReplies.status(0x9000)
+                default: throw ZcashError.ledgerTimeout
+                }
+            }
+        )
+        let flapping = ScriptedLedgerTransport(
+            stallBeforeFailing: { try await clock.sleep($0 ?? 0) },
+            script: { _, _ in throw ZcashError.ledgerTimeout }
+        )
+        let capLauncher = LedgerAppLauncher(
+            queryTimeout: 10,
+            pollTimeout: 3,
+            pollInterval: 0.2,
+            transitionTimeout: 10,
+            switchReconnectTimeout: 10,
+            switchReconnectWindow: 10,
+            switchReconnectFirstBackoff: 0.5,
+            switchReconnectMaxBackoff: 2,
+            // Lands the cap 0.3 s after the first reconnect's own failure (at t=3.5) but before the
+            // poll that would follow the next cycle, so the cutoff is unambiguously mid-backoff.
+            switchOverallTimeout: 3.2,
+            now: { clock.now() },
+            sleep: { try await clock.sleep($0) }
+        )
+        let attempts = ReconnectAttemptLog()
+        let attemptCount = CallCounter()
+
+        do {
+            _ = try await withTestTimeout(5) {
+                try await capLauncher.ensureZcashAppOpen(transport: original) {
+                    let count = await attemptCount.increment()
+                    guard count <= 500 else { throw WaitNeverEnded() }
+                    if count % 2 == 1 {
+                        let failure = await attempts.record(at: clock.now())
+                        throw ZcashError.ledgerBluetoothConnectionFailed(failure)
+                    }
+                    return flapping
+                }
+            }
+            XCTFail("A flapping link must not let the switch succeed")
+        } catch let error as ZcashError {
+            guard case .ledgerBluetoothConnectionFailed(let underlying) = error else {
+                return XCTFail("Unexpected error \(error.code)")
+            }
+            let recorded = await attempts.attempts
+            XCTAssertEqual(recorded.count, 1)
+            XCTAssertTrue(
+                (underlying as? ReconnectAttemptFailure) === recorded.last?.failure,
+                "the overall cap throws the most recent reconnect failure, by reference"
+            )
+        } catch is WaitNeverEnded {
+            XCTFail("The overall switch timeout must cut a flapping link off; the wait never ended")
+        } catch is TestTimedOut {
+            XCTFail("The overall switch timeout must cut a flapping link off well under the test's own 5 s backstop")
+        }
+
+        let finalCount = await attemptCount.count
+        XCTAssertEqual(finalCount, 1, "the cap fires before the reconnect that would have followed the one failure")
+        XCTAssertGreaterThanOrEqual(clock.now(), 3.2, "the wait runs at least the whole overall cap")
+        XCTAssertLessThanOrEqual(clock.now(), 3.7, "the wait ends within the overall cap, plus at most one more backoff step")
     }
 
     // MARK: First-query retry
@@ -570,6 +1011,45 @@ final class LedgerZcashAppTests: XCTestCase {
         XCTAssertEqual(stalledAgainCloseCount, 1, "the fresh transport is closed when the call fails")
     }
 
+    func testAReconnectThatHangsAfterAFailedFirstQueryIsCutOff() async throws {
+        let stalled = ScriptedLedgerTransport { _, _ in throw ZcashError.ledgerTimeout }
+        // Answers as the Zcash app if it is ever actually queried, so the pre-fix (uncapped) path
+        // succeeds cleanly instead of running out of scripted replies.
+        let late = scripted([zcashReply])
+        let hangingLauncher = LedgerAppLauncher(
+            queryTimeout: queryTimeout,
+            pollTimeout: pollTimeout,
+            pollInterval: pollInterval,
+            transitionTimeout: transitionTimeout,
+            switchReconnectTimeout: 0.05,
+            switchReconnectWindow: switchReconnectWindow,
+            switchReconnectFirstBackoff: switchReconnectFirstBackoff,
+            switchReconnectMaxBackoff: switchReconnectMaxBackoff,
+            switchOverallTimeout: 60
+        )
+
+        do {
+            // 2 s against the 50 ms cap is a 40x margin, so scheduling noise on a loaded runner cannot
+            // flip which one wins.
+            _ = try await hangingLauncher.ensureZcashAppOpen(transport: stalled) {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                return late
+            }
+            XCTFail("A reconnect that hangs after a failed first query must be cut off at the cap")
+        } catch let error as ZcashError {
+            guard case .ledgerBluetoothConnectionFailed(nil) = error else {
+                return XCTFail("Unexpected error \(error.code)")
+            }
+        }
+
+        let stalledCloseCount = await stalled.closeCount
+        XCTAssertEqual(stalledCloseCount, 1)
+        let lateCloseCount = await late.closeCount
+        XCTAssertEqual(lateCloseCount, 1, "a transport produced after losing the race is closed, not leaked")
+        let lateReceived = await late.received
+        XCTAssertEqual(lateReceived.count, 0, "the loser is closed before anything is sent on it")
+    }
+
     func testALockedDeviceIsNotRetriedOnAFreshConnection() async throws {
         let locked = scripted([LedgerReplies.status(0x5515)])
 
@@ -581,5 +1061,50 @@ final class LedgerZcashAppTests: XCTestCase {
                 return XCTFail("Unexpected error \(error.code)")
             }
         }
+    }
+
+    // MARK: The app switch's own exchanges
+
+    func testANonZcashErrorFromTheAppSwitchsOwnExchangeIsNormalized() async throws {
+        struct BoomError: Error {}
+        let transport = ScriptedLedgerTransport { _, _ in throw BoomError() }
+
+        do {
+            _ = try await launcher.ensureZcashAppOpen(transport: transport, reconnect: noReconnect())
+            XCTFail("A non-ZcashError from the app switch's own exchange must be normalized")
+        } catch let error as ZcashError {
+            guard case .ledgerTransportFailed = error else {
+                return XCTFail("Unexpected error \(error.code)")
+            }
+        } catch {
+            XCTFail("Expected a ZcashError, got \(error)")
+        }
+    }
+
+    func testACancelledCallerSendsNothingOnTheAppQuery() async throws {
+        // A transport that would succeed if the query ever actually reached it, so a failure to
+        // check cancellation first would go unnoticed as a passing call rather than a hang.
+        let transport = ScriptedLedgerTransport { _, _ in dashboardReply }
+
+        let task = Task { () -> LedgerRunningApp in
+            // Spins until this task's own cancellation is visible, so `currentApp` below is entered
+            // only once cancellation is guaranteed to be observed by `Task.checkCancellation()` —
+            // deterministic, unlike racing a fixed delay against `task.cancel()`.
+            while !Task.isCancelled {
+                await Task.yield()
+            }
+            return try await launcher.currentApp(transport: transport)
+        }
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            XCTFail("A cancelled caller must not receive a result")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        let received = await transport.received
+        XCTAssertTrue(received.isEmpty, "a cancelled caller sends nothing")
     }
 }
