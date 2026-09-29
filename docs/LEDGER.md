@@ -46,7 +46,11 @@ After a first pairing the device is on its dashboard rather than the Zcash app, 
 fails with `ledgerWrongApp`. Before creating a `LedgerDevice` or signing, call
 `LedgerZcashApp.ensureZcashAppOpen(transport:reconnect:)` on a fresh connection and use the transport
 it returns instead of the one passed in: the Bluetooth link can drop while the device switches apps,
-and `ensureZcashAppOpen` reconnects through `reconnect` when it does.
+and `ensureZcashAppOpen` reconnects through `reconnect` when it does. Each such reconnect gets
+10 seconds of its own and is cancelled past them; a reconnect that fails starts the wait for the app
+over, since the device may still be rebooting into it, and the third one that fails propagates its
+own failure (typically `ledgerBluetoothConnectionFailed`) instead of the generic `ledgerWrongApp`
+timeout.
 
 ## Pairing an account
 

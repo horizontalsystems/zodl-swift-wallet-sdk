@@ -65,8 +65,14 @@ final class LedgerZcashAppTests: XCTestCase {
     private let queryTimeout: TimeInterval = 5
     private let pollInterval: TimeInterval = 0.001
     private let transitionTimeout: TimeInterval = 0.2
+    private let switchReconnectTimeout: TimeInterval = 1
 
-    private lazy var launcher = LedgerAppLauncher(queryTimeout: queryTimeout, pollInterval: pollInterval, transitionTimeout: transitionTimeout)
+    private lazy var launcher = LedgerAppLauncher(
+        queryTimeout: queryTimeout,
+        pollInterval: pollInterval,
+        transitionTimeout: transitionTimeout,
+        switchReconnectTimeout: switchReconnectTimeout
+    )
 
     // MARK: currentApp
 
@@ -366,6 +372,156 @@ final class LedgerZcashAppTests: XCTestCase {
                 return XCTFail("Unexpected error \(error.code)")
             }
         }
+    }
+
+    // MARK: Bounded reconnects while waiting for an app
+
+    func testAFailedReconnectThatOutlastsTheDeadlineStillReachesTheZcashApp() async throws {
+        let original = ScriptedLedgerTransport { _, history in
+            if history.count == 1 { throw ZcashError.ledgerBluetoothDisconnected }
+            return dashboardReply
+        }
+        let afterSwitch = scripted([zcashReply])
+        let reconnects = CallCounter()
+
+        let result = try await launcher.ensureZcashAppOpen(transport: original) {
+            let count = await reconnects.increment()
+            if count == 1 {
+                // Slower than the 0.2 s transition timeout, but still under the 1 s reconnect budget:
+                // this reconnect fails on its own, not by being cut off.
+                try await Task.sleep(nanoseconds: 300_000_000)
+                throw ZcashError.ledgerBluetoothConnectionFailed(nil)
+            }
+            return afterSwitch
+        }
+
+        XCTAssertTrue(isSame(result, afterSwitch))
+        let reconnectCount = await reconnects.count
+        XCTAssertEqual(reconnectCount, 2)
+        let originalCloseCount = await original.closeCount
+        XCTAssertEqual(originalCloseCount, 1)
+        let afterSwitchCloseCount = await afterSwitch.closeCount
+        XCTAssertEqual(afterSwitchCloseCount, 0)
+    }
+
+    func testAReconnectThatHangsIsCutOffAndTriedAgain() async throws {
+        let original = ScriptedLedgerTransport { _, history in
+            if history.count == 1 { throw ZcashError.ledgerBluetoothDisconnected }
+            return dashboardReply
+        }
+        let afterSwitch = scripted([zcashReply])
+        let hangingLauncher = LedgerAppLauncher(
+            queryTimeout: queryTimeout,
+            pollInterval: pollInterval,
+            transitionTimeout: transitionTimeout,
+            switchReconnectTimeout: 0.05
+        )
+        let reconnects = CallCounter()
+
+        let result = try await hangingLauncher.ensureZcashAppOpen(transport: original) {
+            let count = await reconnects.increment()
+            if count == 1 {
+                // Cancellation-aware, like the live Bluetooth connect: cut off by the race rather than
+                // ever producing a transport.
+                try await Task.sleep(nanoseconds: 999_000_000_000)
+            }
+            return afterSwitch
+        }
+
+        XCTAssertTrue(isSame(result, afterSwitch))
+        let reconnectCount = await reconnects.count
+        XCTAssertEqual(reconnectCount, 2)
+        let originalCloseCount = await original.closeCount
+        XCTAssertEqual(originalCloseCount, 1)
+        let afterSwitchCloseCount = await afterSwitch.closeCount
+        XCTAssertEqual(afterSwitchCloseCount, 0)
+    }
+
+    func testAReconnectThatIgnoresCancellationIsClosedWhenItLaterCompletes() async throws {
+        let original = ScriptedLedgerTransport { _, history in
+            if history.count == 1 { throw ZcashError.ledgerBluetoothDisconnected }
+            return dashboardReply
+        }
+        let late = scripted([dashboardReply])
+        let afterSwitch = scripted([zcashReply])
+        let hangingLauncher = LedgerAppLauncher(
+            queryTimeout: queryTimeout,
+            pollInterval: pollInterval,
+            transitionTimeout: transitionTimeout,
+            switchReconnectTimeout: 0.02
+        )
+        let reconnects = CallCounter()
+
+        let result = try await hangingLauncher.ensureZcashAppOpen(transport: original) {
+            let count = await reconnects.increment()
+            if count == 1 {
+                // Unlike the live Bluetooth connect (see the report), ignores its own cancellation and
+                // returns a transport anyway after losing the race: proves the loser is drained and
+                // closed rather than leaked.
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                return late
+            }
+            return afterSwitch
+        }
+
+        XCTAssertTrue(isSame(result, afterSwitch))
+        let lateCloseCount = await late.closeCount
+        XCTAssertEqual(lateCloseCount, 1, "a transport produced after losing the race is closed, not leaked")
+        let lateReceived = await late.received
+        XCTAssertEqual(lateReceived.count, 0, "the loser is closed before anything is sent on it")
+    }
+
+    func testTheThirdFailedReconnectPropagatesItsFailure() async throws {
+        let original = ScriptedLedgerTransport { _, history in
+            if history.count == 1 { throw ZcashError.ledgerBluetoothDisconnected }
+            return dashboardReply
+        }
+        let reconnects = CallCounter()
+
+        do {
+            _ = try await launcher.ensureZcashAppOpen(transport: original) {
+                await reconnects.increment()
+                throw ZcashError.ledgerBluetoothConnectionFailed(nil)
+            }
+            XCTFail("The third failed reconnect must propagate")
+        } catch let error as ZcashError {
+            guard case .ledgerBluetoothConnectionFailed = error else {
+                return XCTFail("Unexpected error \(error.code)")
+            }
+        }
+
+        let reconnectCount = await reconnects.count
+        XCTAssertEqual(reconnectCount, 3)
+        let originalCloseCount = await original.closeCount
+        XCTAssertEqual(originalCloseCount, 1)
+    }
+
+    func testTheCallersOwnTimeoutDuringAReconnectPropagatesAsCancellation() async throws {
+        let original = ScriptedLedgerTransport { _, history in
+            if history.count == 1 { throw ZcashError.ledgerBluetoothDisconnected }
+            return dashboardReply
+        }
+        let reconnects = CallCounter()
+
+        let task = Task {
+            try await launcher.ensureZcashAppOpen(transport: original) {
+                await reconnects.increment()
+                try await Task.sleep(nanoseconds: 999_000_000_000)
+                fatalError("unreachable: cancelled well before the sleep completes")
+            }
+        }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            XCTFail("The caller's own cancellation must propagate")
+        } catch is CancellationError {
+            // Expected: the cancellation reaches the caller unchanged.
+        }
+
+        let reconnectCount = await reconnects.count
+        XCTAssertEqual(reconnectCount, 1, "the caller's own cancellation is not a failed reconnect to retry")
     }
 
     // MARK: First-query retry
