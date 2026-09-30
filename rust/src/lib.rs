@@ -255,6 +255,33 @@ pub(crate) fn account_uuid_from_bytes(
     )))
 }
 
+// Per-target filter instead of a bare global level:
+// upstream `zcash_client_backend` #[instrument]s every block and batch
+// (~600k spans per fresh restore) at INFO, and through the os_log +
+// signpost layers each span costs syscalls on the scan producer thread
+// — measured as production pass1 3.4 s vs 0.5 s in the filtered
+// CLI/probe (2026-07-08 A18 seal log). Cap that crate at WARN; the
+// host-chosen level still governs everything else (engine logs
+// unchanged). Mirrors the filter the CLI and bench probe ship since
+// v0.6 P6.
+fn log_targets(host: LevelFilter) -> tracing_subscriber::filter::Targets {
+    tracing_subscriber::filter::Targets::new()
+        .with_default(host)
+        .with_target("zcash_client_backend", LevelFilter::WARN.min(host))
+        // The network stack under the sync engine: h2 logs every frame it receives at DEBUG, tens
+        // of thousands of events per resync, each through the os_log and signpost layers on the
+        // connection threads themselves. At most WARN, and never above the host's level: each
+        // target below is capped at `LevelFilter::WARN.min(host)` rather than a bare WARN
+        // default, because a global WARN default would also silence the engine's own INFO
+        // report lines whenever the host asks for INFO or more.
+        .with_target("h2", LevelFilter::WARN.min(host))
+        .with_target("hyper", LevelFilter::WARN.min(host))
+        .with_target("hyper_util", LevelFilter::WARN.min(host))
+        .with_target("rustls", LevelFilter::WARN.min(host))
+        .with_target("tonic", LevelFilter::WARN.min(host))
+        .with_target("tower", LevelFilter::WARN.min(host))
+}
+
 /// Initializes global Rust state, such as the logging infrastructure and threadpools.
 ///
 /// `log_level` defines how the Rust layer logs its events. These values are supported,
@@ -300,18 +327,7 @@ pub unsafe extern "C" fn zcashlc_init_on_load(log_level: *const c_char) {
             })
     };
 
-    // Per-target filter instead of a bare global level:
-    // upstream `zcash_client_backend` #[instrument]s every block and batch
-    // (~600k spans per fresh restore) at INFO, and through the os_log +
-    // signpost layers each span costs syscalls on the scan producer thread
-    // — measured as production pass1 3.4 s vs 0.5 s in the filtered
-    // CLI/probe (2026-07-08 A18 seal log). Cap that crate at WARN; the
-    // host-chosen level still governs everything else (engine logs
-    // unchanged). Mirrors the filter the CLI and bench probe ship since
-    // v0.6 P6.
-    let log_filter = tracing_subscriber::filter::Targets::new()
-        .with_default(log_filter)
-        .with_target("zcash_client_backend", LevelFilter::WARN);
+    let log_filter = log_targets(log_filter);
 
     // Set up the tracing layers for the Apple OS logging framework.
     #[cfg(target_vendor = "apple")]
@@ -328,8 +344,8 @@ pub unsafe extern "C" fn zcashlc_init_on_load(log_level: *const c_char) {
     // the subscriber): greppable in device logs AND via `strings` on the
     // built slice.
     tracing::info!(
-        zcashlc_build = "2026-08-26.v0.14-interactive-proving-qos",
-        "tracing initialized (zcash_client_backend capped at WARN)"
+        zcashlc_build = "2026-09-30.v0.15-network-log-cap",
+        "tracing initialized (zcash_client_backend and the network stack capped at min(host, WARN))"
     );
 
     // Log panics instead of writing them to stderr.
@@ -5107,6 +5123,7 @@ pub(crate) fn parse_optional_height(value: i64) -> anyhow::Result<Option<BlockHe
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing::Level;
 
     /// The C callers select the outgoing viewing key policy by number; only the two documented
     /// values are accepted, so a caller asking for an unrecoverable send is never silently given
@@ -5435,6 +5452,76 @@ mod tests {
                 "{source:?} must keep the default 0.1 ZEC minimum split value"
             );
         }
+    }
+
+    /// A silenced host (`.noLogging` on the Swift side) must silence the network stack and
+    /// `zcash_client_backend` too — a `Targets` entry sets a crate's level, it doesn't cap it,
+    /// so a naive `.with_target(crate, LevelFilter::WARN)` would keep emitting WARN events from
+    /// these crates even when the host asked for nothing at all.
+    #[test]
+    fn log_targets_host_off_disables_network_and_backend_targets() {
+        let targets = log_targets(LevelFilter::OFF);
+        assert!(
+            !targets.would_enable("h2", &Level::ERROR),
+            "h2 must not log ERROR when the host asked for no logging at all"
+        );
+        assert!(
+            !targets.would_enable("h2", &Level::WARN),
+            "h2 must not log WARN when the host asked for no logging at all"
+        );
+        assert!(
+            !targets.would_enable("zcash_client_backend", &Level::WARN),
+            "zcash_client_backend must not log WARN when the host asked for no logging at all"
+        );
+    }
+
+    /// `.default(.error)` on the Swift side must still let the capped crates report their own
+    /// ERROR events; only their WARN level (or below) should give way to the stricter host level.
+    #[test]
+    fn log_targets_host_error_caps_network_crate_at_error() {
+        let targets = log_targets(LevelFilter::ERROR);
+        assert!(
+            targets.would_enable("rustls", &Level::ERROR),
+            "rustls must still log ERROR when the host asked for ERROR"
+        );
+        assert!(
+            !targets.would_enable("rustls", &Level::WARN),
+            "rustls must not log WARN when the host asked for ERROR only"
+        );
+    }
+
+    /// A permissive host (DEBUG or more) must not pull the capped crates up past WARN, but must
+    /// leave engine targets (outside the capped seven) following the host level directly.
+    #[test]
+    fn log_targets_host_debug_leaves_capped_crate_at_warn_and_engine_at_host_level() {
+        let targets = log_targets(LevelFilter::DEBUG);
+        assert!(
+            targets.would_enable("hyper", &Level::WARN),
+            "hyper must still log WARN when the host asked for DEBUG"
+        );
+        assert!(
+            !targets.would_enable("hyper", &Level::INFO),
+            "hyper must stay capped at WARN even when the host asked for DEBUG"
+        );
+        assert!(
+            targets.would_enable("zodl_slipstream", &Level::DEBUG),
+            "an uncapped engine target must follow the host's DEBUG level"
+        );
+    }
+
+    /// Same shape one rung down: INFO host still caps the network stack at WARN, while an
+    /// engine target (not one of the seven) follows the host level directly.
+    #[test]
+    fn log_targets_host_info_leaves_capped_crate_at_warn_and_engine_at_host_level() {
+        let targets = log_targets(LevelFilter::INFO);
+        assert!(
+            targets.would_enable("tower", &Level::WARN),
+            "tower must still log WARN when the host asked for INFO"
+        );
+        assert!(
+            targets.would_enable("zodl_slipstream", &Level::INFO),
+            "an uncapped engine target must follow the host's INFO level"
+        );
     }
 }
 
