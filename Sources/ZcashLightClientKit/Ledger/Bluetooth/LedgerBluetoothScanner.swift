@@ -51,8 +51,11 @@ public final class LedgerBluetoothScanner: @unchecked Sendable {
     ///     pairing code on the device within it.
     /// - Throws: ``ZcashError/ledgerDeviceNotFound`` when the system no longer knows the device,
     ///   ``ZcashError/ledgerBluetoothPairingRefused`` when pairing was refused or the device no longer
-    ///   holds it, ``ZcashError/ledgerTimeout``, ``ZcashError/ledgerBluetoothConnectionFailed(_:)``, or
-    ///   `CancellationError`.
+    ///   holds it, ``ZcashError/ledgerTimeout``, ``ZcashError/ledgerBluetoothConnectionFailed(_:)``,
+    ///   ``ZcashError/ledgerTransportReplaced`` when a later call to this method, for the same
+    ///   device, displaces this one while it is still connecting,
+    ///   ``ZcashError/ledgerBluetoothDisconnected`` when Bluetooth resets while this call is
+    ///   connecting, or `CancellationError`.
     public func connect(to device: LedgerBluetoothDevice, timeout: TimeInterval = 60) async throws -> LedgerBluetoothTransport {
         try await central.waitUntilPoweredOn()
         let connection = try await central.connect(to: device, timeout: timeout)

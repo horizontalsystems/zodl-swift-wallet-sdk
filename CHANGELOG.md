@@ -18,9 +18,11 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LedgerBluetoothTransport` with `connect(to:timeout:)`. The app must declare
   `NSBluetoothAlwaysUsageDescription`, and a sandboxed macOS app the
   `com.apple.security.device.bluetooth` entitlement. The first connection to a device brings up
-  Bluetooth pairing. A transport closes itself, and every later call throws
-  `ZcashError.ledgerTransportClosed`, once an exchange fails after its command reached the device
-  (timeout, disconnect, malformed reply) or its task is cancelled; open a new connection then.
+  Bluetooth pairing. A transport closes, and every later call throws
+  `ZcashError.ledgerTransportClosed`, once an exchange fails after it has started (a timeout, a
+  disconnect, a malformed reply, or a cancelled task); open a new connection then. A task cancelled
+  before its exchange starts, between commands or while queued behind another exchange on the same
+  transport, leaves the transport open.
 - `LedgerAPDUTransport`, the protocol the pairing and signing code depends on
   (`exchange(_:timeout:)`, `close()`), for custom transports and test doubles.
 - `LedgerDevice(transport:networkType:)`: `appVersion()` (a `LedgerAppVersion`),

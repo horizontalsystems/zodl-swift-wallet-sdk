@@ -98,7 +98,8 @@ public actor LedgerDevice {
     ///   - zip32AccountIndex: The account to export.
     ///   - readTimeout: How long each read before the export may take, and the cap on one retry's own
     ///     `reconnect`. Defaults to ``defaultReadTimeout``, the timeout every other read uses; pass
-    ///     ``defaultPairingReadTimeout`` to detect a stalled device early.
+    ///     ``defaultPairingReadTimeout`` to detect a stalled device early. `.infinity` means no cap on
+    ///     the reads' one reconnect either: it still runs once, just unbounded, instead of trapping.
     ///   - reconnect: Opens a fresh connection to the same device, for one retry of the reads before
     ///     the export. `nil` for no retry. It runs while this device holds its serializing gate, which
     ///     is not reentrant: it must not call this device, directly or through anything that waits on

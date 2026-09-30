@@ -528,6 +528,27 @@ final class LedgerDeviceTests: XCTestCase {
         let elapsedSeconds = TimeInterval(DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds) / 1_000_000_000
         XCTAssertLessThan(elapsedSeconds, 1, "the reconnect race must cut this off in well under the 5 s the brief allows")
     }
+
+    /// The reviewer's second-pass scenario: `.infinity` is a valid `readTimeout`, meaning no cap on
+    /// the retry's own reconnect, and must not trap converting it to `UInt64` nanoseconds for the
+    /// race's own `Task.sleep`. A reconnect that actually works still bounds nothing here, and pairing
+    /// completes.
+    func testAnInfiniteReadTimeoutDoesNotTrapAndStillPairs() async throws {
+        let ufvk = try testnetUFVK()
+        let stalled = ScriptedLedgerTransport { _, _ in throw ZcashError.ledgerTimeout }
+        let fresh = device(ufvk: ufvk.stringEncoded)
+        let ledger = LedgerDevice(transport: stalled, networkType: .testnet)
+
+        let pairing = try await ledger.pairAccount(
+            zip32AccountIndex: Zip32AccountIndex(0),
+            readTimeout: .infinity,
+            reconnect: { fresh }
+        )
+
+        XCTAssertEqual(pairing.ufvk, ufvk)
+        let stalledCloseCount = await stalled.closeCount
+        XCTAssertEqual(stalledCloseCount, 1, "the stalled transport is still closed before the reconnect")
+    }
 }
 
 // MARK: - Error mapping

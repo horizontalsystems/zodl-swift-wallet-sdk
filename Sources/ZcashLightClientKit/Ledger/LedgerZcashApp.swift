@@ -511,6 +511,20 @@ private enum ReconnectOutcome {
     case timedOut
 }
 
+/// The nanoseconds `raceReconnect(_:timeout:)` races `reconnect` against, or `nil` when `timeout`
+/// cannot bound a race at all: not finite (`.infinity` or `.nan`), or too large to fit `UInt64`
+/// nanoseconds. `Task.sleep(nanoseconds:)` needs a `UInt64`, and converting such a `timeout` to one
+/// directly traps; `raceReconnect(_:timeout:)` treats `nil` here as no timeout instead, awaiting
+/// `reconnect()` with no cap of its own. A negative or zero `timeout` is a 0 ns sleep, i.e. an
+/// immediate timeout, `0`.
+func reconnectRaceNanoseconds(_ timeout: TimeInterval) -> UInt64? {
+    guard timeout.isFinite else { return nil }
+    guard timeout > 0 else { return 0 }
+    let nanoseconds = timeout * 1_000_000_000
+    guard nanoseconds < TimeInterval(UInt64.max) else { return nil }
+    return UInt64(nanoseconds)
+}
+
 /// Races `reconnect` against `timeout`; the first to finish cancels the other. `reconnect` is
 /// caller-supplied and may ignore that cancellation, so a transport it still produces after losing the
 /// race — to the timeout, or to an error such as the caller's own cancellation — is drained explicitly
@@ -519,18 +533,35 @@ private enum ReconnectOutcome {
 /// read from `Task.checkCancellation()` so a coincidental race at the deadline is never misreported as
 /// this timeout firing.
 ///
+/// A `timeout` that is not finite, or not representable in `UInt64` nanoseconds (see
+/// `reconnectRaceNanoseconds(_:)`), races nothing: this just awaits `reconnect()` directly, with no cap
+/// of its own, instead of trapping — pass `.infinity` for that. A negative or zero `timeout` behaves as
+/// a 0 ns sleep, i.e. an immediate timeout.
+///
+/// With no timer, the caller's cancellation reaches `reconnect` only through `reconnect`'s own
+/// cancellation checks. A `reconnect` that ignores cancellation keeps the caller waiting until it
+/// returns; the transport it returns is then owned by whichever caller asked for it. The pairing
+/// read adopts it onto `LedgerDevice`'s `transport` right away, and since `LedgerCommands.exchange`
+/// now checks cancellation before its `do` instead of inside it, the read that follows throws
+/// without closing -- so a cancelled `pairAccount` leaves the new transport there for its own
+/// caller to close. `ensureZcashAppOpen` closes it itself, through `closeReplacement()`, if the
+/// overall call fails.
+///
 /// Not `private`: shared by `AppSwitch`'s own app-switch reconnects and by `LedgerDevice`'s
 /// pairing-read reconnect, rather than duplicating this race in both places.
 func raceReconnect(
     _ reconnect: @escaping @Sendable () async throws -> any LedgerAPDUTransport,
     timeout: TimeInterval
 ) async throws -> any LedgerAPDUTransport {
-    try await withThrowingTaskGroup(of: ReconnectOutcome.self) { group in
+    guard let sleepNanoseconds = reconnectRaceNanoseconds(timeout) else {
+        return try await reconnect()
+    }
+    return try await withThrowingTaskGroup(of: ReconnectOutcome.self) { group in
         group.addTask {
             .connected(try await reconnect())
         }
         group.addTask {
-            try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            try await Task.sleep(nanoseconds: sleepNanoseconds)
             return .timedOut
         }
 

@@ -664,6 +664,25 @@ final class LedgerZcashAppTests: XCTestCase {
         XCTAssertEqual(lateReceived.count, 0, "the loser is closed before anything is sent on it")
     }
 
+    /// `reconnectRaceNanoseconds(_:)`'s mapping from `timeout` to the race's `Task.sleep` bound: not
+    /// finite or too large for `UInt64` nanoseconds maps to `nil` (no cap), a negative or zero
+    /// `timeout` maps to `0`, and an ordinary value converts to nanoseconds.
+    func testReconnectRaceNanosecondsMapsTimeoutToASleepBound() {
+        let cases: [(TimeInterval, UInt64?)] = [
+            (.infinity, nil),
+            (-.infinity, nil),
+            (.nan, nil),
+            (1e300, nil),
+            (-1, 0),
+            (0, 0),
+            (0.5, 500_000_000),
+            (10, 10_000_000_000)
+        ]
+        for (timeout, expected) in cases {
+            XCTAssertEqual(reconnectRaceNanoseconds(timeout), expected, "timeout \(timeout)")
+        }
+    }
+
     func testAnInstantlyFailingReconnectIsRetriedWithBackoffUntilTheWindowRunsOut() async throws {
         let original = ScriptedLedgerTransport { _, history in
             if history.count == 1 { throw ZcashError.ledgerBluetoothDisconnected }

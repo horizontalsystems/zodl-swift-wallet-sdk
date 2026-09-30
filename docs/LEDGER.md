@@ -39,11 +39,12 @@ let transport = try await scanner.connect(to: pickedDevice)
 `LedgerBluetoothTransport` conforms to `LedgerAPDUTransport`, the only thing the pairing and signing
 code needs; a test double conforms to it too.
 
-A transport closes itself when an exchange fails after its command reached the wire (a timeout, a
-disconnect, a malformed reply) or when the task awaiting it is cancelled: the device's reply to that
-command could otherwise be read as the reply to the next one. Every later call then throws
-`ZcashError.ledgerTransportClosed`, and the recovery is a new connection. A refusal from the device
-(the user declining, a locked device, another app open) leaves the transport open.
+A transport closes when an exchange fails after it has started -- a timeout, a disconnect, a
+malformed reply, or a cancelled task -- since the device's reply to that command could otherwise be
+read as the reply to the next one. Every later call then throws `ZcashError.ledgerTransportClosed`,
+and the recovery is a new connection. A task cancelled before its exchange starts (between commands,
+or while queued behind another exchange on the same transport) leaves the transport open, and so
+does a refusal from the device (the user declining, a locked device, another app open).
 
 After a first pairing the device is on its dashboard rather than the Zcash app, and any command then
 fails with `ledgerWrongApp`. Before creating a `LedgerDevice` or signing, call
