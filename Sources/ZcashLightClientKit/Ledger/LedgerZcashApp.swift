@@ -61,6 +61,14 @@ public enum LedgerZcashApp {
     /// 10 seconds. A reconnect that fails also starts the 10 seconds of polling over. The reconnect
     /// after a failed first query also has 10 seconds, and is not retried.
     ///
+    /// Each wait for the device to report the new app — for the dashboard once the running app is
+    /// closed, and for the Zcash app once it is asked to open — is itself capped at 60 seconds of its
+    /// own, timed from that wait's own start regardless of how many times the 10-second deadlines above
+    /// get reset along the way by a reconnect that keeps failing, backing off, and then succeeding. In
+    /// the non-dashboard path both waits run, with the user's on-device confirmation between them, so
+    /// the whole call can take longer than 60 seconds; that confirmation still has no timeout of its
+    /// own, as above.
+    ///
     /// A transport whose link fails during the call is closed when it fails, before it is replaced.
     /// The caller closes the one returned, and `transport` if the call fails; a transport opened
     /// through `reconnect` is closed here when the call fails.
