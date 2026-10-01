@@ -558,7 +558,7 @@ final class LedgerErrorMappingTests: XCTestCase {
         LedgerFFIError(kind: .deviceRefused, statusWord: statusWord, isTransient: false, isRestartable: false, reason: "")
     }
 
-    func testARefusalFromTheDashboardOrAnotherAppIsAWrongApp() {
+    func testARefusalFromTheDeviceOSIsAWrongApp() {
         for statusWord: UInt16 in [0x6E01, 0x6511] {
             let error = deviceRefusal(statusWord).zcashError
             guard case let .ledgerWrongApp(mappedStatusWord) = error else {

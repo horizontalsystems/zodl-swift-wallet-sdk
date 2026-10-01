@@ -7,8 +7,9 @@ import Foundation
 
 /// The status word the device answers from its dashboard, with no app open.
 private let swDeviceDashboard: UInt16 = 0x6E01
-/// The status word the device answers while another app is open.
-private let swAnotherAppOpen: UInt16 = 0x6511
+/// The device OS's "wrong length" answer: a command's data length doesn't match the fixed length of
+/// the OS instruction with the same code, so a Zcash command reached the dashboard, not the Zcash app.
+private let swOsWrongLength: UInt16 = 0x6511
 
 extension LedgerFFIError {
     /// The public error for this failure.
@@ -30,10 +31,10 @@ extension LedgerFFIError {
         case .derivationBudgetExhausted:
             return .ledgerDerivationBudgetExhausted
         case .deviceRefused:
-            // The engine reports a refusal from the dashboard or from another running app as a plain,
-            // unclassified refusal; both mean the Zcash app is not running, so they are `ledgerWrongApp`
-            // like any other unrecognized command, not a device condition.
-            if statusWord == swDeviceDashboard || statusWord == swAnotherAppOpen {
+            // The engine reports these two answers from the device OS as a plain, unclassified refusal;
+            // both mean the Zcash app is not running, so they are `ledgerWrongApp` like any other
+            // unrecognized command, not a device condition.
+            if statusWord == swDeviceDashboard || statusWord == swOsWrongLength {
                 return .ledgerWrongApp(statusWord ?? 0)
             }
             return .ledgerDeviceRefused(statusWord ?? 0, isTransient)
