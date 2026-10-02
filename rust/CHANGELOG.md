@@ -668,6 +668,12 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (valargroup/vote-nullifier-pir#173), and `zakura-wallet-lib`
   (zakura-core/wallet-libraries#83). Each entry is replaced by the release that contains its
   pull request. The `zcashlc_voting_*` C surface is unchanged.
+- `zcashlc_init_data_database` now creates the
+  `ext_zcashlc_orchard_ironwood_migration_immediate_runs` extension table, moving into it any
+  records held by the `sdk_immediate_runs` table that read-write `zcashlc_migration_*` calls used
+  to create on demand, and dropping that table. `zcashlc_migration_record_immediate_run` and
+  `zcashlc_migration_progress` read and write only the new table, so `zcashlc_init_data_database`
+  must have run with this version before either is called.
 
 ### Removed
 - The step-by-step coinholder-voting C surface is gone: `zcash_voting` absorbed the
@@ -820,10 +826,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `zcashlc_slipstream_wallet_summary` no longer returns the empty sentinel during the ~30 s gap after
   a restore completes, and once NU6.3 is active reports the collapsed recovery balance in the
   Ironwood pool rather than Orchard.
-- `zcashlc_migration_*` read-write entry points no longer create the wallet database or their
-  `sdk_immediate_runs` side table when asked about a wallet that does not exist or is not
-  initialized; they return an error instead (a stray table used to make the app treat an empty
-  file as a wallet).
+- `zcashlc_migration_*` read-write entry points no longer create the wallet database, or any table
+  in it, when asked about a wallet that does not exist or was never initialized; they return an
+  error instead (a stray table used to make an empty file look like a wallet).
 
 ## 2.8.0-rc.2 - 2026-07-28
 

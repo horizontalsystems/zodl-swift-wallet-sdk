@@ -42,6 +42,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as `proposalInvalid`, and a wallet could only tell them apart by the upstream error text, which
   redaction now removes; the new case lets it say "scan further and retry". An exhaustive `switch`
   over `RustErrorKind` stops compiling until the new case is handled.
+- `migrationProgress(accountUUID:)` and `recordImmediateMigration(accountUUID:txid:)` use a record
+  that `prepare()` now creates, so on a wallet upgraded from an earlier SDK version they throw until
+  the synchronizer has been prepared with this version.
 
 ## Removed
 
@@ -55,6 +58,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Transaction submission through `Broadcaster` now treats a server rejection as accepted when that
   same server confirms it already knows the transaction. No caller changes are required.
+- The migration APIs no longer create a wallet database, or any table in one, when called for a
+  wallet whose database does not exist or was never initialized; they throw instead. Such a call
+  used to leave behind a database file holding a single table, which a wallet could mistake for
+  an existing one.
 
 # 5.2.0 - 2026-10-09
 
