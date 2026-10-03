@@ -289,6 +289,8 @@ public enum ZcashErrorCode: String {
     case rustSlipstreamUnsupported = "ZRUST0097"
     /// The engine could not prove its previous pass and wallet writer had stopped before a wallet mutation; the mutation was refused.
     case slipstreamEngineNotQuiescent = "ZRUST0155"
+    /// The text is not a gift card link the SDK can read: it is malformed, of an unsupported
+    case rustParseGiftCardLink = "ZRUST0156"
     /// The rust layer could not tell whether a proposal needs the Sapling proving parameters,
     case rustProposalRequiresSaplingParams = "ZRUST0157"
     /// Error from rust layer when calling ZcashRustBackend.migrationProgress
@@ -559,6 +561,16 @@ public enum ZcashErrorCode: String {
     case synchronizerSpendingKeyDoesNotBelongToTheWallet = "ZSYNCO0008"
     /// The attempt to rescan to height that is bellow sapling activation.
     case rescanFromHeightBellowSaplingActivation = "ZSYNCO0009"
+    /// The gift card is for a different network than the one the redeemer was created for.
+    case giftCardNetworkMismatch = "ZGIFT0001"
+    /// Another `GiftCardRedeemer` for the same card is still active in this process. Call
+    case giftCardRedeemerAlreadyActive = "ZGIFT0002"
+    /// `redeem(to:)` was called before `check()` prepared the card wallet, or after `cleanup()`.
+    case giftCardRedeemerNotReady = "ZGIFT0003"
+    /// The card has no spendable funds to redeem: it was already redeemed, was never funded, or
+    case giftCardNothingToRedeem = "ZGIFT0004"
+    /// The redeemer was cleaned up and can no longer be used. Create a new one.
+    case giftCardRedeemerCleanedUp = "ZGIFT0005"
     /// Attempt to init TxId with input that is not 32 bytes.
     case txIdNot32Bytes = "ZMODEL0001"
     /// Attempt to init TxId with invalid hex encoding.

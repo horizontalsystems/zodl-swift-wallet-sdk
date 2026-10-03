@@ -11,6 +11,25 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `NetworkActivationHeights.nu7` sets the NU7 activation height of a custom or regtest network.
   A `nil` height means "not activated".
 
+- `GiftCard` reads a gift card link with `GiftCard(link:)`: a `https://gift.zodl.com/` link or a
+  Vizor payment link. It exposes the card's `origin`, `network`, `birthdayHeight`, the unverified
+  `statedAmount` and `message` the link carries, and the card wallet's Orchard-only
+  `fundingAddress`. Parsing is offline. An unreadable link throws `ZcashError.rustParseGiftCardLink`
+  (`ZRUST0156`), whose message never contains any part of the link. The card's seed is not
+  exposed, and `description`, `debugDescription` and reflection of a `GiftCard` are redacted.
+- `GiftCardRedeemer` sweeps a card into the user's wallet through a temporary wallet that runs
+  beside the app's synchronizer: `init(card:network:endpoint:storageDirectory:loggingPolicy:)`,
+  then `check()` (syncs the card wallet from its birthday and returns a `GiftCardStatus`: `.ready`,
+  `.pending` while the card's funds wait for their 10 confirmations, or `.empty`, with `total`,
+  `spendable` and `pending` amounts), `redeem(to:)` (sends the whole spendable balance minus the
+  ZIP 317 fee to a `UnifiedAddress` and returns the `TransactionSubmitResult`s), and `cleanup()`
+  (stops the temporary wallet and deletes all of its files). The redeeming transaction discards
+  the outgoing viewing key, so the card's key — which the card's issuer can rederive — does not
+  reveal the recipient, and it needs no Sapling parameters for an address with an Orchard
+  receiver. `check()` downloads and scans the blocks since the card's birthday. Only one redeemer
+  per card may be alive at a time. New errors: `giftCardNetworkMismatch` (`ZGIFT0001`),
+  `giftCardRedeemerAlreadyActive` (`ZGIFT0002`), `giftCardRedeemerNotReady` (`ZGIFT0003`),
+  `giftCardNothingToRedeem` (`ZGIFT0004`) and `giftCardRedeemerCleanedUp` (`ZGIFT0005`).
 - `OvkPolicy` (`.sender`, `.discard`) and
   `Synchronizer.createProposedTransactions(proposal:spendingKey:ovkPolicy:)` /
   `Broadcaster.createProposedTransactions(proposal:spendingKey:ovkPolicy:)`. With `.discard` the

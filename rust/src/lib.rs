@@ -99,6 +99,15 @@ mod eip681;
 mod error_report;
 mod ext_schema;
 mod ffi;
+// `gift.rs` is shared verbatim with the card-minting tooling, so items this crate does not
+// use (minting, link writing) are allowed rather than edited out, and rustfmt leaves it alone so
+// the copies stay byte-identical. cbindgen must not parse it: its `Error` enum would shadow the
+// generic `Error` paths cbindgen resolves elsewhere. `gift_ffi` carries its C surface.
+/// cbindgen:ignore
+#[allow(dead_code)]
+#[rustfmt::skip]
+mod gift;
+mod gift_ffi;
 mod interactive_qos;
 mod migration;
 mod migration_engine;

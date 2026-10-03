@@ -8,6 +8,14 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `zcashlc_parse_gift_card_link(link)` reads a gift card link — a `https://gift.zodl.com/` link or
+  a Vizor `v1`/`v2`/`v3` payment link — without touching a database or the network, and returns an
+  `FfiGiftCardLink`: its `origin` (`FfiGiftCardOrigin`), `network_id` (`0` testnet, `1` mainnet;
+  regtest cards are refused), `birthday_height`, the informational amount (`has_amount`/`amount`,
+  in zatoshis), a nullable `description`, the card wallet's Orchard-only `funding_address`, and the
+  64-byte BIP 39 `seed` of the card wallet (ZIP 32 account 0). Free it with
+  `zcashlc_free_gift_card`, which zeroes the seed. On failure it returns null with the last error
+  set; the error never contains any part of the link, which carries a spending secret.
 - `zcashlc_proposal_requires_sapling_params(proposal_ptr, proposal_len)` reports, without a
   database, whether creating a proposal's transactions needs the Sapling proving parameters: `1`
   when any step has a Sapling input, payment, change or dummy output (or leaves a pool

@@ -37,6 +37,52 @@ struct ZcashKeyDerivationBackend: ZcashKeyDerivationBackendWelding {
         return AddressMetadata(network: network, addrType: addrType)
     }
 
+    // MARK: Gift cards
+
+    /// Reads a gift card link through the rust layer.
+    ///
+    /// Stateless: it reads no database and makes no network request.
+    /// - Throws: `rustParseGiftCardLink` if the text is not a gift card link the SDK can read. The
+    ///   error never includes any part of the link.
+    static func parseGiftCardLink(_ link: String) throws -> GiftCard {
+        guard !link.containsCStringNullBytesBeforeStringEnding() else {
+            throw ZcashError.rustParseGiftCardLink("gift card link contains a NUL character")
+        }
+
+        guard let cardPtr = zcashlc_parse_gift_card_link([CChar](link.utf8CString)) else {
+            throw ZcashError.rustParseGiftCardLink(
+                ZcashKeyDerivationBackend.lastErrorMessage(fallback: "`parseGiftCardLink` failed with unknown error")
+            )
+        }
+        defer { zcashlc_free_gift_card(cardPtr) }
+
+        let ffiCard = cardPtr.pointee
+        guard let network = NetworkType.forNetworkId(ffiCard.network_id) else {
+            throw ZcashError.rustParseGiftCardLink("gift card link is for an unsupported network")
+        }
+
+        let origin: GiftCard.Origin
+        switch ffiCard.origin {
+        case FfiGiftCardOrigin_Zodl: origin = .zodl
+        case FfiGiftCardOrigin_VizorV1: origin = .vizorV1
+        case FfiGiftCardOrigin_VizorV2: origin = .vizorV2
+        case FfiGiftCardOrigin_VizorV3: origin = .vizorV3
+        default: throw ZcashError.rustParseGiftCardLink("gift card link has an unknown origin")
+        }
+
+        let seed = withUnsafeBytes(of: ffiCard.seed) { [UInt8]($0) }
+
+        return GiftCard(
+            origin: origin,
+            network: network,
+            birthdayHeight: BlockHeight(ffiCard.birthday_height),
+            statedAmount: ffiCard.has_amount ? Zatoshi(Int64(ffiCard.amount)) : nil,
+            description: ffiCard.description.map { String(cString: $0) },
+            fundingAddress: try UnifiedAddress(encoding: String(cString: ffiCard.funding_address), network: network),
+            seed: GiftCard.Seed(bytes: seed)
+        )
+    }
+
     func receiverTypecodesOnUnifiedAddress(_ address: String) throws -> [UInt32] {
         guard !address.containsCStringNullBytesBeforeStringEnding() else {
             throw ZcashError.rustReceiverTypecodesOnUnifiedAddressContainsNullBytes(address)
