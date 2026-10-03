@@ -1755,9 +1755,18 @@ public actor SlipstreamSynchronizer: Synchronizer {
         proposal: Proposal,
         spendingKey: UnifiedSpendingKey
     ) async throws -> AsyncThrowingStream<TransactionSubmitResult, Error> {
+        try await createProposedTransactions(proposal: proposal, spendingKey: spendingKey, ovkPolicy: .sender)
+    }
+
+    public func createProposedTransactions(
+        proposal: Proposal,
+        spendingKey: UnifiedSpendingKey,
+        ovkPolicy: OvkPolicy
+    ) async throws -> AsyncThrowingStream<TransactionSubmitResult, Error> {
         let transactions = try await broadcaster.createProposedTransactions(
             proposal: proposal,
-            spendingKey: spendingKey
+            spendingKey: spendingKey,
+            ovkPolicy: ovkPolicy
         )
         return submitTransactions(transactions)
     }

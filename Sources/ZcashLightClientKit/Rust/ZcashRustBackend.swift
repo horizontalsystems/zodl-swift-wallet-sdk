@@ -1360,7 +1360,8 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
     @DBActor
     func createProposedTransactions(
         proposal: FfiProposal,
-        usk: UnifiedSpendingKey
+        usk: UnifiedSpendingKey,
+        ovkPolicy: OvkPolicy
     ) async throws -> [Data] {
         let proposalBytes = try proposal.serializedData(partial: false).bytes
 
@@ -1377,7 +1378,8 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
                     spendParamsPath.1,
                     outputParamsPath.0,
                     outputParamsPath.1,
-                    networkType.networkId
+                    networkType.networkId,
+                    ovkPolicy.ffiValue
                 )
             }
         }
@@ -2758,6 +2760,32 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
         }
 
         return BlockHeight(height)
+    }
+
+    /// Reports whether creating the transactions of `proposal` needs the Sapling proving
+    /// parameters.
+    ///
+    /// It does when the proposal has any Sapling input, payment, change or dummy output; a
+    /// proposal that only touches the transparent, Orchard and Ironwood pools does not, so its
+    /// transactions can be created without the parameter files on disk. Stateless: it reads no
+    /// database.
+    /// - Throws: `rustProposalRequiresSaplingParams` if the proposal does not decode.
+    static func proposalRequiresSaplingParams(_ proposal: FfiProposal) throws -> Bool {
+        let proposalBytes = try proposal.serializedData(partial: false).bytes
+        let result = proposalBytes.withUnsafeBufferPointer { proposalPtr in
+            zcashlc_proposal_requires_sapling_params(proposalPtr.baseAddress, UInt(proposalBytes.count))
+        }
+
+        switch result {
+        case 0:
+            return false
+        case 1:
+            return true
+        default:
+            throw ZcashError.rustProposalRequiresSaplingParams(
+                lastErrorMessage(fallback: "`proposalRequiresSaplingParams` failed with unknown error")
+            )
+        }
     }
 }
 

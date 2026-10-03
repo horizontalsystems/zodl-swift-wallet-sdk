@@ -8,6 +8,11 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `zcashlc_proposal_requires_sapling_params(proposal_ptr, proposal_len)` reports, without a
+  database, whether creating a proposal's transactions needs the Sapling proving parameters: `1`
+  when any step has a Sapling input, payment, change or dummy output (or leaves a pool
+  unspecified), `0` otherwise, and `-1` with the last error set when the proposal does not decode.
+
 - `zcashlc_tor_http_get_with_timeout` adds an HTTP GET entry point whose trailing positive
   `timeout_ms` bounds the complete Tor operation, including connection setup, retries, and response
   body collection. It otherwise accepts the same arguments and returns the same response as
@@ -321,6 +326,14 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `zcashlc_set_custom_network` takes a trailing `nu7` activation height. As for the other
   heights, a negative value means "not activated on this network".
+- `zcashlc_create_proposed_transactions` takes a trailing `ovk_policy: u32`: `0` encrypts the
+  outputs to the sending account's outgoing viewing key, as every call did before, and `1` discards
+  it, so nobody holding the account's keys can recover the recipients, amounts or memos from the
+  chain. Any other value fails. Existing callers must pass `0` to keep their behavior.
+- `zcashlc_create_proposed_transactions` reads the Sapling parameter files only for a proposal that
+  `zcashlc_proposal_requires_sapling_params` reports as needing them. For any other proposal
+  `spend_params` and `output_params` may be null and the files need not exist; a proposal that
+  needs them with null paths fails instead of panicking.
 - `zcashlc_slipstream_snapshot` reports `tip_fresh = 1` only once the run that refreshed the
   chain tip has also completed a ChainTip-priority scan range (`spendable_hint = 1`) or reached
   Done, so a host that lifts a spendable-balance mask on `tip_fresh` never uncovers the transient

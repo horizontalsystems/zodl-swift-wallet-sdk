@@ -11,6 +11,21 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `NetworkActivationHeights.nu7` sets the NU7 activation height of a custom or regtest network.
   A `nil` height means "not activated".
 
+- `OvkPolicy` (`.sender`, `.discard`) and
+  `Synchronizer.createProposedTransactions(proposal:spendingKey:ovkPolicy:)` /
+  `Broadcaster.createProposedTransactions(proposal:spendingKey:ovkPolicy:)`. With `.discard` the
+  transactions' recipients, amounts and memos cannot be recovered from the chain by anyone holding
+  the spending account's keys, including this wallet after a restore from seed (its local record
+  of the transaction is unaffected). The existing two-argument calls keep `.sender`. Both new
+  requirements have default implementations, so custom conformers still compile; those defaults
+  throw for `.discard` rather than create recoverable outputs.
+- `createProposedTransactions` (on `Synchronizer` and `Broadcaster`) no longer downloads the Sapling
+  parameters, nor throws `walletTransEncoderCreateTransactionMissingSaplingParams`, for a proposal
+  with no Sapling input, payment, change or dummy output; only Sapling proposals need them. A new
+  wallet that only spends Orchard or Ironwood funds never downloads the 50 MB of parameter files.
+  A proposal that cannot be inspected throws `ZcashError.rustProposalRequiresSaplingParams`
+  (`ZRUST0157`).
+
 ## Changed
 
 ### NU7 pre-release crates

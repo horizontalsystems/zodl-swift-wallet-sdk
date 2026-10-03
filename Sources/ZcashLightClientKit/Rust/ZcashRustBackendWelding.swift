@@ -326,13 +326,18 @@ protocol ZcashRustBackendWelding {
     ) async throws -> FfiProposal?
 
     /// Creates a transaction from the given proposal.
+    ///
+    /// The Sapling proving parameters are only read when the proposal has a Sapling input,
+    /// payment, change or dummy output; see `ZcashRustBackend.proposalRequiresSaplingParams(_:)`.
     /// - Parameter proposal: the transaction proposal.
     /// - Parameter usk: `UnifiedSpendingKey` for the account that controls the funds to be spent.
+    /// - Parameter ovkPolicy: the outgoing viewing key the transactions' outputs are encrypted to.
     /// - Returns: The ids of the created transactions.
     /// - Throws: `rustCreateToAddress`, `rustProposalScanRequired`, or `rustProposalInsufficientFunds`.
     func createProposedTransactions(
         proposal: FfiProposal,
-        usk: UnifiedSpendingKey
+        usk: UnifiedSpendingKey,
+        ovkPolicy: OvkPolicy
     ) async throws -> [Data]
 
     /// Returns the wallet-store data available for the given transaction, or `nil` if the

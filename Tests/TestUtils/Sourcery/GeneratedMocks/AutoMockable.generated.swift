@@ -568,6 +568,30 @@ class BroadcasterMock: Broadcaster {
         }
     }
 
+    // MARK: - createProposedTransactions
+
+    var createProposedTransactionsProposalSpendingKeyOvkPolicyThrowableError: Error?
+    var createProposedTransactionsProposalSpendingKeyOvkPolicyCallsCount = 0
+    var createProposedTransactionsProposalSpendingKeyOvkPolicyCalled: Bool {
+        return createProposedTransactionsProposalSpendingKeyOvkPolicyCallsCount > 0
+    }
+    var createProposedTransactionsProposalSpendingKeyOvkPolicyReceivedArguments: (proposal: Proposal, spendingKey: UnifiedSpendingKey, ovkPolicy: OvkPolicy)?
+    var createProposedTransactionsProposalSpendingKeyOvkPolicyReturnValue: [CreatedTransaction]!
+    var createProposedTransactionsProposalSpendingKeyOvkPolicyClosure: ((Proposal, UnifiedSpendingKey, OvkPolicy) async throws -> [CreatedTransaction])?
+
+    func createProposedTransactions(proposal: Proposal, spendingKey: UnifiedSpendingKey, ovkPolicy: OvkPolicy) async throws -> [CreatedTransaction] {
+        if let error = createProposedTransactionsProposalSpendingKeyOvkPolicyThrowableError {
+            throw error
+        }
+        createProposedTransactionsProposalSpendingKeyOvkPolicyCallsCount += 1
+        createProposedTransactionsProposalSpendingKeyOvkPolicyReceivedArguments = (proposal: proposal, spendingKey: spendingKey, ovkPolicy: ovkPolicy)
+        if let closure = createProposedTransactionsProposalSpendingKeyOvkPolicyClosure {
+            return try await closure(proposal, spendingKey, ovkPolicy)
+        } else {
+            return createProposedTransactionsProposalSpendingKeyOvkPolicyReturnValue
+        }
+    }
+
     // MARK: - createTransactionFromPCZT
 
     var createTransactionFromPCZTPcztWithProofsPcztWithSigsThrowableError: Error?
@@ -1870,6 +1894,30 @@ class SynchronizerMock: Synchronizer {
             return try await closure(proposal, spendingKey)
         } else {
             return createProposedTransactionsProposalSpendingKeyReturnValue
+        }
+    }
+
+    // MARK: - createProposedTransactions
+
+    var createProposedTransactionsProposalSpendingKeyOvkPolicyThrowableError: Error?
+    var createProposedTransactionsProposalSpendingKeyOvkPolicyCallsCount = 0
+    var createProposedTransactionsProposalSpendingKeyOvkPolicyCalled: Bool {
+        return createProposedTransactionsProposalSpendingKeyOvkPolicyCallsCount > 0
+    }
+    var createProposedTransactionsProposalSpendingKeyOvkPolicyReceivedArguments: (proposal: Proposal, spendingKey: UnifiedSpendingKey, ovkPolicy: OvkPolicy)?
+    var createProposedTransactionsProposalSpendingKeyOvkPolicyReturnValue: AsyncThrowingStream<TransactionSubmitResult, Error>!
+    var createProposedTransactionsProposalSpendingKeyOvkPolicyClosure: ((Proposal, UnifiedSpendingKey, OvkPolicy) async throws -> AsyncThrowingStream<TransactionSubmitResult, Error>)?
+
+    func createProposedTransactions(proposal: Proposal, spendingKey: UnifiedSpendingKey, ovkPolicy: OvkPolicy) async throws -> AsyncThrowingStream<TransactionSubmitResult, Error> {
+        if let error = createProposedTransactionsProposalSpendingKeyOvkPolicyThrowableError {
+            throw error
+        }
+        createProposedTransactionsProposalSpendingKeyOvkPolicyCallsCount += 1
+        createProposedTransactionsProposalSpendingKeyOvkPolicyReceivedArguments = (proposal: proposal, spendingKey: spendingKey, ovkPolicy: ovkPolicy)
+        if let closure = createProposedTransactionsProposalSpendingKeyOvkPolicyClosure {
+            return try await closure(proposal, spendingKey, ovkPolicy)
+        } else {
+            return createProposedTransactionsProposalSpendingKeyOvkPolicyReturnValue
         }
     }
 
@@ -4953,25 +5001,25 @@ class ZcashRustBackendWeldingMock: ZcashRustBackendWelding {
 
     // MARK: - createProposedTransactions
 
-    var createProposedTransactionsProposalUskThrowableError: Error?
-    var createProposedTransactionsProposalUskCallsCount = 0
-    var createProposedTransactionsProposalUskCalled: Bool {
-        return createProposedTransactionsProposalUskCallsCount > 0
+    var createProposedTransactionsProposalUskOvkPolicyThrowableError: Error?
+    var createProposedTransactionsProposalUskOvkPolicyCallsCount = 0
+    var createProposedTransactionsProposalUskOvkPolicyCalled: Bool {
+        return createProposedTransactionsProposalUskOvkPolicyCallsCount > 0
     }
-    var createProposedTransactionsProposalUskReceivedArguments: (proposal: FfiProposal, usk: UnifiedSpendingKey)?
-    var createProposedTransactionsProposalUskReturnValue: [Data]!
-    var createProposedTransactionsProposalUskClosure: ((FfiProposal, UnifiedSpendingKey) async throws -> [Data])?
+    var createProposedTransactionsProposalUskOvkPolicyReceivedArguments: (proposal: FfiProposal, usk: UnifiedSpendingKey, ovkPolicy: OvkPolicy)?
+    var createProposedTransactionsProposalUskOvkPolicyReturnValue: [Data]!
+    var createProposedTransactionsProposalUskOvkPolicyClosure: ((FfiProposal, UnifiedSpendingKey, OvkPolicy) async throws -> [Data])?
 
-    func createProposedTransactions(proposal: FfiProposal, usk: UnifiedSpendingKey) async throws -> [Data] {
-        if let error = createProposedTransactionsProposalUskThrowableError {
+    func createProposedTransactions(proposal: FfiProposal, usk: UnifiedSpendingKey, ovkPolicy: OvkPolicy) async throws -> [Data] {
+        if let error = createProposedTransactionsProposalUskOvkPolicyThrowableError {
             throw error
         }
-        createProposedTransactionsProposalUskCallsCount += 1
-        createProposedTransactionsProposalUskReceivedArguments = (proposal: proposal, usk: usk)
-        if let closure = createProposedTransactionsProposalUskClosure {
-            return try await closure(proposal, usk)
+        createProposedTransactionsProposalUskOvkPolicyCallsCount += 1
+        createProposedTransactionsProposalUskOvkPolicyReceivedArguments = (proposal: proposal, usk: usk, ovkPolicy: ovkPolicy)
+        if let closure = createProposedTransactionsProposalUskOvkPolicyClosure {
+            return try await closure(proposal, usk, ovkPolicy)
         } else {
-            return createProposedTransactionsProposalUskReturnValue
+            return createProposedTransactionsProposalUskOvkPolicyReturnValue
         }
     }
 

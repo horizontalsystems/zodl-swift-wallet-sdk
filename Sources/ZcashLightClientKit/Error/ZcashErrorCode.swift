@@ -289,6 +289,8 @@ public enum ZcashErrorCode: String {
     case rustSlipstreamUnsupported = "ZRUST0097"
     /// The engine could not prove its previous pass and wallet writer had stopped before a wallet mutation; the mutation was refused.
     case slipstreamEngineNotQuiescent = "ZRUST0155"
+    /// The rust layer could not tell whether a proposal needs the Sapling proving parameters,
+    case rustProposalRequiresSaplingParams = "ZRUST0157"
     /// Error from rust layer when calling ZcashRustBackend.migrationProgress
     case rustMigrationProgress = "ZRUST0099"
     /// Error from rust layer when calling ZcashRustBackend.migrationIsNoteSplitNeeded
