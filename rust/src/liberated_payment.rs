@@ -314,6 +314,9 @@ impl LiberatedPayment {
     /// Only payments created with [`LiberatedPayment::new`] can be written.
     pub fn to_link(&self, host: &str) -> Result<String, Error> {
         let host = check_host(host)?;
+        // `https://example.com#…` is a valid URL, but browsers and link matchers normalise it
+        // to `https://example.com/#…`; write the normalised form so every consumer sees one shape.
+        let separator = if host[8..].contains('/') { "" } else { "/" };
         let entropy = match (&self.origin, &self.secret) {
             (Origin::V1, Secret::Entropy(entropy)) if entropy.len() == 32 => entropy,
             _ => return Err(Error::UnsupportedVersion),
@@ -321,7 +324,7 @@ impl LiberatedPayment {
         let key = bech32::encode::<Bech32m>(key_hrp(self.network), entropy)
             .map_err(|_| Error::InvalidField("key"))?;
         let mut link = format!(
-            "{host}#v={LINK_VERSION}&key={key}&height={}",
+            "{host}{separator}#v={LINK_VERSION}&key={key}&height={}",
             self.birthday_height
         );
         if let Some(amount) = self.amount {
@@ -722,6 +725,11 @@ mod tests {
         .unwrap();
         let link = payment.to_link(HOST).unwrap();
         assert!(link.starts_with("https://example.com/#v=1&key=zgifttest1"));
+        // A bare host is written with the `/` that browsers add; a path is left alone.
+        let bare = payment.to_link("https://example.com").unwrap();
+        assert!(bare.starts_with("https://example.com/#v=1&key=zgifttest1"));
+        let with_path = payment.to_link("https://example.com/claim").unwrap();
+        assert!(with_path.starts_with("https://example.com/claim#v=1&key=zgifttest1"));
         assert!(link.ends_with("&height=4000000&amount=0.1234&desc=Hi%20from%20Zcash%21"));
 
         let parsed = LiberatedPayment::parse(&link).unwrap();
