@@ -33,19 +33,54 @@ case .pending: break                                // waiting for 10 confirmati
 case .empty:   break                                // already redeemed, or never funded
 }
 
-let results = try await redeemer.redeem(to: myUnifiedAddress, memo: try Memo(string: "Gift card"))
-// results: one TransactionSubmitResult per created transaction (usually one)
+mainSynchronizer.stop()                             // optional: lets the claim have the database
+let redemption = try await redeemer.redeem(
+    to: myUnifiedAddress,
+    memo: try Memo(string: "Gift card"),
+    recordIn: mainSynchronizer                       // the wallet myUnifiedAddress belongs to
+)
+// redemption.results: one TransactionSubmitResult per created transaction (usually one)
+// redemption.recordedInDestination: the main wallet knows the claim and trusts it (ZIP 315)
+try await mainSynchronizer.start()
 
 try await redeemer.cleanup()                        // stops and deletes the temporary wallet
 ```
 
 - `statedAmount` and `message` come from the link and are unverified. Show `GiftCardStatus`
   amounts as the card's value, and the message as untrusted user content.
-- `redeem(to:memo:)` sends the whole spendable balance, with the optional `memo`, minus the ZIP 317 fee (normally 10,000 zatoshis,
-  which a card is funded with on top of its face value). It discards the outgoing viewing key, so
-  the card's key cannot reveal the recipient; the redeeming wallet still records the incoming
-  payment as usual.
+- `redeem(to:memo:recordIn:)` sends the whole spendable balance, with the optional `memo`, minus
+  the ZIP 317 fee (normally 10,000 zatoshis, which a card is funded with on top of its face value).
+  It discards the outgoing viewing key, so the card's key cannot reveal the recipient; the
+  redeeming wallet still records the incoming payment as usual. `redeem(to:memo:)` does the same
+  without a destination and returns the results alone.
 - With an address that has an Orchard receiver, no Sapling parameters are downloaded.
+
+## Trust of the claim transaction (ZIP 315)
+
+To the user's main wallet, the claim is a payment from another wallet. Left to chain scanning, it
+would appear only once a sync finds it, and [ZIP 315](https://zips.z.cash/zip-0315) would hold its
+outputs for 10 confirmations before they can be spent, as for any external receive. But this device
+authored the claim — it chose the recipient and built the transaction — so ZIP 315's allowance for
+wallets to "enable specific external transactions as trusted" applies, and the SDK uses it:
+
+- Pass the main wallet's synchronizer as `recordIn:`. Once a server has accepted the claim,
+  `GiftCardRedeemer` reads the raw transaction back from the card wallet and calls
+  `Synchronizer.recordTrustedTransaction(_:txId:)` on the destination, which stores it (the receive
+  shows at once, unmined, with its memo) and marks it trusted. The main wallet can then spend the
+  gift after 3 confirmations instead of 10. The next sync mines the stored transaction as usual.
+- The call goes straight to the wallet database, so it works while the main synchronizer is
+  stopped — which is how an app typically runs a claim, so the two wallets do not compete for the
+  shared database executor. Restart the main synchronizer afterwards.
+- Recording can never fail the redemption: the funds are already on their way. A failure is logged
+  and reported as `Redemption.recordedInDestination == false`; the main wallet then learns about the
+  claim from the chain, as an ordinary (untrusted, 10-confirmation) receive. Nothing is lost.
+- Only accepted submissions (`.success`) are recorded. A transaction rejected by every server is
+  not stored in the destination.
+- Trust is per transaction and reversible: `Synchronizer.setTransactionTrust(txId:trusted:)` marks
+  any transaction the wallet already knows as trusted or untrusted; the status of an unknown
+  transaction is not recorded, so store it first (`recordTrustedTransaction` does both).
+- Trust shortens the wait; it does not weaken safety against reorgs beyond what ZIP 315 accepts
+  for the wallet's own transactions, and it never makes an unmined output spendable.
 
 ## Lifecycle and concurrency
 
@@ -78,4 +113,5 @@ try await redeemer.cleanup()                        // stops and deletes the tem
 | `giftCardRedeemerCleanedUp` (`ZGIFT0005`) | The redeemer was cleaned up. |
 
 `check()` also rethrows the card wallet's sync error, and `redeem(to:)` the errors of
-`proposeSendMax` and `createProposedTransactions`.
+`proposeSendMax` and `createProposedTransactions`. The destination's errors are never thrown; see
+`Redemption.recordedInDestination`.

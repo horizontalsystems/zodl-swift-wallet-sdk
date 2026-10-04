@@ -296,6 +296,145 @@ final class GiftCardTests: ZcashTestCase {
         )
     }
 
+    // MARK: - Recording the claim in the destination wallet (ZIP 315)
+
+    private static let claimTxId = Data(repeating: 0xC1, count: 32)
+    private static let claimRaw = Data([0x05, 0x00, 0x00, 0x80, 0x0A, 0x27, 0xA7, 0x26, 0x01])
+
+    private func makeDestination() -> SynchronizerMock {
+        let destination = SynchronizerMock()
+        destination.recordTrustedTransactionTxIdClosure = { _, _ in }
+        return destination
+    }
+
+    private func makeLogger() -> LoggerMock {
+        let logger = LoggerMock()
+        logger.warnFileFunctionLineClosure = { _, _, _, _ in }
+        return logger
+    }
+
+    func testAnAcceptedClaimIsRecordedInTheDestinationAsTrusted() async {
+        let destination = makeDestination()
+        let logger = makeLogger()
+        var lookedUp: [Data] = []
+
+        let recorded = await GiftCardRedeemer.record(
+            [.success(txId: Self.claimTxId)],
+            in: destination,
+            rawTransaction: { txId in
+                lookedUp.append(txId)
+                return Self.claimRaw
+            },
+            logger: logger
+        )
+
+        XCTAssertTrue(recorded)
+        XCTAssertEqual(lookedUp, [Self.claimTxId], "the raw transaction comes from the card wallet, by the accepted txid")
+        XCTAssertEqual(destination.recordTrustedTransactionTxIdCallsCount, 1)
+        XCTAssertEqual(destination.recordTrustedTransactionTxIdReceivedArguments?.rawTransaction, Self.claimRaw)
+        XCTAssertEqual(destination.recordTrustedTransactionTxIdReceivedArguments?.txId, TxId([UInt8](Self.claimTxId)))
+        XCTAssertEqual(destination.setTransactionTrustTxIdTrustedCallsCount, 0, "recordTrustedTransaction already trusts it")
+        XCTAssertEqual(logger.warnFileFunctionLineCallsCount, 0)
+    }
+
+    func testOnlyAcceptedClaimsAreRecorded() async {
+        let destination = makeDestination()
+        let logger = makeLogger()
+        let other = Data(repeating: 0xC2, count: 32)
+        let results: [TransactionSubmitResult] = [
+            .grpcFailure(txId: other, error: .timeOut),
+            .success(txId: Self.claimTxId),
+            .notAttempted(txId: Data(repeating: 0xC3, count: 32))
+        ]
+
+        let recorded = await GiftCardRedeemer.record(results, in: destination, rawTransaction: { _ in Self.claimRaw }, logger: logger)
+
+        XCTAssertTrue(recorded)
+        XCTAssertEqual(destination.recordTrustedTransactionTxIdCallsCount, 1)
+        XCTAssertEqual(destination.recordTrustedTransactionTxIdReceivedArguments?.txId, TxId([UInt8](Self.claimTxId)))
+
+        // Nothing accepted: nothing to record, and nothing claims to have been.
+        let rejectedOnly = await GiftCardRedeemer.record(
+            [.grpcFailure(txId: other, error: .timeOut)],
+            in: destination,
+            rawTransaction: { _ in XCTFail("no lookup for a rejected transaction"); return nil },
+            logger: logger
+        )
+        XCTAssertFalse(rejectedOnly)
+        XCTAssertEqual(destination.recordTrustedTransactionTxIdCallsCount, 1)
+    }
+
+    func testRedeemWithoutADestinationTouchesNone() async throws {
+        let card = try GiftCard(link: Self.zodlTestnetLink)
+        let redeemer = try GiftCardRedeemer(
+            card: card,
+            network: ZcashNetworkBuilder.network(for: .testnet),
+            endpoint: LightWalletEndpointBuilder.default,
+            storageDirectory: testTempDirectory
+        )
+        let destination = makeDestination()
+
+        // The destination is only ever contacted after an accepted submission; a redeem that does
+        // not get that far — here, before `check()` — leaves it alone, with either overload.
+        do {
+            _ = try await redeemer.redeem(to: card.fundingAddress, memo: nil, recordIn: destination)
+            XCTFail("redeem must require check()")
+        } catch ZcashError.giftCardRedeemerNotReady {
+        } catch {
+            XCTFail("Unexpected error \(error.localizedDescription)")
+        }
+        do {
+            _ = try await redeemer.redeem(to: card.fundingAddress, memo: nil, recordIn: nil)
+            XCTFail("redeem must require check()")
+        } catch ZcashError.giftCardRedeemerNotReady {
+        } catch {
+            XCTFail("Unexpected error \(error.localizedDescription)")
+        }
+
+        XCTAssertEqual(destination.recordTrustedTransactionTxIdCallsCount, 0)
+        XCTAssertEqual(destination.setTransactionTrustTxIdTrustedCallsCount, 0)
+        try await redeemer.cleanup()
+    }
+
+    func testADestinationFailureIsLoggedAndReportedNotThrown() async {
+        let destination = makeDestination()
+        destination.recordTrustedTransactionTxIdThrowableError = ZcashError.rustDecryptAndStoreTransaction("destination is busy")
+        let logger = makeLogger()
+
+        let recorded = await GiftCardRedeemer.record(
+            [.success(txId: Self.claimTxId)],
+            in: destination,
+            rawTransaction: { _ in Self.claimRaw },
+            logger: logger
+        )
+
+        XCTAssertFalse(recorded, "the funds are on chain either way; only the flag reports the failure")
+        XCTAssertEqual(logger.warnFileFunctionLineCallsCount, 1)
+        let message = logger.warnFileFunctionLineReceivedArguments?.message ?? ""
+        XCTAssertTrue(message.contains("Gift card"), message)
+        XCTAssertFalse(message.contains("destination is busy"), "the error's associated value must stay out of the logs")
+
+        let redemption = GiftCardRedeemer.Redemption(results: [.success(txId: Self.claimTxId)], recordedInDestination: recorded)
+        XCTAssertEqual(redemption.results, [.success(txId: Self.claimTxId)])
+        XCTAssertFalse(redemption.recordedInDestination)
+    }
+
+    func testAClaimMissingFromTheCardWalletIsLoggedAndNotRecorded() async {
+        let destination = makeDestination()
+        let logger = makeLogger()
+
+        let recorded = await GiftCardRedeemer.record(
+            [.success(txId: Self.claimTxId)],
+            in: destination,
+            rawTransaction: { _ in nil },
+            logger: logger
+        )
+
+        XCTAssertFalse(recorded)
+        XCTAssertEqual(destination.recordTrustedTransactionTxIdCallsCount, 0)
+        XCTAssertEqual(logger.warnFileFunctionLineCallsCount, 1)
+    }
+
     func testCheckpointSourceServesTheExactBirthdayWhenFetched() {
         let bundled = CheckpointSourceFactory.fromBundle(for: .testnet)
         let source = GiftCardCheckpointSource(bundled: bundled)

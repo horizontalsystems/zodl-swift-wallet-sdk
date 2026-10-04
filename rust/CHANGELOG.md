@@ -18,6 +18,13 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   64-byte BIP 39 `seed` of the card wallet (ZIP 32 account 0). Free it with
   `zcashlc_free_gift_card`, which zeroes the seed. On failure it returns null with the last error
   set; the error never contains any part of the link, which carries a spending secret.
+- `zcashlc_set_transaction_trust(db_data, db_data_len, txid_bytes, txid_bytes_len, trusted,
+  network_id)` marks a stored transaction as trusted or untrusted in the sense of ZIP 315
+  (`WalletWrite::set_tx_trust`): the outputs of a trusted transaction become spendable after the
+  confirmations policy's `trusted` count even though this wallet did not produce them. The
+  transaction must already be stored (for instance through `zcashlc_decrypt_and_store_transaction`);
+  an unknown txid is not recorded. Returns `true` on success, `false` with the last error set
+  otherwise.
 - `zcashlc_proposal_requires_sapling_params(proposal_ptr, proposal_len)` reports, without a
   database, whether creating a proposal's transactions needs the Sapling proving parameters: `1`
   when any step has a Sapling input, payment, change or dummy output (or leaves a pool

@@ -377,6 +377,108 @@ class SynchronizerOfflineTests: ZcashTestCase {
         }
     }
 
+    // MARK: - Trusted external transactions (ZIP 315)
+
+    /// The synchronizer is deliberately never prepared nor started here: recording a claim must go
+    /// straight to the wallet database, since the app pauses its main synchronizer while a gift
+    /// card is swept.
+    private func makeStoppedSynchronizer(rustBackend: ZcashRustBackendWeldingMock) throws -> SDKSynchronizer {
+        mockContainer.mock(type: ZcashRustBackendWelding.self, isSingleton: true) { _ in rustBackend }
+
+        let initializer = Initializer(
+            container: mockContainer,
+            cacheDbURL: nil,
+            fsBlockDbRoot: testTempDirectory,
+            generalStorageURL: testGeneralStorageDirectory,
+            dataDbURL: try __dataDbURL(),
+            torDirURL: try __torDirURL(),
+            endpoint: LightWalletEndpointBuilder.default,
+            network: network,
+            spendParamsURL: try __spendParamsURL(),
+            outputParamsURL: try __outputParamsURL(),
+            saplingParamsSourceURL: SaplingParamsSourceURL.tests,
+            isTorEnabled: false,
+            isExchangeRateEnabled: false
+        )
+
+        return SDKSynchronizer(initializer: initializer)
+    }
+
+    func testRecordTrustedTransactionStoresTheTransactionThenTrustsIt() async throws {
+        let rustBackend = ZcashRustBackendWeldingMock()
+        let txIdBytes = [UInt8](repeating: 0x5A, count: 32)
+        let raw = Data([0x05, 0x00, 0x00, 0x80, 0x0A, 0x27, 0xA7, 0x26])
+        let calls = CallOrder()
+
+        rustBackend.decryptAndStoreTransactionTxBytesMinedHeightClosure = { _, _ in
+            calls.append("decryptAndStore")
+            return Data(txIdBytes)
+        }
+        rustBackend.setTransactionTrustTxIdTrustedClosure = { _, _ in
+            calls.append("setTransactionTrust")
+        }
+        let synchronizer = try makeStoppedSynchronizer(rustBackend: rustBackend)
+        XCTAssertFalse(synchronizer.latestState.internalSyncStatus.isPrepared)
+
+        try await synchronizer.recordTrustedTransaction(raw, txId: TxId(txIdBytes))
+
+        XCTAssertEqual(calls.order, ["decryptAndStore", "setTransactionTrust"])
+        let stored = rustBackend.decryptAndStoreTransactionTxBytesMinedHeightReceivedArguments
+        XCTAssertEqual(stored?.txBytes, raw.bytes)
+        XCTAssertNil(stored?.minedHeight, "a claim just broadcast is unmined; the next sync mines it")
+        let trusted = rustBackend.setTransactionTrustTxIdTrustedReceivedArguments
+        XCTAssertEqual(trusted?.txId, Data(txIdBytes))
+        XCTAssertEqual(trusted?.trusted, true)
+    }
+
+    func testRecordTrustedTransactionRefusesToTrustAMismatchedTxId() async throws {
+        let rustBackend = ZcashRustBackendWeldingMock()
+        rustBackend.decryptAndStoreTransactionTxBytesMinedHeightReturnValue = Data(repeating: 0x01, count: 32)
+        rustBackend.setTransactionTrustTxIdTrustedClosure = { _, _ in }
+        let synchronizer = try makeStoppedSynchronizer(rustBackend: rustBackend)
+
+        do {
+            try await synchronizer.recordTrustedTransaction(Data([0x05]), txId: TxId([UInt8](repeating: 0x02, count: 32)))
+            XCTFail("A txId that is not the stored transaction's must be refused")
+        } catch ZcashError.synchronizerTrustedTransactionIdMismatch {
+        } catch {
+            XCTFail("Unexpected error \(error.localizedDescription)")
+        }
+
+        XCTAssertEqual(rustBackend.decryptAndStoreTransactionTxBytesMinedHeightCallsCount, 1)
+        XCTAssertEqual(rustBackend.setTransactionTrustTxIdTrustedCallsCount, 0)
+    }
+
+    func testRecordTrustedTransactionDoesNotTrustWhatItCouldNotStore() async throws {
+        let rustBackend = ZcashRustBackendWeldingMock()
+        rustBackend.decryptAndStoreTransactionTxBytesMinedHeightThrowableError = ZcashError.rustDecryptAndStoreTransaction("boom")
+        rustBackend.setTransactionTrustTxIdTrustedClosure = { _, _ in }
+        let synchronizer = try makeStoppedSynchronizer(rustBackend: rustBackend)
+
+        do {
+            try await synchronizer.recordTrustedTransaction(Data([0x05]), txId: TxId([UInt8](repeating: 0x02, count: 32)))
+            XCTFail("The store failure must propagate")
+        } catch ZcashError.rustDecryptAndStoreTransaction {
+        } catch {
+            XCTFail("Unexpected error \(error.localizedDescription)")
+        }
+
+        XCTAssertEqual(rustBackend.setTransactionTrustTxIdTrustedCallsCount, 0)
+    }
+
+    func testSetTransactionTrustForwardsToTheRustBackend() async throws {
+        let rustBackend = ZcashRustBackendWeldingMock()
+        rustBackend.setTransactionTrustTxIdTrustedClosure = { _, _ in }
+        let synchronizer = try makeStoppedSynchronizer(rustBackend: rustBackend)
+        let txIdBytes = [UInt8](repeating: 0x33, count: 32)
+
+        try await synchronizer.setTransactionTrust(txId: TxId(txIdBytes), trusted: false)
+
+        XCTAssertEqual(rustBackend.setTransactionTrustTxIdTrustedCallsCount, 1)
+        XCTAssertEqual(rustBackend.setTransactionTrustTxIdTrustedReceivedArguments?.txId, Data(txIdBytes))
+        XCTAssertEqual(rustBackend.setTransactionTrustTxIdTrustedReceivedArguments?.trusted, false)
+    }
+
     func testIsNewSessionOnUnpreparedToValidTransition() {
         XCTAssertTrue(SessionTicker.live.isNewSyncSession(.unprepared, .syncing(0, false)))
     }
@@ -598,5 +700,23 @@ class SynchronizerOfflineTests: ZcashTestCase {
             latestBlockHeight: .zero,
             fullyScannedHeight: .zero
         )
+    }
+}
+
+/// The order in which the rust backend mock's members were called, shared with its closures.
+private final class CallOrder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String] = []
+
+    var order: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func append(_ call: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        storage.append(call)
     }
 }

@@ -1382,6 +1382,28 @@ public class SDKSynchronizer: Synchronizer {
         try await initializer.rustBackend.deleteAccount(accountUUID)
     }
 
+    // MARK: Trusted external transactions (ZIP 315)
+    //
+    // Both go straight to the wallet database: they are meant to be called about a transaction
+    // another wallet on this device just broadcast (a gift card claim), typically while this
+    // synchronizer is stopped so that the two wallets do not compete for the database executor.
+    // They need neither a sync session nor the `.synced` state.
+
+    public func recordTrustedTransaction(_ rawTransaction: Data, txId: TxId) async throws {
+        let storedTxId = try await initializer.rustBackend.decryptAndStoreTransaction(
+            txBytes: rawTransaction.bytes,
+            minedHeight: nil
+        )
+        guard storedTxId == Data(txId.id) else {
+            throw ZcashError.synchronizerTrustedTransactionIdMismatch
+        }
+        try await initializer.rustBackend.setTransactionTrust(txId: storedTxId, trusted: true)
+    }
+
+    public func setTransactionTrust(txId: TxId, trusted: Bool) async throws {
+        try await initializer.rustBackend.setTransactionTrust(txId: Data(txId.id), trusted: trusted)
+    }
+
     // MARK: Migration (Orchard -> Ironwood)
     //
     // Thin forwards to `migrationHost.migration(for:)`'s per-account `OrchardMigration` actor (or,

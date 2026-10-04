@@ -3541,6 +3541,57 @@ pub unsafe extern "C" fn zcashlc_set_transaction_status(
     unwrap_exc_or(res, false)
 }
 
+/// Marks the given transaction as trusted or untrusted, in the sense of [ZIP 315]: the outputs of
+/// a trusted transaction become spendable after the policy's `trusted` confirmations even though
+/// they were not produced by this wallet.
+///
+/// The transaction must already be stored in `db_data` (for instance through
+/// [`zcashlc_decrypt_and_store_transaction`]); the trust status of an unknown transaction is not
+/// recorded. Returns `true` on success and `false` with the last error set otherwise.
+///
+/// [ZIP 315]: https://zips.z.cash/zip-0315
+///
+/// # Safety
+///
+/// - `db_data` must be non-null and valid for reads for `db_data_len` bytes, and it must
+///   have an alignment of `1`. Its contents must be a string representing a valid system
+///   path in the operating system's preferred representation.
+/// - The memory referenced by `db_data` must not be mutated for the duration of the
+///   function call.
+/// - The total size `db_data_len` must be no larger than `isize::MAX`. See the safety
+///   documentation of pointer::offset.
+/// - `txid_bytes` must be non-null and valid for reads for `txid_bytes_len` bytes, and it must
+///   have an alignment of `1`.
+/// - The memory referenced by `txid_bytes` must not be mutated for the duration of the
+///   function call.
+/// - The total size `txid_bytes_len` must be no larger than `isize::MAX`. See the safety
+///   documentation of pointer::offset.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zcashlc_set_transaction_trust(
+    db_data: *const u8,
+    db_data_len: usize,
+    txid_bytes: *const u8,
+    txid_bytes_len: usize,
+    trusted: bool,
+    network_id: u32,
+) -> bool {
+    let res = catch_panic(|| {
+        let network = parse_network(network_id)?;
+        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+
+        let txid_bytes = unsafe { slice::from_raw_parts(txid_bytes, txid_bytes_len) };
+        let txid = TxId::read(txid_bytes)?;
+
+        db_data
+            .set_tx_trust(txid, trusted)
+            .map_err(|e| anyhow!("Error setting the trust status of txid {}: {}", txid, e))?;
+
+        Ok(true)
+    });
+
+    unwrap_exc_or(res, false)
+}
+
 /// Returns a list of transaction data requests that the network client should satisfy.
 ///
 /// # Safety

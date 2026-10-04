@@ -434,6 +434,21 @@ protocol ZcashRustBackendWelding {
     /// transactions have been mined.
     func setTransactionStatus(txId: Data, status: TransactionStatus) async throws
 
+    /// Marks a stored transaction as trusted or untrusted in the sense of
+    /// [ZIP 315](https://zips.z.cash/zip-0315): the outputs of a trusted transaction become
+    /// spendable after `ConfirmationsPolicy.trusted` confirmations (3 by default) even though this
+    /// wallet did not produce them, instead of the `untrusted` count (10) that applies to every
+    /// other external receive.
+    ///
+    /// The transaction must already be stored, for instance through
+    /// `decryptAndStoreTransaction(txBytes:minedHeight:)`; the trust status of an unknown
+    /// transaction is not recorded.
+    /// - Parameters:
+    ///   - txId: the 32-byte transaction id.
+    ///   - trusted: `true` to trust the transaction, `false` to treat it as an ordinary external one.
+    /// - Throws: `rustSetTransactionTrust`.
+    func setTransactionTrust(txId: Data, trusted: Bool) async throws
+
     /// Fix witnesses - addressing note commitment tree bug.
     /// This function is supposed to be called occasionaly. It's handled by the SDK Synchronizer and called only once per version.
     func fixWitnesses() async

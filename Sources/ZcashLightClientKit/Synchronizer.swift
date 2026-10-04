@@ -808,6 +808,43 @@ public protocol Synchronizer: AnyObject {
     /// - Throws rustDeleteAccount as a common indicator of the operation failure
     func deleteAccount(_ accountUUID: AccountUUID) async throws -> Void
 
+    // MARK: - Trusted external transactions (ZIP 315)
+
+    /// Stores a transaction this device authored in another wallet, and marks it as trusted.
+    ///
+    /// [ZIP 315](https://zips.z.cash/zip-0315) lets a wallet treat specific external transactions
+    /// as trusted. The outputs of a trusted transaction become spendable after the trusted
+    /// confirmation count (3 by default) instead of the untrusted one (10) that applies to every
+    /// other receive from outside the wallet. Use it for a transaction whose construction this
+    /// device controlled even though another wallet signed it: a gift card claim swept into this
+    /// wallet by ``GiftCardRedeemer``, for instance.
+    ///
+    /// The transaction is decrypted and stored right away, so the receive shows in
+    /// `transactions` before any sync, as an unmined transaction; the next sync mines it. This
+    /// call goes straight to the wallet database and works while the synchronizer is stopped.
+    ///
+    /// - Parameters:
+    ///   - rawTransaction: the complete serialized transaction, as broadcast.
+    ///   - txId: the transaction's id. It must be the id of `rawTransaction`.
+    /// - Throws: `ZcashError.rustDecryptAndStoreTransaction` if the transaction cannot be stored,
+    ///   `ZcashError.synchronizerTrustedTransactionIdMismatch` if `txId` is not the id of
+    ///   `rawTransaction` (the transaction is stored, but nothing is trusted), and
+    ///   `ZcashError.rustSetTransactionTrust` if the trust status cannot be recorded.
+    func recordTrustedTransaction(_ rawTransaction: Data, txId: TxId) async throws
+
+    /// Marks a transaction the wallet already knows as trusted or untrusted, in the sense of
+    /// [ZIP 315](https://zips.z.cash/zip-0315); see ``recordTrustedTransaction(_:txId:)``.
+    ///
+    /// The transaction must already be stored; the trust status of an unknown transaction is not
+    /// recorded. This call works while the synchronizer is stopped.
+    ///
+    /// - Parameters:
+    ///   - txId: the transaction's id.
+    ///   - trusted: `true` to require the trusted confirmation count before its outputs are
+    ///     spent, `false` to treat it as an ordinary external transaction again.
+    /// - Throws: `ZcashError.rustSetTransactionTrust`.
+    func setTransactionTrust(txId: TxId, trusted: Bool) async throws
+
     /// Provides access to transaction creation and submission operations
     /// that are decoupled from the synchronizer's built-in submission flow.
     ///
@@ -1649,6 +1686,38 @@ private final class UnimplementedBroadcaster: Broadcaster {
 
     func releaseForResubmission(transactions: [CreatedTransaction], to endpoints: [LightWalletEndpoint]) async {
         // No-op: no submit-plan bookkeeping behind this placeholder to release anything to.
+    }
+}
+
+/// Error thrown by the default implementations of ``Synchronizer/recordTrustedTransaction(_:txId:)``
+/// and ``Synchronizer/setTransactionTrust(txId:trusted:)`` when a conformer does not override them.
+/// Hoisted to file scope for the same reason as ``MigrationUnimplemented``.
+private struct TransactionTrustUnimplemented: LocalizedError {
+    /// The unimplemented member's signature.
+    let member: String
+
+    var errorDescription: String? {
+        """
+        Synchronizer.\(member) has no default implementation. \
+        Override this member in your Synchronizer conformer to record trusted transactions.
+        """
+    }
+}
+
+public extension Synchronizer {
+    /// Default implementation so adding `recordTrustedTransaction(_:txId:)` to the protocol is not
+    /// a source-breaking change for downstream conformers. A conformer without a wallet database
+    /// of its own cannot store or trust a transaction, so it refuses rather than silently drop
+    /// the request.
+    func recordTrustedTransaction(_ rawTransaction: Data, txId: TxId) async throws {
+        throw TransactionTrustUnimplemented(member: "recordTrustedTransaction(_:txId:)")
+    }
+
+    /// Default implementation so adding `setTransactionTrust(txId:trusted:)` to the protocol is
+    /// not a source-breaking change for downstream conformers; see
+    /// ``recordTrustedTransaction(_:txId:)``.
+    func setTransactionTrust(txId: TxId, trusted: Bool) async throws {
+        throw TransactionTrustUnimplemented(member: "setTransactionTrust(txId:trusted:)")
     }
 }
 

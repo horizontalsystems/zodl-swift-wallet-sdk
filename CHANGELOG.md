@@ -33,6 +33,22 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per card may be alive at a time. New errors: `giftCardNetworkMismatch` (`ZGIFT0001`),
   `giftCardRedeemerAlreadyActive` (`ZGIFT0002`), `giftCardRedeemerNotReady` (`ZGIFT0003`),
   `giftCardNothingToRedeem` (`ZGIFT0004`) and `giftCardRedeemerCleanedUp` (`ZGIFT0005`).
+- `Synchronizer.recordTrustedTransaction(_:txId:)` and `Synchronizer.setTransactionTrust(txId:trusted:)`
+  (on `SDKSynchronizer` and `SlipstreamSynchronizer`; other conformers get a throwing default) let
+  a wallet treat a specific external transaction as trusted in the sense of ZIP 315. The former
+  stores the raw transaction at once — the receive shows before any sync, unmined — and marks it
+  as trusted, so its outputs are spendable after the trusted confirmation count (3) instead of the
+  untrusted one (10) that every other external receive gets. Both work while the synchronizer is
+  stopped. A `txId` that is not the raw transaction's throws
+  `ZcashError.synchronizerTrustedTransactionIdMismatch` (`ZSYNCO0010`); a backend failure throws
+  `ZcashError.rustSetTransactionTrust` (`ZRUST0158`).
+- `GiftCardRedeemer.redeem(to:memo:recordIn:)` takes the user's own `Synchronizer` and, after the
+  sweep is accepted, records the claim transaction in it through `recordTrustedTransaction`: the
+  main wallet shows the incoming gift at once and can spend it after 3 confirmations. It returns a
+  `GiftCardRedeemer.Redemption` with the submission `results` and `recordedInDestination`, which is
+  `false` — never an error — when the destination could not record the claim; the funds are on
+  chain regardless, and the destination learns about them when it next syncs. `redeem(to:memo:)`
+  is unchanged and records nothing.
 - `OvkPolicy` (`.sender`, `.discard`) and
   `Synchronizer.createProposedTransactions(proposal:spendingKey:ovkPolicy:)` /
   `Broadcaster.createProposedTransactions(proposal:spendingKey:ovkPolicy:)`. With `.discard` the

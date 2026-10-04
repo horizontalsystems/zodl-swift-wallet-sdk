@@ -1555,6 +1555,24 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
     }
 
     @DBActor
+    func setTransactionTrust(txId: Data, trusted: Bool) async throws {
+        let success = zcashlc_set_transaction_trust(
+            dbData.0,
+            dbData.1,
+            txId.bytes,
+            UInt(txId.bytes.count),
+            trusted,
+            networkType.networkId
+        )
+
+        guard success else {
+            throw ZcashError.rustSetTransactionTrust(
+                lastErrorMessage(fallback: "`setTransactionTrust` failed with unknown error")
+            )
+        }
+    }
+
+    @DBActor
     func fixWitnesses() async {
         zcashlc_fix_witnesses(dbData.0, dbData.1, networkType.networkId)
     }

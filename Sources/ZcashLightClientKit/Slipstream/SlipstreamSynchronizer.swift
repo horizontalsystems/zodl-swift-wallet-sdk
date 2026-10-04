@@ -1928,6 +1928,24 @@ public actor SlipstreamSynchronizer: Synchronizer {
         }
     }
 
+    // Trusted external transactions (ZIP 315): straight to the wallet database, like
+    // `SDKSynchronizer`; see the protocol documentation.
+
+    public func recordTrustedTransaction(_ rawTransaction: Data, txId: TxId) async throws {
+        let storedTxId = try await initializer.rustBackend.decryptAndStoreTransaction(
+            txBytes: rawTransaction.bytes,
+            minedHeight: nil
+        )
+        guard storedTxId == Data(txId.id) else {
+            throw ZcashError.synchronizerTrustedTransactionIdMismatch
+        }
+        try await initializer.rustBackend.setTransactionTrust(txId: storedTxId, trusted: true)
+    }
+
+    public func setTransactionTrust(txId: TxId, trusted: Bool) async throws {
+        try await initializer.rustBackend.setTransactionTrust(txId: Data(txId.id), trusted: trusted)
+    }
+
     // ── Height queries ────────────────────────────────────────────────────────
 
     public func latestHeight() async throws -> BlockHeight {

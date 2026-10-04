@@ -293,6 +293,8 @@ public enum ZcashErrorCode: String {
     case rustParseGiftCardLink = "ZRUST0156"
     /// The rust layer could not tell whether a proposal needs the Sapling proving parameters,
     case rustProposalRequiresSaplingParams = "ZRUST0157"
+    /// Error from rust layer when calling ZcashRustBackend.setTransactionTrust
+    case rustSetTransactionTrust = "ZRUST0158"
     /// Error from rust layer when calling ZcashRustBackend.migrationProgress
     case rustMigrationProgress = "ZRUST0099"
     /// Error from rust layer when calling ZcashRustBackend.migrationIsNoteSplitNeeded
@@ -561,6 +563,8 @@ public enum ZcashErrorCode: String {
     case synchronizerSpendingKeyDoesNotBelongToTheWallet = "ZSYNCO0008"
     /// The attempt to rescan to height that is bellow sapling activation.
     case rescanFromHeightBellowSaplingActivation = "ZSYNCO0009"
+    /// The raw transaction has a different id than `txId`; it was stored but not marked as trusted.
+    case synchronizerTrustedTransactionIdMismatch = "ZSYNCO0010"
     /// The gift card is for a different network than the one the redeemer was created for.
     case giftCardNetworkMismatch = "ZGIFT0001"
     /// Another `GiftCardRedeemer` for the same card is still active in this process. Call

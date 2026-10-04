@@ -53,11 +53,13 @@ public struct GiftCardStatus: Equatable {
 ///
 /// 1. ``check()`` creates the card wallet from the card's seed and birthday, syncs it, and reports
 ///    what it holds (``GiftCardStatus``): ready, pending confirmations, or empty.
-/// 2. ``redeem(to:)`` sends the card's entire spendable balance, minus the fee, to the given
-///    address. The transaction discards the outgoing viewing key (``OvkPolicy/discard``): the
-///    card's key — which its issuer can rederive — cannot reveal where the funds went. It only
+/// 2. ``redeem(to:memo:recordIn:)`` sends the card's entire spendable balance, minus the fee, to
+///    the given address. The transaction discards the outgoing viewing key (``OvkPolicy/discard``):
+///    the card's key — which its issuer can rederive — cannot reveal where the funds went. It only
 ///    spends Orchard and Ironwood notes to an Orchard receiver, so it never downloads the Sapling
-///    parameters.
+///    parameters. Given the user's own synchronizer as the destination, the claim is recorded
+///    there at once as a trusted transaction (ZIP 315), so the main wallet shows it immediately
+///    and can spend it after 3 confirmations instead of the 10 of an ordinary external receive.
 /// 3. ``cleanup()`` stops the card wallet and deletes every file it created.
 ///
 /// ### Isolation and lifecycle
@@ -88,6 +90,19 @@ public struct GiftCardStatus: Equatable {
 ///   spend. Clean up and create a new redeemer to retry; the notes are spent at most once on
 ///   chain either way.
 public actor GiftCardRedeemer {
+    /// The outcome of ``redeem(to:memo:recordIn:)``.
+    public struct Redemption: Equatable {
+        /// The submission result of each created transaction (usually one). A `.success` means a
+        /// server accepted it; the funds arrive once it is mined.
+        public let results: [TransactionSubmitResult]
+        /// Whether every accepted claim transaction was handed to the destination synchronizer as a
+        /// trusted transaction. `false` when no destination was given, when no transaction was
+        /// accepted, or when the destination failed to record one; the redemption itself is
+        /// unaffected, and the destination learns about the claim when it next syncs, as an
+        /// ordinary external receive.
+        public let recordedInDestination: Bool
+    }
+
     /// The card being redeemed.
     public let card: GiftCard
 
@@ -210,24 +225,48 @@ public actor GiftCardRedeemer {
         }
     }
 
-    /// Sends the card's entire spendable balance, minus the fee, to `recipient`.
+    /// Sends the card's entire spendable balance, minus the fee, to `recipient`, without recording
+    /// the claim anywhere else. See ``redeem(to:memo:recordIn:)``.
+    ///
+    /// - Returns: the submission result of each created transaction (usually one). A
+    ///   `.success` means a server accepted it; the funds arrive once it is mined.
+    public func redeem(to recipient: UnifiedAddress, memo: Memo? = nil) async throws -> [TransactionSubmitResult] {
+        try await redeem(to: recipient, memo: memo, recordIn: nil).results
+    }
+
+    /// Sends the card's entire spendable balance, minus the fee, to `recipient`, and records the
+    /// claim in `destination` as a trusted transaction.
     ///
     /// The transaction discards the outgoing viewing key, so the card's key cannot reveal the
     /// recipient or the amount, and it does not need the Sapling parameters when `recipient` has
     /// an Orchard receiver (every wallet's own unified address does). Only spendable funds are
     /// swept; value still waiting for confirmations stays on the card.
     ///
-    /// - Parameter recipient: the user's own address, on the card's network.
-    /// - Returns: the submission result of each created transaction (usually one). A
-    ///   `.success` means a server accepted it; the funds arrive once it is mined.
+    /// When `destination` is given, every accepted claim transaction is handed to it through
+    /// `Synchronizer.recordTrustedTransaction(_:txId:)` once the submission is over: the wallet
+    /// shows the receive at once, and treats it as trusted in the sense of
+    /// [ZIP 315](https://zips.z.cash/zip-0315) — this device authored the transaction — so the funds
+    /// are spendable after 3 confirmations rather than the 10 of an external receive. This works
+    /// while `destination` is stopped. A failure to record never fails the redemption, since the
+    /// funds are already on their way on chain: it is logged, and reported through
+    /// ``Redemption/recordedInDestination``; the destination then learns about the claim when it
+    /// next syncs, as an ordinary external receive.
+    ///
+    /// - Parameters:
+    ///   - recipient: the user's own address, on the card's network.
+    ///   - memo: an optional memo for the claim transaction.
+    ///   - destination: the synchronizer of the wallet `recipient` belongs to, or `nil` to record
+    ///     the claim nowhere.
+    /// - Returns: the submission results and whether the destination recorded the claim.
     /// - Throws: ``ZcashError/giftCardRedeemerNotReady`` before ``check()`` has prepared the
     ///   card wallet, ``ZcashError/giftCardNothingToRedeem`` when nothing is spendable,
     ///   ``ZcashError/giftCardNetworkMismatch`` for an address on another network, and the
     ///   proposal and creation errors of `Synchronizer.proposeSendMax(accountUUID:recipient:memo:mode:)`
-    ///   and `Synchronizer.createProposedTransactions(proposal:spendingKey:ovkPolicy:)`.
-    public func redeem(to recipient: UnifiedAddress, memo: Memo? = nil) async throws -> [TransactionSubmitResult] {
+    ///   and `Synchronizer.createProposedTransactions(proposal:spendingKey:ovkPolicy:)`. The
+    ///   destination's errors are never thrown.
+    public func redeem(to recipient: UnifiedAddress, memo: Memo?, recordIn destination: Synchronizer?) async throws -> Redemption {
         try await serialized { redeemer in
-            try await redeemer.performRedeem(to: recipient, memo: memo)
+            try await redeemer.performRedeem(to: recipient, memo: memo, recordIn: destination)
         }
     }
 
@@ -286,7 +325,7 @@ public actor GiftCardRedeemer {
         return GiftCardStatus(balance: balances[accountUUID])
     }
 
-    private func performRedeem(to recipient: UnifiedAddress, memo: Memo?) async throws -> [TransactionSubmitResult] {
+    private func performRedeem(to recipient: UnifiedAddress, memo: Memo?, recordIn destination: Synchronizer?) async throws -> Redemption {
         guard !isCleanedUp else {
             throw ZcashError.giftCardRedeemerCleanedUp
         }
@@ -321,7 +360,54 @@ public actor GiftCardRedeemer {
         for try await result in stream {
             results.append(result)
         }
-        return results
+
+        var recorded = false
+        if let destination {
+            let cardWallet = initializer.rustBackend
+            recorded = await Self.record(
+                results,
+                in: destination,
+                rawTransaction: { txId in try await cardWallet.getTransaction(txId: txId)?.raw },
+                logger: initializer.logger
+            )
+        }
+        return Redemption(results: results, recordedInDestination: recorded)
+    }
+
+    /// Hands every accepted transaction in `results` to `destination` as a trusted transaction.
+    ///
+    /// Nothing here can fail the redemption: the transactions are already with the servers. A
+    /// missing raw transaction or a destination error is logged — without the error's associated
+    /// values, which may echo caller input — and reported through the return value.
+    ///
+    /// - Parameters:
+    ///   - results: the submission results of the claim.
+    ///   - destination: the synchronizer to record the claim in.
+    ///   - rawTransaction: looks up the raw bytes of a transaction of the card wallet by its id.
+    /// - Returns: `true` when at least one transaction was accepted and every accepted one was
+    ///   recorded.
+    static func record(
+        _ results: [TransactionSubmitResult],
+        in destination: Synchronizer,
+        rawTransaction: (Data) async throws -> Data?,
+        logger: Logger
+    ) async -> Bool {
+        var recordedAny = false
+        for result in results {
+            guard case .success(let txId) = result else { continue }
+            do {
+                guard let raw = try await rawTransaction(txId) else {
+                    logger.warn("Gift card: the claim transaction is not in the card wallet; the destination will learn about it from the chain")
+                    return false
+                }
+                try await destination.recordTrustedTransaction(raw, txId: TxId([UInt8](txId)))
+                recordedAny = true
+            } catch {
+                logger.warn("Gift card: recording the claim in the destination wallet failed: \(error.localizedDescription)")
+                return false
+            }
+        }
+        return recordedAny
     }
 
     private func performCleanup() async throws {

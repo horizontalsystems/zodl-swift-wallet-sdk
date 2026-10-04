@@ -2913,6 +2913,44 @@ class SynchronizerMock: Synchronizer {
         try await deleteAccountClosure!(accountUUID)
     }
 
+    // MARK: - recordTrustedTransaction
+
+    var recordTrustedTransactionTxIdThrowableError: Error?
+    var recordTrustedTransactionTxIdCallsCount = 0
+    var recordTrustedTransactionTxIdCalled: Bool {
+        return recordTrustedTransactionTxIdCallsCount > 0
+    }
+    var recordTrustedTransactionTxIdReceivedArguments: (rawTransaction: Data, txId: TxId)?
+    var recordTrustedTransactionTxIdClosure: ((Data, TxId) async throws -> Void)?
+
+    func recordTrustedTransaction(_ rawTransaction: Data, txId: TxId) async throws {
+        if let error = recordTrustedTransactionTxIdThrowableError {
+            throw error
+        }
+        recordTrustedTransactionTxIdCallsCount += 1
+        recordTrustedTransactionTxIdReceivedArguments = (rawTransaction: rawTransaction, txId: txId)
+        try await recordTrustedTransactionTxIdClosure!(rawTransaction, txId)
+    }
+
+    // MARK: - setTransactionTrust
+
+    var setTransactionTrustTxIdTrustedThrowableError: Error?
+    var setTransactionTrustTxIdTrustedCallsCount = 0
+    var setTransactionTrustTxIdTrustedCalled: Bool {
+        return setTransactionTrustTxIdTrustedCallsCount > 0
+    }
+    var setTransactionTrustTxIdTrustedReceivedArguments: (txId: TxId, trusted: Bool)?
+    var setTransactionTrustTxIdTrustedClosure: ((TxId, Bool) async throws -> Void)?
+
+    func setTransactionTrust(txId: TxId, trusted: Bool) async throws {
+        if let error = setTransactionTrustTxIdTrustedThrowableError {
+            throw error
+        }
+        setTransactionTrustTxIdTrustedCallsCount += 1
+        setTransactionTrustTxIdTrustedReceivedArguments = (txId: txId, trusted: trusted)
+        try await setTransactionTrustTxIdTrustedClosure!(txId, trusted)
+    }
+
     // MARK: - transactionSubmissionStatus
 
     var transactionSubmissionStatusForCallsCount = 0
@@ -5284,6 +5322,25 @@ class ZcashRustBackendWeldingMock: ZcashRustBackendWelding {
         setTransactionStatusTxIdStatusCallsCount += 1
         setTransactionStatusTxIdStatusReceivedArguments = (txId: txId, status: status)
         try await setTransactionStatusTxIdStatusClosure!(txId, status)
+    }
+
+    // MARK: - setTransactionTrust
+
+    var setTransactionTrustTxIdTrustedThrowableError: Error?
+    var setTransactionTrustTxIdTrustedCallsCount = 0
+    var setTransactionTrustTxIdTrustedCalled: Bool {
+        return setTransactionTrustTxIdTrustedCallsCount > 0
+    }
+    var setTransactionTrustTxIdTrustedReceivedArguments: (txId: Data, trusted: Bool)?
+    var setTransactionTrustTxIdTrustedClosure: ((Data, Bool) async throws -> Void)?
+
+    func setTransactionTrust(txId: Data, trusted: Bool) async throws {
+        if let error = setTransactionTrustTxIdTrustedThrowableError {
+            throw error
+        }
+        setTransactionTrustTxIdTrustedCallsCount += 1
+        setTransactionTrustTxIdTrustedReceivedArguments = (txId: txId, trusted: trusted)
+        try await setTransactionTrustTxIdTrustedClosure!(txId, trusted)
     }
 
     // MARK: - fixWitnesses
