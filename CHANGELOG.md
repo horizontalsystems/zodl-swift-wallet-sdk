@@ -61,6 +61,24 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the crates under it that the change also needs, from git revisions; they are replaced by the
   releases once those exist. The voting API is unchanged.
 
+## Checkpoints
+
+Mainnet
+
+````
+Sources/ZcashLightClientKit/Resources/checkpoints/mainnet/3485000.json
+...
+Sources/ZcashLightClientKit/Resources/checkpoints/mainnet/3505000.json
+````
+
+Testnet
+
+````
+Sources/ZcashLightClientKit/Resources/checkpoints/testnet/4360000.json
+...
+Sources/ZcashLightClientKit/Resources/checkpoints/testnet/4460000.json
+````
+
 # 5.0.0 - 2026-09-23
 
 ## Added
