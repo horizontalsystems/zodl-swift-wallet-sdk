@@ -30,7 +30,7 @@ case .pending: break                                // waiting for 10 confirmati
 case .empty:   break                                // already redeemed, or never funded
 }
 
-let results = try await redeemer.redeem(to: myUnifiedAddress)
+let results = try await redeemer.redeem(to: myUnifiedAddress, memo: try Memo(string: "Gift card"))
 // results: one TransactionSubmitResult per created transaction (usually one)
 
 try await redeemer.cleanup()                        // stops and deletes the temporary wallet
@@ -38,7 +38,7 @@ try await redeemer.cleanup()                        // stops and deletes the tem
 
 - `statedAmount` and `message` come from the link and are unverified. Show `GiftCardStatus`
   amounts as the card's value, and the message as untrusted user content.
-- `redeem(to:)` sends the whole spendable balance minus the ZIP 317 fee (normally 10,000 zatoshis,
+- `redeem(to:memo:)` sends the whole spendable balance, with the optional `memo`, minus the ZIP 317 fee (normally 10,000 zatoshis,
   which a card is funded with on top of its face value). It discards the outgoing viewing key, so
   the card's key cannot reveal the recipient; the redeeming wallet still records the incoming
   payment as usual.

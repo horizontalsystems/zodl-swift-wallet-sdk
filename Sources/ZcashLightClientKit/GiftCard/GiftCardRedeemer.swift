@@ -200,9 +200,9 @@ public actor GiftCardRedeemer {
     ///   ``ZcashError/giftCardNetworkMismatch`` for an address on another network, and the
     ///   proposal and creation errors of `Synchronizer.proposeSendMax(accountUUID:recipient:memo:mode:)`
     ///   and `Synchronizer.createProposedTransactions(proposal:spendingKey:ovkPolicy:)`.
-    public func redeem(to recipient: UnifiedAddress) async throws -> [TransactionSubmitResult] {
+    public func redeem(to recipient: UnifiedAddress, memo: Memo? = nil) async throws -> [TransactionSubmitResult] {
         try await serialized { redeemer in
-            try await redeemer.performRedeem(to: recipient)
+            try await redeemer.performRedeem(to: recipient, memo: memo)
         }
     }
 
@@ -261,7 +261,7 @@ public actor GiftCardRedeemer {
         return GiftCardStatus(balance: balances[accountUUID])
     }
 
-    private func performRedeem(to recipient: UnifiedAddress) async throws -> [TransactionSubmitResult] {
+    private func performRedeem(to recipient: UnifiedAddress, memo: Memo?) async throws -> [TransactionSubmitResult] {
         guard !isCleanedUp else {
             throw ZcashError.giftCardRedeemerCleanedUp
         }
@@ -280,7 +280,7 @@ public actor GiftCardRedeemer {
         let proposal = try await synchronizer.proposeSendMax(
             accountUUID: accountUUID,
             recipient: .unified(recipient),
-            memo: nil,
+            memo: memo,
             mode: .maxSpendable
         )
         let spendingKey = try DerivationTool(networkType: card.network)
