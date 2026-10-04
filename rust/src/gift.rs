@@ -344,7 +344,9 @@ fn parse_zodl(fragment: &str) -> Result<GiftCard, Error> {
     let mut description = None;
 
     for pair in fragment.split('&') {
-        let (name, value) = pair.split_once('=').ok_or(Error::InvalidField("fragment"))?;
+        let (name, value) = pair
+            .split_once('=')
+            .ok_or(Error::InvalidField("fragment"))?;
         let slot = match name {
             "v" => (&mut version, "v"),
             "key" => (&mut key, "key"),
@@ -437,7 +439,9 @@ fn parse_zec(text: &str) -> Result<Zatoshis, Error> {
         return Err(invalid);
     }
     let whole: u64 = whole.parse().map_err(|_| invalid.clone())?;
-    let fraction: u64 = format!("{fraction:0<8}").parse().map_err(|_| invalid.clone())?;
+    let fraction: u64 = format!("{fraction:0<8}")
+        .parse()
+        .map_err(|_| invalid.clone())?;
     whole
         .checked_mul(COIN)
         .and_then(|z| z.checked_add(fraction))
@@ -695,7 +699,10 @@ mod tests {
             parsed.funding_address(&TEST_NETWORK).unwrap(),
             card.funding_address(&TEST_NETWORK).unwrap()
         );
-        assert_eq!(parsed.spending_key(&MAIN_NETWORK).unwrap_err(), Error::NetworkMismatch);
+        assert_eq!(
+            parsed.spending_key(&MAIN_NETWORK).unwrap_err(),
+            Error::NetworkMismatch
+        );
     }
 
     #[test]
@@ -708,7 +715,10 @@ mod tests {
         assert_eq!(parsed.network(), NetworkType::Main);
         // A trailing slash on the origin is optional and the origin is case-insensitive.
         let bare = link.replacen("https://gift.zodl.com/", "HTTPS://Gift.Zodl.com", 1);
-        assert_eq!(GiftCard::parse(&bare).unwrap().seed().unwrap(), card.seed().unwrap());
+        assert_eq!(
+            GiftCard::parse(&bare).unwrap().seed().unwrap(),
+            card.seed().unwrap()
+        );
     }
 
     #[test]
@@ -720,16 +730,37 @@ mod tests {
         let (base, fragment) = link.split_once('#').unwrap();
         let key = fragment.split('&').nth(1).unwrap();
         let cases = [
-            (format!("{base}#v=2&{key}&height=1"), Error::UnsupportedVersion),
+            (
+                format!("{base}#v=2&{key}&height=1"),
+                Error::UnsupportedVersion,
+            ),
             (format!("{base}#{key}&height=1"), Error::MissingField("v")),
             (format!("{base}#v=1&height=1"), Error::MissingField("key")),
             (format!("{base}#v=1&{key}"), Error::MissingField("height")),
-            (format!("{base}#v=1&{key}&height=0"), Error::InvalidField("height")),
-            (format!("{base}#v=1&{key}&height=1&height=2"), Error::DuplicateField("height")),
-            (format!("{base}#v=1&{key}&height=1&amount=0"), Error::InvalidField("amount")),
-            (format!("{base}#v=1&{key}&height=1&amount=1."), Error::InvalidField("amount")),
-            (format!("{base}#v=1&{key}&height=1&amount=0.123456789"), Error::InvalidField("amount")),
-            (format!("{base}#v=1&{}x&height=1", key), Error::InvalidField("key")),
+            (
+                format!("{base}#v=1&{key}&height=0"),
+                Error::InvalidField("height"),
+            ),
+            (
+                format!("{base}#v=1&{key}&height=1&height=2"),
+                Error::DuplicateField("height"),
+            ),
+            (
+                format!("{base}#v=1&{key}&height=1&amount=0"),
+                Error::InvalidField("amount"),
+            ),
+            (
+                format!("{base}#v=1&{key}&height=1&amount=1."),
+                Error::InvalidField("amount"),
+            ),
+            (
+                format!("{base}#v=1&{key}&height=1&amount=0.123456789"),
+                Error::InvalidField("amount"),
+            ),
+            (
+                format!("{base}#v=1&{}x&height=1", key),
+                Error::InvalidField("key"),
+            ),
             ("https://example.com/#v=1".to_string(), Error::NotAGiftLink),
             (base.to_string(), Error::NotAGiftLink),
         ];
@@ -752,6 +783,30 @@ mod tests {
         assert!(derive_card_secret(&MAIN_NETWORK, &seed, 1 << 31).is_err());
     }
 
+    /// The BIP 39 English test vector (passphrase `TREZOR`) and the mainnet Orchard-only
+    /// address that Vizor's own key-derivation tests expect for it. Vizor cards are claimed
+    /// through `spending_key`/`funding_address`, so these must agree on the derivation path
+    /// (ZIP 32 account 0, Orchard receiver at the default diversifier).
+    #[test]
+    fn orchard_derivation_matches_vizor_bip39_vector() {
+        const PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        const VIZOR_UA: &str = "u16yrmgarlnpx3ktaxq4l8mmc8wwnw3nmml02nujwghr2enf3jggmfjqax44yqts3csnxrtq8pyshk9ryew2zlrp3x5lyc64usqsnwnu0v";
+        let seed = Mnemonic::<English>::from_phrase(PHRASE)
+            .unwrap()
+            .to_seed("TREZOR");
+        let ufvk = UnifiedSpendingKey::from_seed(&MAIN_NETWORK, &seed, AccountId::ZERO)
+            .unwrap()
+            .to_unified_full_viewing_key();
+        let request = UnifiedAddressRequest::custom(
+            ReceiverRequirement::Require,
+            ReceiverRequirement::Omit,
+            ReceiverRequirement::Omit,
+        )
+        .unwrap();
+        let (address, _) = ufvk.default_address(request).unwrap();
+        assert_eq!(address.encode(&MAIN_NETWORK), VIZOR_UA);
+    }
+
     #[test]
     fn reads_vizor_v3() {
         let card = GiftCard::parse(VIZOR_V3).unwrap();
@@ -759,10 +814,15 @@ mod tests {
         assert_eq!(card.network(), NetworkType::Main);
         assert_eq!(card.birthday_height(), 3_483_141);
         assert_eq!(card.amount(), Some(Zatoshis::from_u64(1_000_000).unwrap()));
-        assert_eq!(card.description(), Some("It's a great day to shield your ZEC 🛡️"));
+        assert_eq!(
+            card.description(),
+            Some("It's a great day to shield your ZEC 🛡️")
+        );
         // 32 zero bytes of entropy is "abandon" x23 + "art".
         let phrase = format!("{} art", ["abandon"; 23].join(" "));
-        let expected = Mnemonic::<English>::from_phrase(phrase.as_str()).unwrap().to_seed("");
+        let expected = Mnemonic::<English>::from_phrase(phrase.as_str())
+            .unwrap()
+            .to_seed("");
         assert_eq!(card.seed().unwrap(), expected);
         assert!(card.to_link().is_err());
     }
@@ -770,10 +830,12 @@ mod tests {
     #[test]
     fn reads_vizor_v2_and_v1() {
         fn b64(bytes: &[u8]) -> String {
-            const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+            const ALPHABET: &[u8] =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
             let mut out = String::new();
             for chunk in bytes.chunks(3) {
-                let n = chunk.iter().fold(0u32, |acc, b| (acc << 8) | u32::from(*b)) << (8 * (3 - chunk.len()));
+                let n = chunk.iter().fold(0u32, |acc, b| (acc << 8) | u32::from(*b))
+                    << (8 * (3 - chunk.len()));
                 for i in 0..=chunk.len() {
                     out.push(ALPHABET[((n >> (18 - 6 * i)) & 63) as usize] as char);
                 }
@@ -804,18 +866,31 @@ mod tests {
             "v": 1, "network": "main", "amountZatoshi": 1, "mnemonic": phrase,
             "birthdayHeight": "3400000", "label": "", "address": "u1x", "createdAt": "2026-01-01T00:00:00Z",
         });
-        let card = GiftCard::parse(&format!("{VIZOR_LINK_BASE}#v1={}", b64(v1.to_string().as_bytes()))).unwrap();
+        let card = GiftCard::parse(&format!(
+            "{VIZOR_LINK_BASE}#v1={}",
+            b64(v1.to_string().as_bytes())
+        ))
+        .unwrap();
         assert_eq!(card.origin(), Origin::VizorV1);
 
         // A version tag that does not match the fragment prefix is refused.
         let link = format!("{VIZOR_LINK_BASE}#v1={}", b64(v2.to_string().as_bytes()));
-        assert_eq!(GiftCard::parse(&link).unwrap_err(), Error::UnsupportedVersion);
+        assert_eq!(
+            GiftCard::parse(&link).unwrap_err(),
+            Error::UnsupportedVersion
+        );
 
         // Test-network Vizor links are refused.
         let mut testnet = v2.clone();
         testnet["network"] = "test".into();
-        let link = format!("{VIZOR_LINK_BASE}#v2={}", b64(testnet.to_string().as_bytes()));
-        assert_eq!(GiftCard::parse(&link).unwrap_err(), Error::UnsupportedNetwork);
+        let link = format!(
+            "{VIZOR_LINK_BASE}#v2={}",
+            b64(testnet.to_string().as_bytes())
+        );
+        assert_eq!(
+            GiftCard::parse(&link).unwrap_err(),
+            Error::UnsupportedNetwork
+        );
     }
 
     #[test]
