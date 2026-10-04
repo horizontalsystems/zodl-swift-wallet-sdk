@@ -63,6 +63,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Fixed
 
+- `GiftCardRedeemer` starts the card wallet at the exact height in the link: it fetches the
+  server's tree state for the block before the birthday instead of rounding down to the nearest
+  bundled checkpoint (up to 2,500 blocks on mainnet, 10,000 on testnet), so `check()` scans only
+  the blocks since the card was funded. Without a server the bundled checkpoint is still used.
 - `GiftCardRedeemer` never reuses a card wallet left behind by an earlier redeemer (a crash or a
   killed app): the leftover directory is deleted before the wallet is created, so a stale birthday
   or a half-finished claim cannot carry over. Rebuilding one costs seconds.

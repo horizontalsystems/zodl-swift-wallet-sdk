@@ -97,6 +97,8 @@ public actor GiftCardRedeemer {
 
     private let network: ZcashNetwork
     private let rootDirectory: URL
+    private let initializer: Initializer
+    private let checkpointSource: GiftCardCheckpointSource
     private let synchronizer: SDKSynchronizer
     private var accountUUID: AccountUUID?
     private var isCleanedUp = false
@@ -156,11 +158,34 @@ public actor GiftCardRedeemer {
             isExchangeRateEnabled: false
         )
 
+        // The card wallet's birthday is the exact height in the link, not the nearest bundled
+        // checkpoint below it (see `GiftCardCheckpointSource`); `prepareIfNeeded()` fetches it.
+        let checkpointSource = GiftCardCheckpointSource(bundled: initializer.container.resolve(CheckpointSource.self))
+        initializer.container.register(type: CheckpointSource.self, isSingleton: true) { _ in checkpointSource }
+
         self.card = card
         self.alias = alias
         self.network = network
         self.rootDirectory = rootDirectory
+        self.initializer = initializer
+        self.checkpointSource = checkpointSource
         self.synchronizer = SDKSynchronizer(initializer: initializer)
+    }
+
+    /// Fetches the server's tree state for the block before the card's birthday, so the card
+    /// wallet scans from the birthday itself. A fetch failure leaves the bundled checkpoint in
+    /// place: slower, never wrong.
+    private func fetchExactBirthday() async {
+        guard card.birthdayHeight > 1 else { return }
+        do {
+            let treeState = try await initializer.lightWalletService.getTreeState(
+                BlockID(height: UInt64(card.birthdayHeight - 1)),
+                mode: .direct
+            )
+            checkpointSource.use(Checkpoint(treeState: treeState))
+        } catch {
+            initializer.logger.warn("Gift card: tree state for the birthday unavailable, using the bundled checkpoint")
+        }
     }
 
     deinit {
@@ -329,6 +354,8 @@ public actor GiftCardRedeemer {
         // never reused: it may have been created from an older checkpoint, or hold a half-done
         // claim. Rebuilding one from the card's birthday costs seconds, so start clean.
         try? FileManager.default.removeItem(at: rootDirectory)
+
+        await fetchExactBirthday()
         try FileManager.default.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
         // The directory holds a wallet database for a key that is also in the link; it has no
         // business in a device backup.

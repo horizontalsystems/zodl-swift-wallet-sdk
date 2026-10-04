@@ -282,4 +282,27 @@ final class GiftCardTests: ZcashTestCase {
             )
         )
     }
+
+    func testCheckpointSourceServesTheExactBirthdayWhenFetched() {
+        let bundled = CheckpointSourceFactory.fromBundle(for: .testnet)
+        let source = GiftCardCheckpointSource(bundled: bundled)
+        let birthday = BlockHeight(4_453_870)
+
+        // Nothing fetched yet: the bundled grid applies.
+        XCTAssertEqual(source.birthday(for: birthday).height, bundled.birthday(for: birthday).height)
+
+        var treeState = TreeState()
+        treeState.height = UInt64(birthday - 1)
+        treeState.hash = "00"
+        treeState.time = 1
+        treeState.saplingTree = "00"
+        treeState.orchardTree = "00"
+        source.use(Checkpoint(treeState: treeState))
+
+        XCTAssertEqual(source.birthday(for: birthday).height, birthday - 1)
+        XCTAssertEqual(source.birthday(for: birthday + 500).height, birthday - 1)
+        XCTAssertNil(source.birthday(for: birthday).ironwoodTree)
+        // A birthday below the fetched state falls back to the bundled grid.
+        XCTAssertEqual(source.birthday(for: birthday - 100).height, bundled.birthday(for: birthday - 100).height)
+    }
 }
