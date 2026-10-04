@@ -61,6 +61,12 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the crates under it that the change also needs, from git revisions; they are replaced by the
   releases once those exist. The voting API is unchanged.
 
+## Fixed
+
+- `GiftCardRedeemer` never reuses a card wallet left behind by an earlier redeemer (a crash or a
+  killed app): the leftover directory is deleted before the wallet is created, so a stale birthday
+  or a half-finished claim cannot carry over. Rebuilding one costs seconds.
+
 ## Checkpoints
 
 Mainnet

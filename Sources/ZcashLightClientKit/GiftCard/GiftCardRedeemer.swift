@@ -325,6 +325,10 @@ public actor GiftCardRedeemer {
             return accountUUID
         }
 
+        // A wallet left behind by an earlier redeemer for this card (a crash, a killed app) is
+        // never reused: it may have been created from an older checkpoint, or hold a half-done
+        // claim. Rebuilding one from the card's birthday costs seconds, so start clean.
+        try? FileManager.default.removeItem(at: rootDirectory)
         try FileManager.default.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
         // The directory holds a wallet database for a key that is also in the link; it has no
         // business in a device backup.
@@ -333,8 +337,6 @@ public actor GiftCardRedeemer {
         values.isExcludedFromBackup = true
         try? directory.setResourceValues(values)
 
-        // A wallet left behind by an earlier redeemer for this card is opened, not recreated: the
-        // SDK derives new versus existing from the database.
         _ = try await synchronizer.prepare(
             with: card.seed.bytes,
             walletBirthday: card.birthdayHeight,
