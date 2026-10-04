@@ -1,16 +1,19 @@
 # Gift cards
 
-A gift card is a bearer link that carries the key of a small, single-purpose wallet:
+A gift card is a liberated payment (ZIP 324): a bearer link that carries the key of a small,
+single-purpose wallet. The link is any `https` URL whose fragment carries the card, in the `v=1`
+format or in the legacy JSON payment-link encoding at `/payment-links/open#vN=`:
 
 ```
 https://gift.zodl.com/#v=1&key=zgift1…&height=<birthday>[&amount=<ZEC>][&desc=<text>]
-https://link.vizor.cash/payment-links/open#v3=…   (also v1= and v2=)
+https://<host>/payment-links/open#v3=…   (legacy; also v1= and v2=)
 ```
 
 The key is BIP 39 entropy (empty passphrase); the card wallet is ZIP 32 account 0 of its seed, and
 the funds sit at that account's Orchard-only default address (in the Ironwood pool since NU6.3).
-The link fragment never reaches a server. Anyone holding the link can spend the card, including its
-issuer, who can rederive the key.
+The host is not part of the card and the link fragment never reaches a server. Anyone holding the
+link can spend the card, including its issuer, who can rederive the key. `GiftCard.origin` reports
+the encoding a link was read from (`.zodl` for `v=1`, `.legacyV1`/`.legacyV2`/`.legacyV3`).
 
 ## Redeeming
 

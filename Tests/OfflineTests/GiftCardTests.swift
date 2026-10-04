@@ -8,16 +8,16 @@ import XCTest
 @testable import ZcashLightClientKit
 
 final class GiftCardTests: ZcashTestCase {
-    /// Vizor's published, never-funded reference vector: 32 zero bytes of entropy, which is the
-    /// phrase of 23 times "abandon" followed by "art".
-    static let vizorV3Payload = [
+    /// A published, never-funded reference vector of the legacy `v3` encoding: 32 zero bytes of
+    /// entropy, which is the phrase of 23 times "abandon" followed by "art".
+    static let legacyV3Payload = [
         "WyJtYWluIiwiQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQSIsMzQ4MzE0MSwiMTAwMDAwMCIsImtuaWdodE1hZ2ljIiwx",
         "MS4xNzQ3LCJJdCdzIGEgZ3JlYXQgZGF5IHRvIHNoaWVsZCB5b3VyIFpFQyDwn5uh77iPIl0"
     ].joined()
-    static let vizorV3Link = "https://link.vizor.cash/payment-links/open#v3=\(vizorV3Payload)"
+    static let legacyV3Link = "https://legacy.example/payment-links/open#v3=\(legacyV3Payload)"
 
     /// The BIP 39 seed (empty passphrase) of the all-zero 256-bit entropy.
-    static let vizorV3SeedHex =
+    static let legacyV3SeedHex =
         "408b285c123836004f4b8842c89324c1f01382450c0d439af345ba7fc49acf705489c6fc77dbd4e3dc1dd8cc6bc9f043db8ada1e243c4a0eafb290d399480840"
 
     /// A testnet card in the Zodl format: entropy of 32 bytes of 0x07.
@@ -26,15 +26,15 @@ final class GiftCardTests: ZcashTestCase {
 
     // MARK: - Parsing
 
-    func testParsesTheVizorV3Vector() throws {
-        let card = try GiftCard(link: Self.vizorV3Link)
+    func testParsesTheLegacyV3Vector() throws {
+        let card = try GiftCard(link: Self.legacyV3Link)
 
-        XCTAssertEqual(card.origin, .vizorV3)
+        XCTAssertEqual(card.origin, .legacyV3)
         XCTAssertEqual(card.network, .mainnet)
         XCTAssertEqual(card.birthdayHeight, 3_483_141)
         XCTAssertEqual(card.statedAmount, Zatoshi(1_000_000))
         XCTAssertEqual(card.message, "It's a great day to shield your ZEC 🛡️")
-        XCTAssertEqual(card.seed.bytes, [UInt8](try XCTUnwrap(Self.vizorV3SeedHex.hexadecimal)))
+        XCTAssertEqual(card.seed.bytes, [UInt8](try XCTUnwrap(Self.legacyV3SeedHex.hexadecimal)))
         XCTAssertTrue(card.fundingAddress.stringEncoded.hasPrefix("u1"))
         // The funding address is Orchard-only.
         XCTAssertEqual(try card.fundingAddress.availableReceiverTypecodes(), [.orchard])
@@ -54,6 +54,18 @@ final class GiftCardTests: ZcashTestCase {
         XCTAssertEqual(try card.fundingAddress.availableReceiverTypecodes(), [.orchard])
     }
 
+    func testTheHostIsNotPartOfTheCard() throws {
+        // The fragment carries the card; any `https` URL may serve it.
+        let moved = Self.zodlTestnetLink.replacingOccurrences(
+            of: "https://gift.zodl.com/",
+            with: "HTTPS://Pay.Example.org/claim"
+        )
+        let card = try GiftCard(link: moved)
+
+        XCTAssertEqual(card.origin, .zodl)
+        XCTAssertEqual(card, try GiftCard(link: Self.zodlTestnetLink))
+    }
+
     func testOptionalFieldsMayBeAbsent() throws {
         let card = try GiftCard(link: "https://gift.zodl.com/#v=1&key=\(Self.zodlTestnetKey)&height=3000000")
 
@@ -62,20 +74,21 @@ final class GiftCardTests: ZcashTestCase {
     }
 
     func testTheSeedDerivesTheFundingAccount() throws {
-        let card = try GiftCard(link: Self.vizorV3Link)
+        let card = try GiftCard(link: Self.legacyV3Link)
         let tool = DerivationTool(networkType: card.network)
         let usk = try tool.deriveUnifiedSpendingKey(seed: card.seed.bytes, accountIndex: Zip32AccountIndex(0))
         let ufvk = try tool.deriveUnifiedFullViewingKey(from: usk)
 
         XCTAssertFalse(ufvk.stringEncoded.isEmpty)
-        XCTAssertEqual(card, try GiftCard(link: Self.vizorV3Link))
+        XCTAssertEqual(card, try GiftCard(link: Self.legacyV3Link))
     }
 
     func testRejectsBadLinksWithoutEchoingThem() {
         let secretPart = String(Self.zodlTestnetKey.dropFirst(10))
         let links = [
             "",
-            "https://example.com/#v=1&key=\(Self.zodlTestnetKey)&height=1",
+            // The host is not part of the card, but the link must be an `https` URL.
+            "http://gift.zodl.com/#v=1&key=\(Self.zodlTestnetKey)&height=1",
             "https://gift.zodl.com/#v=2&key=\(Self.zodlTestnetKey)&height=1",
             "https://gift.zodl.com/#v=1&key=\(Self.zodlTestnetKey)",
             "https://gift.zodl.com/#v=1&key=\(Self.zodlTestnetKey)x&height=1",
@@ -98,7 +111,7 @@ final class GiftCardTests: ZcashTestCase {
     // MARK: - Redaction
 
     func testTextualRepresentationsAreRedacted() throws {
-        let card = try GiftCard(link: Self.vizorV3Link)
+        let card = try GiftCard(link: Self.legacyV3Link)
         let seedHex = card.seed.bytes.map { String(format: "%02x", $0) }.joined()
 
         var dumped = ""
@@ -123,19 +136,19 @@ final class GiftCardTests: ZcashTestCase {
     // MARK: - Alias
 
     func testAliasIsStablePerCardAndDistinctBetweenCards() throws {
-        let vizor = try GiftCard(link: Self.vizorV3Link)
+        let legacy = try GiftCard(link: Self.legacyV3Link)
         let zodl = try GiftCard(link: Self.zodlTestnetLink)
 
-        XCTAssertEqual(vizor.synchronizerAlias, try GiftCard(link: Self.vizorV3Link).synchronizerAlias)
-        XCTAssertNotEqual(vizor.synchronizerAlias, zodl.synchronizerAlias)
-        XCTAssertNotEqual(vizor.synchronizerAlias, .default)
+        XCTAssertEqual(legacy.synchronizerAlias, try GiftCard(link: Self.legacyV3Link).synchronizerAlias)
+        XCTAssertNotEqual(legacy.synchronizerAlias, zodl.synchronizerAlias)
+        XCTAssertNotEqual(legacy.synchronizerAlias, .default)
 
-        guard case let .custom(name) = vizor.synchronizerAlias else {
+        guard case let .custom(name) = legacy.synchronizerAlias else {
             return XCTFail("A gift card must never use the default alias")
         }
         XCTAssertTrue(name.hasPrefix("giftcard_"))
         XCTAssertEqual(name.count, "giftcard_".count + 16)
-        XCTAssertFalse(name.contains(vizor.fundingAddress.stringEncoded))
+        XCTAssertFalse(name.contains(legacy.fundingAddress.stringEncoded))
     }
 
     // MARK: - Status
@@ -180,7 +193,7 @@ final class GiftCardTests: ZcashTestCase {
     // MARK: - Redeemer lifecycle
 
     func testRedeemerRefusesACardForAnotherNetwork() throws {
-        let card = try GiftCard(link: Self.vizorV3Link)
+        let card = try GiftCard(link: Self.legacyV3Link)
 
         XCTAssertThrowsError(
             try GiftCardRedeemer(

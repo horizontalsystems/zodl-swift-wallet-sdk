@@ -11,9 +11,12 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `NetworkActivationHeights.nu7` sets the NU7 activation height of a custom or regtest network.
   A `nil` height means "not activated".
 
-- `GiftCard` reads a gift card link with `GiftCard(link:)`: a `https://gift.zodl.com/` link or a
-  Vizor payment link. It exposes the card's `origin`, `network`, `birthdayHeight`, the unverified
-  `statedAmount` and `message` the link carries, and the card wallet's Orchard-only
+- `GiftCard` reads a gift card link with `GiftCard(link:)`: any `https` URL whose fragment carries
+  a `v=1` card (`#v=1&key=…&height=…`, as `https://gift.zodl.com/` issues) or the legacy JSON
+  payment-link encoding at `/payment-links/open#vN=`; `GiftCard.Origin` names the encoding read
+  (`.zodl`, `.legacyV1`, `.legacyV2`, `.legacyV3`). It exposes the card's `origin`, `network`,
+  `birthdayHeight`, the unverified `statedAmount` and `message` the link carries, and the card
+  wallet's Orchard-only
   `fundingAddress`. Parsing is offline. An unreadable link throws `ZcashError.rustParseGiftCardLink`
   (`ZRUST0156`), whose message never contains any part of the link. The card's seed is not
   exposed, and `description`, `debugDescription` and reflection of a `GiftCard` are redacted.

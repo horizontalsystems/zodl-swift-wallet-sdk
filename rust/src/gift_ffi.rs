@@ -1,7 +1,8 @@
-//! The C surface for reading gift card links (see [`crate::gift`]).
+//! The C surface for reading gift card links (see [`crate::liberated_payment`]).
 //!
-//! Parsing is stateless: it touches no database and no network. A link carries a spending
-//! secret, so no error reported from here ever includes any part of the input.
+//! A gift card is a liberated payment (ZIP 324) as the SDK presents it to apps. Parsing is
+//! stateless: it touches no database and no network. A link carries a spending secret, so no
+//! error reported from here ever includes any part of the input.
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -10,32 +11,32 @@ use ffi_helpers::panic::catch_panic;
 use secrecy::zeroize::Zeroize;
 use zcash_protocol::consensus::{MAIN_NETWORK, NetworkType, TEST_NETWORK};
 
-use crate::gift::{GiftCard, Origin};
+use crate::liberated_payment::{LiberatedPayment, Origin};
 use crate::{NETWORK_ID_MAINNET, NETWORK_ID_TESTNET, unwrap_exc_or_null};
 
-/// Who issued a gift card link.
+/// The encoding a gift card link was read from.
 ///
 /// cbindgen:prefix-with-name
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GiftCardOrigin {
-    /// A `https://gift.zodl.com/` link.
-    Zodl,
-    /// A Vizor `v1` payment link.
-    VizorV1,
-    /// A Vizor `v2` payment link.
-    VizorV2,
-    /// A Vizor `v3` payment link.
-    VizorV3,
+    /// A `v=1` link: `https://<host>#v=1&key=…&height=…`.
+    V1,
+    /// A legacy `v1=` JSON payload at `/payment-links/open#v1=`.
+    LegacyV1,
+    /// A legacy `v2=` JSON payload at `/payment-links/open#v2=`.
+    LegacyV2,
+    /// A legacy `v3=` JSON payload at `/payment-links/open#v3=`.
+    LegacyV3,
 }
 
 impl From<Origin> for GiftCardOrigin {
     fn from(origin: Origin) -> Self {
         match origin {
-            Origin::Zodl => GiftCardOrigin::Zodl,
-            Origin::VizorV1 => GiftCardOrigin::VizorV1,
-            Origin::VizorV2 => GiftCardOrigin::VizorV2,
-            Origin::VizorV3 => GiftCardOrigin::VizorV3,
+            Origin::V1 => GiftCardOrigin::V1,
+            Origin::LegacyV1 => GiftCardOrigin::LegacyV1,
+            Origin::LegacyV2 => GiftCardOrigin::LegacyV2,
+            Origin::LegacyV3 => GiftCardOrigin::LegacyV3,
         }
     }
 }
@@ -52,7 +53,7 @@ impl From<Origin> for GiftCardOrigin {
 ///   null-terminated UTF-8 string.
 #[repr(C)]
 pub struct GiftCardLink {
-    /// Who issued the link.
+    /// The encoding the link was read from.
     origin: GiftCardOrigin,
     /// The network the card is on, as a network id (`0` testnet, `1` mainnet).
     network_id: u32,
@@ -88,7 +89,7 @@ pub unsafe extern "C" fn zcashlc_parse_gift_card_link(link: *const c_char) -> *m
         let link = unsafe { CStr::from_ptr(link) }
             .to_str()
             .map_err(|_| anyhow::anyhow!("gift card link is not valid UTF-8"))?;
-        let card = GiftCard::parse(link).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let card = LiberatedPayment::parse(link).map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let (network_id, funding_address) = match card.network() {
             NetworkType::Main => (NETWORK_ID_MAINNET, card.funding_address(&MAIN_NETWORK)),
@@ -152,9 +153,11 @@ mod tests {
 
     use super::*;
 
-    // Vizor's published, never-funded reference vector (32 zero bytes of entropy), as in
-    // `gift.rs`.
-    const VIZOR_V3: &str = "https://link.vizor.cash/payment-links/open#v3=WyJtYWluIiwiQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQSIsMzQ4MzE0MSwiMTAwMDAwMCIsImtuaWdodE1hZ2ljIiwxMS4xNzQ3LCJJdCdzIGEgZ3JlYXQgZGF5IHRvIHNoaWVsZCB5b3VyIFpFQyDwn5uh77iPIl0";
+    const HOST: &str = "https://gift.zodl.com/";
+
+    // A published, never-funded reference vector of the legacy `v3` encoding (32 zero bytes of
+    // entropy), as in `liberated_payment.rs`.
+    const LEGACY_V3: &str = "https://legacy.example/payment-links/open#v3=WyJtYWluIiwiQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQSIsMzQ4MzE0MSwiMTAwMDAwMCIsImtuaWdodE1hZ2ljIiwxMS4xNzQ3LCJJdCdzIGEgZ3JlYXQgZGF5IHRvIHNoaWVsZCB5b3VyIFpFQyDwn5uh77iPIl0";
 
     fn parse(link: &str) -> *mut GiftCardLink {
         let link = CString::new(link).unwrap();
@@ -166,11 +169,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_the_vizor_v3_vector() {
-        let ptr = parse(VIZOR_V3);
+    fn parses_the_legacy_v3_vector() {
+        let ptr = parse(LEGACY_V3);
         assert!(!ptr.is_null());
         let card = unsafe { &*ptr };
-        assert_eq!(card.origin, GiftCardOrigin::VizorV3);
+        assert_eq!(card.origin, GiftCardOrigin::LegacyV3);
         assert_eq!(card.network_id, NETWORK_ID_MAINNET);
         assert_eq!(card.birthday_height, 3_483_141);
         assert!(card.has_amount);
@@ -188,7 +191,7 @@ mod tests {
         assert!(address.starts_with("u1"));
         assert_eq!(
             address,
-            GiftCard::parse(VIZOR_V3)
+            LiberatedPayment::parse(LEGACY_V3)
                 .unwrap()
                 .funding_address(&MAIN_NETWORK)
                 .unwrap()
@@ -197,12 +200,13 @@ mod tests {
     }
 
     #[test]
-    fn parses_a_zodl_testnet_link() {
-        let card = GiftCard::new(NetworkType::Test, [9; 32], 3_000_000, None, None).unwrap();
-        let ptr = parse(&card.to_link().unwrap());
+    fn parses_a_v1_testnet_link() {
+        let card =
+            LiberatedPayment::new(NetworkType::Test, [9; 32], 3_000_000, None, None).unwrap();
+        let ptr = parse(&card.to_link(HOST).unwrap());
         assert!(!ptr.is_null());
         let parsed = unsafe { &*ptr };
-        assert_eq!(parsed.origin, GiftCardOrigin::Zodl);
+        assert_eq!(parsed.origin, GiftCardOrigin::V1);
         assert_eq!(parsed.network_id, NETWORK_ID_TESTNET);
         assert_eq!(parsed.birthday_height, 3_000_000);
         assert!(!parsed.has_amount);
@@ -219,13 +223,13 @@ mod tests {
 
     #[test]
     fn refuses_bad_links_without_echoing_them() {
-        let regtest = GiftCard::new(NetworkType::Regtest, [9; 32], 1, None, None)
+        let regtest = LiberatedPayment::new(NetworkType::Regtest, [9; 32], 1, None, None)
             .unwrap()
-            .to_link()
+            .to_link(HOST)
             .unwrap();
-        let mainnet = GiftCard::new(NetworkType::Main, [9; 32], 1, None, None)
+        let mainnet = LiberatedPayment::new(NetworkType::Main, [9; 32], 1, None, None)
             .unwrap()
-            .to_link()
+            .to_link(HOST)
             .unwrap();
         let key = mainnet
             .split('&')
@@ -235,6 +239,8 @@ mod tests {
         for link in [
             regtest,
             "https://example.com/#v=1".to_owned(),
+            // The host is not part of the link, but it must be an `https` URL.
+            format!("http://gift.zodl.com/#v=1&key={key}&height=1"),
             format!("https://gift.zodl.com/#v=1&key={key}x&height=1"),
             format!("https://gift.zodl.com/#v=1&key={key}"),
         ] {

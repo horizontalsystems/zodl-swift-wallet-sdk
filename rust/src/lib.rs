@@ -99,14 +99,15 @@ mod eip681;
 mod error_report;
 mod ext_schema;
 mod ffi;
-// `gift.rs` is shared verbatim with the card-minting tooling, so items this crate does not
-// use (minting, link writing) are allowed rather than edited out, and rustfmt leaves it alone so
-// the copies stay byte-identical. cbindgen must not parse it: its `Error` enum would shadow the
-// generic `Error` paths cbindgen resolves elsewhere. `gift_ffi` carries its C surface.
+// `liberated_payment.rs` is shared verbatim with the payment-minting tooling, so items this
+// crate does not use (minting, link writing) are allowed rather than edited out, and rustfmt
+// leaves it alone so the copies stay byte-identical. cbindgen must not parse it: its `Error` enum
+// would shadow the generic `Error` paths cbindgen resolves elsewhere. `gift_ffi` carries its C
+// surface, which presents a liberated payment to the SDK as a gift card.
 /// cbindgen:ignore
 #[allow(dead_code)]
 #[rustfmt::skip]
-mod gift;
+mod liberated_payment;
 mod gift_ffi;
 mod interactive_qos;
 mod migration;

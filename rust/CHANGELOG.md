@@ -8,9 +8,11 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `zcashlc_parse_gift_card_link(link)` reads a gift card link — a `https://gift.zodl.com/` link or
-  a Vizor `v1`/`v2`/`v3` payment link — without touching a database or the network, and returns an
-  `FfiGiftCardLink`: its `origin` (`FfiGiftCardOrigin`), `network_id` (`0` testnet, `1` mainnet;
+- `zcashlc_parse_gift_card_link(link)` reads a gift card link — any `https` URL whose fragment
+  carries a `v=1` card (`#v=1&key=…&height=…`) or the legacy JSON payment-link encoding at
+  `/payment-links/open#vN=` — without touching a database or the network, and returns an
+  `FfiGiftCardLink`: its `origin` (`FfiGiftCardOrigin`: `V1`, `LegacyV1`, `LegacyV2`, `LegacyV3`),
+  `network_id` (`0` testnet, `1` mainnet;
   regtest cards are refused), `birthday_height`, the informational amount (`has_amount`/`amount`,
   in zatoshis), a nullable `description`, the card wallet's Orchard-only `funding_address`, and the
   64-byte BIP 39 `seed` of the card wallet (ZIP 32 account 0). Free it with

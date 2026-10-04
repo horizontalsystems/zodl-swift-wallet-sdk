@@ -8,9 +8,10 @@ import Foundation
 
 /// A Zcash gift card read from a bearer link.
 ///
-/// A gift card is a small, single-purpose wallet whose key travels in the link itself:
-/// `https://gift.zodl.com/#v=1&key=zgift1...&height=<birthday>[&amount=<ZEC>][&desc=<text>]`, or a
-/// Vizor payment link (`https://link.vizor.cash/payment-links/open#v1=…`, `#v2=…` or `#v3=…`).
+/// A gift card is a liberated payment (ZIP 324): a small, single-purpose wallet whose key travels
+/// in the link itself. The link is any `https` URL whose fragment carries the card, in the `v=1`
+/// format `https://gift.zodl.com/#v=1&key=zgift1...&height=<birthday>[&amount=<ZEC>][&desc=<text>]`
+/// or in the legacy JSON payment-link encoding at `/payment-links/open#v1=…`, `#v2=…` or `#v3=…`.
 /// The card wallet is ZIP 32 account 0 of the card's BIP 39 seed, and its funds sit at that
 /// account's Orchard-only default address (in the Ironwood pool since NU6.3).
 ///
@@ -21,16 +22,16 @@ import Foundation
 /// The card's seed never leaves the SDK, and the value's `description`, `debugDescription` and
 /// reflection are redacted so that printing or logging a card cannot leak it.
 public struct GiftCard: Equatable, Undescribable {
-    /// Who issued a gift card link.
+    /// The encoding a gift card link was read from.
     public enum Origin: Equatable, Sendable {
-        /// A `https://gift.zodl.com/` link.
+        /// A `v=1` link (`https://<host>#v=1&key=…&height=…`), as `https://gift.zodl.com/` issues.
         case zodl
-        /// A Vizor `v1` payment link.
-        case vizorV1
-        /// A Vizor `v2` payment link.
-        case vizorV2
-        /// A Vizor `v3` payment link.
-        case vizorV3
+        /// A legacy `v1=` JSON payment link (`/payment-links/open#v1=…`).
+        case legacyV1
+        /// A legacy `v2=` JSON payment link (`/payment-links/open#v2=…`).
+        case legacyV2
+        /// A legacy `v3=` JSON payment link (`/payment-links/open#v3=…`).
+        case legacyV3
     }
 
     /// The card wallet's 64-byte BIP 39 seed, kept out of every textual representation.
@@ -38,7 +39,7 @@ public struct GiftCard: Equatable, Undescribable {
         let bytes: [UInt8]
     }
 
-    /// Who issued the link.
+    /// The encoding the link was read from.
     public let origin: Origin
 
     /// The network the card is on.

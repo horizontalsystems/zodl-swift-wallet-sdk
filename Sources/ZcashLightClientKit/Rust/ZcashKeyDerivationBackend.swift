@@ -63,10 +63,10 @@ struct ZcashKeyDerivationBackend: ZcashKeyDerivationBackendWelding {
 
         let origin: GiftCard.Origin
         switch ffiCard.origin {
-        case FfiGiftCardOrigin_Zodl: origin = .zodl
-        case FfiGiftCardOrigin_VizorV1: origin = .vizorV1
-        case FfiGiftCardOrigin_VizorV2: origin = .vizorV2
-        case FfiGiftCardOrigin_VizorV3: origin = .vizorV3
+        case FfiGiftCardOrigin_V1: origin = .zodl
+        case FfiGiftCardOrigin_LegacyV1: origin = .legacyV1
+        case FfiGiftCardOrigin_LegacyV2: origin = .legacyV2
+        case FfiGiftCardOrigin_LegacyV3: origin = .legacyV3
         default: throw ZcashError.rustParseGiftCardLink("gift card link has an unknown origin")
         }
 
