@@ -380,7 +380,9 @@ pub unsafe extern "C" fn zcashlc_spending_key_to_full_viewing_key(
         let network = parse_network(network_id)?;
         unsafe { decode_usk(usk_ptr, usk_len) }.map(|usk| {
             let ufvk = usk.to_unified_full_viewing_key();
-            CString::new(ufvk.encode(&network)).unwrap().into_raw()
+            CString::new(crate::encode_ufvk_r0(&ufvk, &network))
+                .unwrap()
+                .into_raw()
         })
     });
     unwrap_exc_or_null(res)
@@ -439,7 +441,9 @@ pub unsafe extern "C" fn zcashlc_derive_address_from_ufvk(
             ufvk.find_address(j, UnifiedAddressRequest::AllAvailableKeys)
         }?;
 
-        Ok(Box::into_raw(Box::new(ffi::Address::new(&network, ua, di))))
+        Ok(Box::into_raw(Box::new(ffi::Address::new(
+            &network, ua, di,
+        ))))
     });
     unwrap_exc_or_null(res)
 }
@@ -482,7 +486,9 @@ pub unsafe extern "C" fn zcashlc_derive_address_from_uivk(
             uivk.find_address(j, UnifiedAddressRequest::AllAvailableKeys)
         }?;
 
-        Ok(Box::into_raw(Box::new(ffi::Address::new(&network, ua, di))))
+        Ok(Box::into_raw(Box::new(ffi::Address::new(
+            &network, ua, di,
+        ))))
     });
     unwrap_exc_or_null(res)
 }
@@ -826,4 +832,470 @@ pub unsafe extern "C" fn zcashlc_derive_arbitrary_account_key(
         Ok(ffi::BoxedSlice::some(key.data().to_vec()))
     });
     unwrap_exc_or_null(res)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zcash_protocol::consensus::{MAIN_NETWORK, TEST_NETWORK};
+
+    /// Opens a fresh wallet database at `path` and creates one seed-derived account in it,
+    /// returning its uuid bytes — enough for a test to call a real `zcashlc_*` function against
+    /// an account that exists.
+    fn fixture_account(path: &std::path::Path) -> [u8; 16] {
+        use zcash_client_backend::data_api::{AccountBirthday, WalletWrite};
+        use zcash_client_backend::proto::service::TreeState;
+        use zcash_client_sqlite::WalletDb;
+        use zcash_client_sqlite::util::SystemClock;
+        use zcash_client_sqlite::wallet::init::init_wallet_db;
+
+        let mut db = WalletDb::for_path(
+            path,
+            MAIN_NETWORK,
+            SystemClock,
+            rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+        )
+        .expect("the wallet database must open");
+        init_wallet_db(&mut db, None).expect("initializes the wallet schema");
+        let seed = secrecy::SecretVec::new(vec![7u8; 32]);
+        let treestate = TreeState {
+            // `from_treestate` requires a valid 32-byte block hash; everything else can stay
+            // at the proto defaults (height 0, empty tree frontiers).
+            hash: "00".repeat(32),
+            ..TreeState::default()
+        };
+        let birthday = AccountBirthday::from_treestate(treestate, None)
+            .expect("the fixture treestate must convert to a birthday");
+        let (account, _usk) = db
+            .create_account("fixture", &seed, &birthday, None)
+            .expect("account creation must succeed");
+        // `get_next_available_address` needs a chain tip to select confirmed diversifiers
+        // from; any height past the account's birthday does.
+        db.update_chain_tip(zcash_protocol::consensus::BlockHeight::from_u32(2_000_000))
+            .expect("sets the chain tip");
+        account.expose_uuid().into_bytes()
+    }
+
+    /// The regression this commit fixes: the unified address the FFI hands Swift still carries
+    /// its transparent receiver, and decodes at revision 0 — not the revision-2,
+    /// transparent-dropping string `zcash_keys`'s own `encode` produces on the NU7 crates.
+    #[test]
+    fn next_available_address_keeps_its_transparent_receiver_at_revision_0() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("wallet.sqlite");
+        let account_uuid = fixture_account(&path);
+        let path_str = path.to_str().expect("utf8 path");
+        let path_bytes = path_str.as_bytes();
+
+        let address_ptr = unsafe {
+            crate::zcashlc_get_next_available_address(
+                path_bytes.as_ptr(),
+                path_bytes.len(),
+                account_uuid.as_ptr(),
+                crate::NETWORK_ID_MAINNET,
+                0b0000_1101, // P2PKH | SAPLING | ORCHARD
+            )
+        };
+        if address_ptr.is_null() {
+            let len = crate::zcashlc_last_error_length();
+            let mut buf = vec![0u8; len as usize];
+            unsafe { crate::zcashlc_error_message_utf8(buf.as_mut_ptr() as *mut i8, len) };
+            panic!(
+                "the FFI call must succeed: {}",
+                String::from_utf8_lossy(&buf)
+            );
+        }
+        let address_str = unsafe { CStr::from_ptr(address_ptr) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { crate::zcashlc_string_free(address_ptr) };
+
+        let (_, revision, address) =
+            unified::Address::decode(&address_str).expect("the address decodes");
+        assert_eq!(revision, unified::Revision::R0, "must decode at revision 0");
+        assert!(
+            address
+                .items()
+                .iter()
+                .any(|r| matches!(r, unified::Receiver::P2pkh(_))),
+            "the transparent receiver must survive: {address_str}"
+        );
+    }
+
+    /// A UFVK, a UIVK and a UA for a seed-derived key encode with revision-0 prefixes, and each
+    /// decodes back to the same value: `zcash_keys`'s own (revision-2) encoder of the decoded
+    /// value agrees with its encoder of the value built directly.
+    fn assert_revision_0_round_trip(
+        network: &impl Parameters,
+        ua_prefix: &str,
+        ufvk_prefix: &str,
+        uivk_prefix: &str,
+    ) {
+        let usk = UnifiedSpendingKey::from_seed(network, &[7u8; 32], zip32::AccountId::ZERO)
+            .expect("a spending key derives");
+        let ufvk = usk.to_unified_full_viewing_key();
+        let uivk = ufvk.to_unified_incoming_viewing_key();
+        let (ua, _) = ufvk
+            .default_address(UnifiedAddressRequest::AllAvailableKeys)
+            .expect("an address derives");
+
+        let ufvk_str = crate::encode_ufvk_r0(&ufvk, network);
+        let uivk_str = crate::encode_uivk_r0(&uivk, network);
+        let ua_str = crate::encode_unified_address_r0(&ua, network);
+
+        assert!(
+            ufvk_str.starts_with(ufvk_prefix),
+            "{ufvk_str} must start with {ufvk_prefix}"
+        );
+        assert!(
+            uivk_str.starts_with(uivk_prefix),
+            "{uivk_str} must start with {uivk_prefix}"
+        );
+        assert!(
+            ua_str.starts_with(ua_prefix),
+            "{ua_str} must start with {ua_prefix}"
+        );
+
+        let decoded_ufvk = UnifiedFullViewingKey::decode(network, &ufvk_str).expect("ufvk decodes");
+        assert_eq!(decoded_ufvk.encode(network), ufvk.encode(network));
+
+        let decoded_uivk =
+            UnifiedIncomingViewingKey::decode(network, &uivk_str).expect("uivk decodes");
+        assert_eq!(decoded_uivk.encode(network), uivk.encode(network));
+
+        let (_, _, raw_ua) = unified::Address::decode(&ua_str).expect("ua decodes");
+        let decoded_ua = UnifiedAddress::try_from(raw_ua).expect("converts to a UnifiedAddress");
+        assert_eq!(decoded_ua.encode(network), ua.encode(network));
+    }
+
+    #[test]
+    fn ufvk_uivk_and_ua_encode_at_revision_0_and_round_trip_on_mainnet() {
+        assert_revision_0_round_trip(&MAIN_NETWORK, "u1", "uview1", "uivk1");
+    }
+
+    #[test]
+    fn ufvk_uivk_and_ua_encode_at_revision_0_and_round_trip_on_testnet() {
+        assert_revision_0_round_trip(&TEST_NETWORK, "utest1", "uviewtest1", "uivktest1");
+    }
+
+    /// Three rows of `librustzcash`'s own unified-address test vectors — the
+    /// `TEST_VECTORS` table in `zcash_address`'s
+    /// `src/kind/unified/address/test_vectors.rs` (sourced from
+    /// `zcash/zcash-test-vectors`'s `unified_address.py`), revision 0, mainnet:
+    /// a p2pkh+sapling address, a p2pkh+orchard address, and a
+    /// p2pkh+sapling+orchard address.
+    #[test]
+    fn upstream_revision_0_vectors_round_trip_byte_for_byte() {
+        let vectors = [
+            "u1l8xunezsvhq8fgzfl7404m450nwnd76zshscn6nfys7vyz2ywyh4cc5daaq0c7q2su5lqfh23sp7fkf3kt27ve5948mzpfdvckzaect2jtte308mkwlycj2u0eac077wu70vqcetkxf",
+            "u1snf9yr883aj2hm8pksp9aymnqdwzy42rpzuffevj35hhxeckays5pcpeq7vy2mtgzlcuc4mnh9443qnuyje0yx6h59angywka4v2ap6kchh2j96ezf9w0c0auyz3wwts2lx5gmk2sk9",
+            "u19mzuf4l37ny393m59v4mxx4t3uyxkh7qpqjdfvlfk9f504cv9w4fpl7cql0kqvssz8jay8mgl8lnrtvg6yzh9pranjj963acc3h2z2qt7007du0lsmdf862dyy40c3wmt0kq35k5z836tfljgzsqtdsccchayfjpygqzkx24l77ga3ngfgskqddyepz8we7ny4ggmt7q48cgvgu57mz",
+        ];
+
+        for vector in vectors {
+            let (_, revision, raw) = unified::Address::decode(vector).expect("vector decodes");
+            assert_eq!(
+                revision,
+                unified::Revision::R0,
+                "upstream vector must be revision 0"
+            );
+            let ua = UnifiedAddress::try_from(raw).expect("converts to a UnifiedAddress");
+            let re_encoded = crate::encode_unified_address_r0(&ua, &MAIN_NETWORK);
+            assert_eq!(re_encoded, vector, "must reproduce the upstream vector exactly");
+        }
+    }
+
+    /// A transparent-only UFVK and a transparent-only unified address have no shielded item, so
+    /// revision 0 cannot represent either (ZIP 316). `encode_ufvk_r0`/`encode_unified_address_r0`
+    /// fall back to `zcash_keys`'s own revision 2 encoding for them instead of failing outright —
+    /// which previously made `zcashlc_get_account` fail for an imported transparent-only UFVK.
+    #[test]
+    fn transparent_only_values_fall_back_to_revision_2_instead_of_erroring() {
+        let usk = UnifiedSpendingKey::from_seed(&MAIN_NETWORK, &[7u8; 32], zip32::AccountId::ZERO)
+            .expect("a spending key derives");
+        let ufvk = usk.to_unified_full_viewing_key();
+        let (ua, _) = ufvk
+            .default_address(UnifiedAddressRequest::AllAvailableKeys)
+            .expect("an address derives");
+
+        // A transparent-only UFVK built from the fixture key's own p2pkh item: revision 2 is
+        // the only revision that can encode it standalone, so it has to start there.
+        let p2pkh_fvk_bytes: [u8; 65] = ufvk
+            .p2pkh()
+            .expect("the fixture key has a transparent item")
+            .serialize()
+            .try_into()
+            .expect("an account public key is 65 bytes");
+        let transparent_only_ufvk_str = unified::Ufvk::try_from_items(
+            unified::Revision::R2,
+            vec![unified::Uitem::Data(unified::Fvk::P2pkh(p2pkh_fvk_bytes))],
+        )
+        .expect("a single transparent item is valid at revision 2")
+        .encode(&MAIN_NETWORK.network_type());
+        let transparent_only_ufvk =
+            UnifiedFullViewingKey::decode(&MAIN_NETWORK, &transparent_only_ufvk_str)
+                .expect("the fixture string decodes");
+
+        let encoded_ufvk = crate::encode_ufvk_r0(&transparent_only_ufvk, &MAIN_NETWORK);
+        let (_, ufvk_revision, _) = unified::Ufvk::decode(&encoded_ufvk).expect("decodes");
+        assert_eq!(
+            ufvk_revision,
+            unified::Revision::R2,
+            "a transparent-only UFVK must fall back to revision 2 instead of failing: {encoded_ufvk}"
+        );
+
+        // Same shape, for the address: a transparent-only UA built from the fixture address's
+        // own receiver, plus an unrelated unknown item purely to reach F4Jumble's 48-byte floor
+        // (a lone 20-byte receiver, plus the 16-byte HRP padding, falls short of it at either
+        // revision — nothing to do with revision 0 vs. 2).
+        let receiver_item = match ua
+            .transparent()
+            .expect("the fixture address has a transparent receiver")
+        {
+            TransparentAddress::PublicKeyHash(data) => unified::Receiver::P2pkh(*data),
+            TransparentAddress::ScriptHash(data) => unified::Receiver::P2sh(*data),
+        };
+        let transparent_only_ua_str = unified::Address::try_from_items(
+            unified::Revision::R2,
+            vec![
+                unified::Uitem::Data(receiver_item),
+                unified::Uitem::Data(unified::Receiver::Unknown {
+                    typecode: 0xff00,
+                    data: vec![0u8; 20],
+                }),
+            ],
+        )
+        .expect("a transparent receiver plus padding is valid at revision 2")
+        .encode(&MAIN_NETWORK.network_type());
+        let (_, _, raw_ua) = unified::Address::decode(&transparent_only_ua_str)
+            .expect("the fixture string decodes");
+        let transparent_only_ua =
+            UnifiedAddress::try_from(raw_ua).expect("converts to a UnifiedAddress");
+
+        let encoded_ua = crate::encode_unified_address_r0(&transparent_only_ua, &MAIN_NETWORK);
+        let (_, ua_revision, _) = unified::Address::decode(&encoded_ua).expect("decodes");
+        assert_eq!(
+            ua_revision,
+            unified::Revision::R2,
+            "a transparent-only address must fall back to revision 2 instead of failing: {encoded_ua}"
+        );
+    }
+
+    /// A data item of a typecode this crate does not interpret survives `encode_ufvk_r0`
+    /// unchanged. The previous, per-pool-accessor construction had no way to read it back at
+    /// all — `zcash_keys` keeps unknown items in a private field — so it silently dropped them.
+    #[test]
+    fn an_unknown_item_keeps_its_place_at_revision_0() {
+        let usk = UnifiedSpendingKey::from_seed(&MAIN_NETWORK, &[7u8; 32], zip32::AccountId::ZERO)
+            .expect("a spending key derives");
+        let ufvk = usk.to_unified_full_viewing_key();
+        let orchard_bytes = ufvk
+            .orchard()
+            .expect("the fixture key has an orchard item")
+            .to_bytes();
+        let sapling_bytes = ufvk
+            .sapling()
+            .expect("the fixture key has a sapling item")
+            .to_bytes();
+
+        let input = unified::Ufvk::try_from_items(
+            unified::Revision::R0,
+            vec![
+                unified::Uitem::Data(unified::Fvk::Orchard(orchard_bytes)),
+                unified::Uitem::Data(unified::Fvk::Sapling(sapling_bytes)),
+                unified::Uitem::Data(unified::Fvk::Unknown {
+                    typecode: 0xff00,
+                    data: vec![1, 2, 3, 4],
+                }),
+            ],
+        )
+        .expect("a shielded item plus an unknown item is valid at revision 0")
+        .encode(&MAIN_NETWORK.network_type());
+
+        let decoded = UnifiedFullViewingKey::decode(&MAIN_NETWORK, &input)
+            .expect("the fixture string decodes");
+        let output = crate::encode_ufvk_r0(&decoded, &MAIN_NETWORK);
+
+        assert_eq!(output, input, "the unknown item must survive unchanged");
+    }
+
+    /// A transparent-only UIVK has no shielded item, so revision 0 cannot represent it — the
+    /// same restriction as the transparent-only UFVK and address covered above.
+    /// `encode_uivk_r0` falls back to `zcash_keys`'s own revision 2 encoding for it instead of
+    /// failing outright.
+    #[test]
+    fn transparent_only_uivk_falls_back_to_revision_2_instead_of_erroring() {
+        use transparent::keys::IncomingViewingKey as _;
+
+        let usk = UnifiedSpendingKey::from_seed(&MAIN_NETWORK, &[7u8; 32], zip32::AccountId::ZERO)
+            .expect("a spending key derives");
+        let uivk = usk
+            .to_unified_full_viewing_key()
+            .to_unified_incoming_viewing_key();
+
+        // A transparent-only UIVK built from the fixture key's own p2pkh item: revision 2 is
+        // the only revision that can encode it standalone, so it has to start there.
+        let p2pkh_ivk_bytes: [u8; 65] = uivk
+            .p2pkh()
+            .expect("the fixture key has a transparent item")
+            .serialize()
+            .try_into()
+            .expect("an external ivk is 65 bytes");
+        let transparent_only_uivk_str = unified::Uivk::try_from_items(
+            unified::Revision::R2,
+            vec![unified::Uitem::Data(unified::Ivk::P2pkh(p2pkh_ivk_bytes))],
+        )
+        .expect("a single transparent item is valid at revision 2")
+        .encode(&MAIN_NETWORK.network_type());
+        let transparent_only_uivk =
+            UnifiedIncomingViewingKey::decode(&MAIN_NETWORK, &transparent_only_uivk_str)
+                .expect("the fixture string decodes");
+
+        let encoded = crate::encode_uivk_r0(&transparent_only_uivk, &MAIN_NETWORK);
+        assert_eq!(
+            encoded,
+            transparent_only_uivk.encode(&MAIN_NETWORK),
+            "a transparent-only UIVK must fall back to zcash_keys's own revision 2 string"
+        );
+    }
+
+    /// A unified address with an expiry-height metadata item is a value revision 0 cannot
+    /// hold. `encode_unified_address_r0` falls back to `encode_receiver_preserving`'s revision
+    /// 2 string for it instead of failing or silently dropping the metadata.
+    #[test]
+    fn ua_with_expiry_metadata_falls_back_to_revision_2_instead_of_dropping_it() {
+        let usk = UnifiedSpendingKey::from_seed(&MAIN_NETWORK, &[7u8; 32], zip32::AccountId::ZERO)
+            .expect("a spending key derives");
+        let ufvk = usk.to_unified_full_viewing_key();
+        let (ua, _) = ufvk
+            .default_address(UnifiedAddressRequest::AllAvailableKeys)
+            .expect("an address derives");
+
+        let orchard_bytes = ua
+            .orchard()
+            .expect("the fixture address has an orchard receiver")
+            .to_raw_address_bytes();
+        let sapling_bytes = ua
+            .sapling()
+            .expect("the fixture address has a sapling receiver")
+            .to_bytes();
+        let transparent_item = match ua
+            .transparent()
+            .expect("the fixture address has a transparent receiver")
+        {
+            TransparentAddress::PublicKeyHash(data) => unified::Receiver::P2pkh(*data),
+            TransparentAddress::ScriptHash(data) => unified::Receiver::P2sh(*data),
+        };
+
+        let with_expiry_str = unified::Address::try_from_items(
+            unified::Revision::R2,
+            vec![
+                unified::Uitem::Data(unified::Receiver::Orchard(orchard_bytes)),
+                unified::Uitem::Data(unified::Receiver::Sapling(sapling_bytes)),
+                unified::Uitem::Data(transparent_item),
+                unified::Uitem::Metadata(unified::MetadataItem::ExpiryHeight(2_000_000)),
+            ],
+        )
+        .expect("the fixture's receivers plus an expiry height item are valid at revision 2")
+        .encode(&MAIN_NETWORK.network_type());
+        let (_, _, raw_ua) =
+            unified::Address::decode(&with_expiry_str).expect("the fixture string decodes");
+        let ua_with_expiry =
+            UnifiedAddress::try_from(raw_ua).expect("converts to a UnifiedAddress");
+
+        let encoded = crate::encode_unified_address_r0(&ua_with_expiry, &MAIN_NETWORK);
+        assert_eq!(
+            encoded,
+            ua_with_expiry.encode_receiver_preserving(&MAIN_NETWORK),
+            "an address with expiry metadata must fall back to encode_receiver_preserving's string"
+        );
+    }
+
+    /// A UFVK with an expiry-height metadata item, the key-level counterpart to the address
+    /// case above. `zcash_keys`'s own decode reads `ExpiryHeight`/`ExpiryTime` items into
+    /// dedicated fields rather than rejecting them, so this value is constructible the same
+    /// way as the transparent-only fixtures elsewhere in this module; `encode_ufvk_r0` falls
+    /// back to `zcash_keys`'s own revision 2 encoding for it, which keeps the metadata.
+    #[test]
+    fn ufvk_with_expiry_metadata_falls_back_to_revision_2_instead_of_dropping_it() {
+        let usk = UnifiedSpendingKey::from_seed(&MAIN_NETWORK, &[7u8; 32], zip32::AccountId::ZERO)
+            .expect("a spending key derives");
+        let ufvk = usk.to_unified_full_viewing_key();
+        let orchard_bytes = ufvk
+            .orchard()
+            .expect("the fixture key has an orchard item")
+            .to_bytes();
+        let sapling_bytes = ufvk
+            .sapling()
+            .expect("the fixture key has a sapling item")
+            .to_bytes();
+
+        let with_expiry_str = unified::Ufvk::try_from_items(
+            unified::Revision::R2,
+            vec![
+                unified::Uitem::Data(unified::Fvk::Orchard(orchard_bytes)),
+                unified::Uitem::Data(unified::Fvk::Sapling(sapling_bytes)),
+                unified::Uitem::Metadata(unified::MetadataItem::ExpiryHeight(2_000_000)),
+            ],
+        )
+        .expect("a shielded item plus an expiry height item is valid at revision 2")
+        .encode(&MAIN_NETWORK.network_type());
+        let ufvk_with_expiry = UnifiedFullViewingKey::decode(&MAIN_NETWORK, &with_expiry_str)
+            .expect("zcash_keys accepts a UFVK carrying expiry metadata");
+
+        let encoded = crate::encode_ufvk_r0(&ufvk_with_expiry, &MAIN_NETWORK);
+        assert_eq!(
+            encoded,
+            ufvk_with_expiry.encode(&MAIN_NETWORK),
+            "a UFVK with expiry metadata must fall back to zcash_keys's own revision 2 string"
+        );
+    }
+
+    /// A P2SH viewing-key item is revision-2-only (ZIP 316), so `encode_ufvk_r0` must fall back
+    /// to `zcash_keys`'s own encoding for it instead of trying revision 0. Building such a key
+    /// here would need `secp256k1` 0.33 for `P2shFullViewingKey`, a version this crate cannot
+    /// name without its own direct dependency on it, so this takes a ready-made one instead: the
+    /// first vector with a P2SH item (Orchard, no expiry) from `zcash_keys-0.17.0-pre.0`'s
+    /// `src/keys/test_vectors/unified_viewing_keys_r2.rs`, itself sourced from
+    /// `zcash/zcash-test-vectors`'s `unified_viewing_keys_r2.py`.
+    #[test]
+    fn p2sh_ufvk_falls_back_to_revision_2_instead_of_erroring() {
+        let p2sh_ufvk_str = "uvf1td5cvtvcvlmxqgaxus3m2m745ykzk5gncx4z7x5zrk9l256qjfmfg6n8efrg0htq5sac4kg54aejsepkcl6hgaqyk6dlstk4fpnkmxjcvl72zh97r3fz7wa02wt4mmcayn6ukzck9d96tcqmkk2j5rzdr44f6haa9v7qzqsserruscf6lqum38xr8k84yesq8ecxa25aqg04uh3gweg8d25055v9z5u4c75mtt06g57eu8mq8eldg2gn9su23hkv0jrq7asc6tad5kaxs4r330uyf8qmydxkhe0nmtx26nux84sftau7072hp72qhfdzyhwu3ndhdq4glu8zjxp7srdaep9nn96swfl8td478n3jey0r73x5du50gjqr37ta39dpg25vkqw0q59pvfxp4xhl8392keskzl202njjeh677tphgcuayn09kl9vkxqkcy2pq7tar8vcjgewvem8hptycrd7v659lgzsnr85udpx7kv785m4a4259wr0snunfndya9x44m0zqt3py4x9md4vcdrj628qxmam6t836dp5zwsv744ay";
+
+        let decoded = UnifiedFullViewingKey::decode(&MAIN_NETWORK, p2sh_ufvk_str)
+            .expect("the upstream vector decodes");
+
+        let encoded = crate::encode_ufvk_r0(&decoded, &MAIN_NETWORK);
+        assert_eq!(
+            encoded,
+            decoded.encode(&MAIN_NETWORK),
+            "a P2SH item must fall back to zcash_keys's own revision 2 string"
+        );
+        assert_eq!(
+            encoded, p2sh_ufvk_str,
+            "must reproduce the upstream vector exactly"
+        );
+    }
+
+    /// The UIVK counterpart of the vector above: same key, same P2SH-item fallback, this time
+    /// through `encode_uivk_r0`.
+    #[test]
+    fn p2sh_uivk_falls_back_to_revision_2_instead_of_erroring() {
+        let p2sh_uivk_str = "uvi153t9c3gg9y02a7lwtku6pk9hqhz0mvxysnnr770usznsghqfjz69maurfgecxawspdcumw0j2arw7yms275rgs34v8y3trezdh78cl6vvqmypgqmnsqp34psk8420kndga6vpefj468pkfxdfyu4awum9g68fgm5vfszm6vv05z46e6f5r0vvvu2frzv969tgeuy5aes9ugd9jlut7n3ym69u6a3mjrrxsxdt9c5v78z5ze0ffm85ehsge480krnhw0r9v928qr7k5c5f6mht4f23fdk608zugpqfhmndlle35fd5qdew8le2taepl604fp6dd4w7tquydjtwzxs7c24smzccjqf6q5eljr6fwrlagyqwd5smz4rxsz5fz9kjnn2ce8xe3lwmm2dhd28cd2mnr85lnhe956tts4hse455m0kwt25n5029f29gchm6lpaz88mp3stqnk2e4s0u684zu6wl45mhhw2a540tyw5f25uz2ztsas9jjrsn";
+
+        let decoded = UnifiedIncomingViewingKey::decode(&MAIN_NETWORK, p2sh_uivk_str)
+            .expect("the upstream vector decodes");
+
+        let encoded = crate::encode_uivk_r0(&decoded, &MAIN_NETWORK);
+        assert_eq!(
+            encoded,
+            decoded.encode(&MAIN_NETWORK),
+            "a P2SH item must fall back to zcash_keys's own revision 2 string"
+        );
+        assert_eq!(
+            encoded, p2sh_uivk_str,
+            "must reproduce the upstream vector exactly"
+        );
+    }
 }

@@ -59,11 +59,15 @@ impl Account {
             seed_fingerprint: derivation.map_or([0u8; 32], |d| d.seed_fingerprint().to_bytes()),
             hd_account_index: derivation.map_or(u32::MAX, |d| d.account_index().into()),
             ufvk: account.ufvk().map_or(ptr::null_mut(), |ufvk| {
-                CString::new(ufvk.encode(params)).unwrap().into_raw()
+                CString::new(crate::encode_ufvk_r0(ufvk, params))
+                    .unwrap()
+                    .into_raw()
             }),
             uivk: account.ufvk().map_or(ptr::null_mut(), |ufvk| {
                 let uivk = ufvk.to_unified_incoming_viewing_key();
-                CString::new(uivk.encode(params)).unwrap().into_raw()
+                CString::new(crate::encode_uivk_r0(&uivk, params))
+                    .unwrap()
+                    .into_raw()
             }),
         }
     }
@@ -1154,7 +1158,7 @@ impl Address {
         address: UnifiedAddress,
         diversifier_index: DiversifierIndex,
     ) -> Self {
-        let address_str = address.encode(network);
+        let address_str = crate::encode_unified_address_r0(&address, network);
         Self {
             address: CString::new(address_str).unwrap().into_raw(),
             diversifier_index_bytes: *diversifier_index.as_bytes(),
