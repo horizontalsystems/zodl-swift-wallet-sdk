@@ -31,7 +31,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `init(card:network:endpoint:isTorEnabled:storageDirectory:loggingPolicy:)`, then `check()` (syncs
   the card wallet from its birthday and returns a `GiftCardStatus`: `.ready`, `.pending` while the
   card's funds wait for their 10 confirmations, `.dust` when the fee would take all of its
-  spendable funds, or `.empty`, with `total`, `spendable` and `pending` amounts),
+  spendable funds, or `.empty`, with `total`, `spendable` and `pending` amounts, and, when
+  `.pending`, `confirmationsRemaining`: how many more blocks until all of `pending` is spendable,
+  or `nil` when that is unknown),
   `redeem(to:memo:)` (sends the whole spendable balance, with an optional memo, minus the ZIP 317
   fee to a `UnifiedAddress` and returns the `TransactionSubmitResult`s), and `cleanup()` (stops the
   temporary wallet and deletes all of its files). `isTorEnabled` routes the card wallet's birthday
@@ -80,6 +82,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `TxId.init(_ id: [UInt8])` now throws `ZcashError.txIdNot32Bytes` (`ZMODEL0001`) unless `id` is
   exactly 32 bytes, so call sites need `try`. `TxId.id` is now a `let`: assigning to it no longer
   compiles; create a new `TxId` instead.
+- `ZcashTransaction.Overview.getState(for:)` (and the `state` it fills in on the transactions the
+  synchronizer returns) reports a trusted receive (`isTrusted`, ZIP 315) as `.confirmed` once it
+  is 3 blocks deep, the depth at which its funds become spendable, instead of 10. Untrusted
+  receives, sent, self-send and shielding transactions are unchanged. No call site needs editing.
 
 ### NU7 pre-release crates
 

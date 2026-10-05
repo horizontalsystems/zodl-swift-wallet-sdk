@@ -278,6 +278,131 @@ final class GiftCardTests: ZcashTestCase {
         try await redeemer.cleanup()
     }
 
+    // MARK: - Confirmations remaining
+
+    /// ZIP 315 as librustzcash applies it: a note mined at `h` is spendable targeting `tip + 1`
+    /// once `h <= tip + 1 - required`. The card reports the farthest pending receive.
+    func testConfirmationsRemainingFollowsTheUntrustedThreshold() {
+        let policy = ConfirmationsPolicy.defaultTransferPolicy()
+        let untrusted = Int(policy.untrusted)
+        let tip = 2_000
+
+        // Mined at the tip: one confirmation, `untrusted - 1` to go.
+        XCTAssertEqual(
+            GiftCardRedeemer.confirmationsRemaining(
+                received: [Self.overview(value: 100_000, minedHeight: tip, isTrusted: false)],
+                chainTip: tip,
+                policy: policy
+            ),
+            untrusted - 1
+        )
+        // The farthest pending receive decides; spendable ones and sends are ignored.
+        XCTAssertEqual(
+            GiftCardRedeemer.confirmationsRemaining(
+                received: [
+                    Self.overview(value: 100_000, minedHeight: tip - 5, isTrusted: false),
+                    Self.overview(value: 100_000, minedHeight: tip - 2, isTrusted: false),
+                    Self.overview(value: 100_000, minedHeight: tip - 50, isTrusted: false),
+                    Self.overview(value: -100_000, minedHeight: tip, isTrusted: false)
+                ],
+                chainTip: tip,
+                policy: policy
+            ),
+            untrusted - 3
+        )
+        // Spendable exactly at the threshold: nothing remains.
+        XCTAssertNil(
+            GiftCardRedeemer.confirmationsRemaining(
+                received: [Self.overview(value: 100_000, minedHeight: tip + 1 - untrusted, isTrusted: false)],
+                chainTip: tip,
+                policy: policy
+            )
+        )
+    }
+
+    func testConfirmationsRemainingUsesTheTrustedThresholdForTrustedReceives() {
+        let policy = ConfirmationsPolicy.defaultTransferPolicy()
+        let tip = 2_000
+        XCTAssertEqual(
+            GiftCardRedeemer.confirmationsRemaining(
+                received: [Self.overview(value: 100_000, minedHeight: tip, isTrusted: true)],
+                chainTip: tip,
+                policy: policy
+            ),
+            Int(policy.trusted) - 1
+        )
+    }
+
+    func testConfirmationsRemainingIsUnknownWithoutTipOrMinedReceives() {
+        let policy = ConfirmationsPolicy.defaultTransferPolicy()
+        XCTAssertNil(
+            GiftCardRedeemer.confirmationsRemaining(
+                received: [Self.overview(value: 100_000, minedHeight: 10, isTrusted: false)],
+                chainTip: 0,
+                policy: policy
+            )
+        )
+        XCTAssertNil(
+            GiftCardRedeemer.confirmationsRemaining(
+                received: [Self.overview(value: 100_000, minedHeight: nil, isTrusted: false)],
+                chainTip: 2_000,
+                policy: policy
+            )
+        )
+    }
+
+    /// The count is carried only in the pending state.
+    func testStatusKeepsConfirmationsRemainingOnlyWhenPending() {
+        let pendingBalance = AccountBalance(
+            saplingBalance: .zero,
+            orchardBalance: PoolBalance(
+                spendableValue: .zero,
+                changePendingConfirmation: .zero,
+                valuePendingSpendability: Zatoshi(500_000)
+            ),
+            ironwoodBalance: .zero,
+            unshielded: .zero
+        )
+        let pending = GiftCardStatus(balance: pendingBalance, spendableCoversFee: true, confirmationsRemaining: 7)
+        XCTAssertEqual(pending.state, .pending)
+        XCTAssertEqual(pending.confirmationsRemaining, 7)
+
+        let empty = GiftCardStatus(balance: nil, spendableCoversFee: true, confirmationsRemaining: 7)
+        XCTAssertEqual(empty.state, .empty)
+        XCTAssertNil(empty.confirmationsRemaining)
+    }
+
+    static func overview(
+        value: Int64,
+        minedHeight: BlockHeight?,
+        isTrusted: Bool,
+        isShielding: Bool = false
+    ) -> ZcashTransaction.Overview {
+        ZcashTransaction.Overview(
+            accountUUID: AccountUUID(id: [UInt8](repeating: 0, count: 16)),
+            blockTime: nil,
+            expiryHeight: nil,
+            fee: nil,
+            index: nil,
+            isShielding: isShielding,
+            hasChange: false,
+            memoCount: 0,
+            minedHeight: minedHeight,
+            raw: nil,
+            rawID: Data(repeating: 1, count: 32),
+            receivedNoteCount: 1,
+            sentNoteCount: 0,
+            value: Zatoshi(value),
+            isExpiredUmined: false,
+            totalSpent: nil,
+            totalReceived: nil,
+            spentNoteCount: 0,
+            poolCrossingValue: nil,
+            isTrusted: isTrusted,
+            zip318Kind: .notClassified
+        )
+    }
+
     // MARK: - Redeemer lifecycle
 
     func testRedeemerRefusesACardForAnotherNetwork() throws {
