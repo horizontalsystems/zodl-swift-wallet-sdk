@@ -172,6 +172,18 @@ pub(crate) fn anchor_retention_interval(network: NetworkParams) -> AnchorRetenti
 /// on, so the timeout never engages.
 pub(crate) const WALLET_DB_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// The system RNG's type, in the form the NU7 crates' APIs accept. The wallet type aliases name
+/// it; everything else is generic over its RNG.
+pub(crate) type SystemRng = rand::rand_core::UnwrapErr<rand::rngs::SysRng>;
+
+/// The system RNG.
+///
+/// Functions below the FFI layer take their RNG as an argument, so the entry points are where
+/// it comes into being and where a caller can see that randomness is involved.
+pub(crate) fn system_rng() -> SystemRng {
+    rand::rand_core::UnwrapErr(rand::rngs::SysRng)
+}
+
 /// Helper method for construcing a WalletDb value from path data provided over the FFI.
 ///
 /// The returned handle retains its durable anchor checkpoints on the interval
@@ -187,13 +199,12 @@ pub(crate) const WALLET_DB_BUSY_TIMEOUT: std::time::Duration = std::time::Durati
 /// - The memory referenced by `db_data` must not be mutated for the duration of the function call.
 /// - The total size `db_data_len` must be no larger than `isize::MAX`. See the safety
 ///   documentation of pointer::offset.
-unsafe fn wallet_db(
+unsafe fn wallet_db<R: rand::CryptoRng>(
+    rng: R,
     db_data: *const u8,
     db_data_len: usize,
     network: NetworkParams,
-) -> anyhow::Result<
-    WalletDb<rusqlite::Connection, NetworkParams, SystemClock, rand::rand_core::UnwrapErr<rand::rngs::SysRng>>,
-> {
+) -> anyhow::Result<WalletDb<rusqlite::Connection, NetworkParams, SystemClock, R>> {
     let db_data = Path::new(OsStr::from_bytes(unsafe {
         slice::from_raw_parts(db_data, db_data_len)
     }));
@@ -209,7 +220,7 @@ unsafe fn wallet_db(
         conn,
         network,
         SystemClock,
-        rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+        rng,
     )
     .with_anchor_retention_interval(anchor_retention_interval(network)))
 }
@@ -537,7 +548,7 @@ pub unsafe extern "C" fn zcashlc_init_data_database(
                 .map_err(|e| anyhow!("Error opening wallet database connection: {}", e))?;
             legacy_ufvk::realign_legacy_ufvk_encodings(&conn, &network)?;
         }
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
 
         let seed = if seed.is_null() {
             None
@@ -597,7 +608,7 @@ pub unsafe extern "C" fn zcashlc_list_accounts(
 ) -> *mut ffi::Accounts {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
 
         Ok(ffi::Accounts::ptr_from_vec(
             db_data
@@ -636,7 +647,7 @@ pub unsafe extern "C" fn zcashlc_get_account(
 ) -> *mut ffi::Account {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
         let account_uuid = account_uuid_from_bytes(account_uuid_bytes)?;
 
         Ok(Box::into_raw(Box::new(
@@ -704,7 +715,7 @@ pub unsafe extern "C" fn zcashlc_create_account(
 
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
         let seed = Secret::new((unsafe { slice::from_raw_parts(seed, seed_len) }).to_vec());
         let treestate =
             TreeState::decode(unsafe { slice::from_raw_parts(treestate, treestate_len) })
@@ -791,7 +802,7 @@ pub unsafe extern "C" fn zcashlc_import_account_ufvk(
 
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
         let ufvk_str = unsafe { CStr::from_ptr(ufvk).to_str()? };
         let ufvk = UnifiedFullViewingKey::decode(&network, ufvk_str).map_err(|e| {
             anyhow!(
@@ -890,7 +901,7 @@ pub unsafe extern "C" fn zcashlc_is_seed_relevant_to_any_derived_account(
 ) -> i8 {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
         let seed = Secret::new((unsafe { slice::from_raw_parts(seed, seed_len) }).to_vec());
 
         // Replicate the logic from `initWalletDb`. `NoDerivedAccounts` (the
@@ -948,7 +959,7 @@ pub unsafe extern "C" fn zcashlc_delete_account(
 ) -> bool {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
         let account_uuid = account_uuid_from_bytes(account_uuid_bytes)?;
 
         db_data.delete_account(account_uuid)?;
@@ -1016,7 +1027,7 @@ pub unsafe extern "C" fn zcashlc_get_current_address(
 ) -> *mut c_char {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
         let account_uuid = account_uuid_from_bytes(account_uuid_bytes)?;
 
         match db_data.get_last_generated_address_matching(
@@ -1063,7 +1074,7 @@ pub unsafe extern "C" fn zcashlc_get_single_use_taddr(
 ) -> *mut ffi::SingleUseTaddr {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
         let account_uuid = account_uuid_from_bytes(account_uuid_bytes)?;
 
         match db_data.reserve_next_n_ephemeral_addresses(account_uuid, 1) {
@@ -1175,7 +1186,7 @@ pub unsafe extern "C" fn zcashlc_get_next_available_address(
 ) -> *mut c_char {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
         let account_uuid = account_uuid_from_bytes(account_uuid_bytes)?;
         let receiver_flags = ReceiverFlags::from_bits(receiver_flags)
             .ok_or_else(|| anyhow!("Invalid unified address receiver flags {}", receiver_flags))?;
@@ -1229,7 +1240,7 @@ pub unsafe extern "C" fn zcashlc_list_transparent_receivers(
 ) -> *mut ffi::EncodedKeys {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
         let account_uuid = account_uuid_from_bytes(account_uuid_bytes)?;
 
         // Zashi does not support standalone keys, so we do not request standalone receivers.
@@ -1274,7 +1285,7 @@ pub unsafe extern "C" fn zcashlc_get_verified_transparent_balance(
 ) -> i64 {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
         let addr = unsafe { CStr::from_ptr(address).to_str()? };
         let taddr = TransparentAddress::decode(&network, addr)?;
         let confirmations_policy = wallet::ConfirmationsPolicy::try_from(confirmations_policy)?;
@@ -1326,7 +1337,7 @@ pub unsafe extern "C" fn zcashlc_get_verified_transparent_balance_for_account(
 ) -> i64 {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
         let account_uuid = account_uuid_from_bytes(account_uuid_bytes)?;
 
         let (target, _) = db_data
@@ -1392,7 +1403,7 @@ pub unsafe extern "C" fn zcashlc_get_total_transparent_balance(
 ) -> i64 {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
         let addr = unsafe { CStr::from_ptr(address).to_str()? };
         let taddr = TransparentAddress::decode(&network, addr)?;
         let (target, _) = db_data
@@ -1441,7 +1452,7 @@ pub unsafe extern "C" fn zcashlc_get_total_transparent_balance_for_account(
 ) -> i64 {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
         let account_uuid = account_uuid_from_bytes(account_uuid_bytes)?;
 
         let (target, _) = db_data
@@ -1508,7 +1519,7 @@ pub unsafe extern "C" fn zcashlc_get_memo(
 ) -> bool {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
 
         let txid_bytes = unsafe { slice::from_raw_parts(txid_bytes, 32) };
         let txid = TxId::read(txid_bytes)?;
@@ -1601,7 +1612,7 @@ pub unsafe extern "C" fn zcashlc_rewind_to_height(
     }
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
 
         let height = BlockHeight::from(height);
         let result_height = db_data.truncate_to_height(height);
@@ -1663,7 +1674,7 @@ pub unsafe extern "C" fn zcashlc_truncate_to_chain_state(
 ) -> bool {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
         let chain_state =
             TreeState::decode(unsafe { slice::from_raw_parts(chain_state, chain_state_len) })
                 .map_err(|e| anyhow!("Invalid TreeState: {}", e))?
@@ -1703,7 +1714,7 @@ pub unsafe extern "C" fn zcashlc_put_sapling_subtree_roots(
 ) -> bool {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
 
         let roots = unsafe { roots.as_ref().unwrap() };
         let roots_slice: &[ffi::SubtreeRoot] =
@@ -1756,7 +1767,7 @@ pub unsafe extern "C" fn zcashlc_put_orchard_subtree_roots(
 ) -> bool {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
 
         let roots = unsafe { roots.as_ref().unwrap() };
         let roots_slice: &[ffi::SubtreeRoot] =
@@ -1812,7 +1823,7 @@ pub unsafe extern "C" fn zcashlc_put_ironwood_subtree_roots(
 ) -> bool {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
 
         let roots = unsafe { roots.as_ref().unwrap() };
         let roots_slice: &[ffi::SubtreeRoot] =
@@ -1865,7 +1876,7 @@ pub unsafe extern "C" fn zcashlc_update_chain_tip(
 ) -> bool {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
         let height = BlockHeight::try_from(height)?;
 
         db_data
@@ -1899,7 +1910,7 @@ pub unsafe extern "C" fn zcashlc_fully_scanned_height(
 ) -> i64 {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
 
         match db_data.block_fully_scanned() {
             Ok(Some(metadata)) => Ok(i64::from(u32::from(metadata.block_height()))),
@@ -1938,7 +1949,7 @@ pub unsafe extern "C" fn zcashlc_max_scanned_height(
 ) -> i64 {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
 
         match db_data.block_max_scanned() {
             Ok(Some(metadata)) => Ok(i64::from(u32::from(metadata.block_height()))),
@@ -1978,7 +1989,7 @@ pub unsafe extern "C" fn zcashlc_get_wallet_summary(
 ) -> *mut ffi::WalletSummary {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
         let confirmations_policy = wallet::ConfirmationsPolicy::try_from(confirmations_policy)?;
 
         match db_data
@@ -2018,7 +2029,7 @@ pub unsafe extern "C" fn zcashlc_suggest_scan_ranges(
 ) -> *mut ffi::ScanRanges {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
 
         let ranges = db_data
             .suggest_scan_ranges()
@@ -2092,7 +2103,7 @@ pub unsafe extern "C" fn zcashlc_scan_blocks(
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
         let block_db = block_db(fs_block_cache_root, fs_block_cache_root_len)?;
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
         let from_height = BlockHeight::try_from(from_height)?;
         let from_state =
             TreeState::decode(unsafe { slice::from_raw_parts(from_state, from_state_len) })
@@ -2149,7 +2160,7 @@ pub unsafe extern "C" fn zcashlc_put_utxo(
 ) -> bool {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
 
         let txid_bytes = unsafe { slice::from_raw_parts(txid_bytes, txid_bytes_len) };
         let mut txid = [0u8; 32];
@@ -2377,7 +2388,7 @@ pub unsafe extern "C" fn zcashlc_decrypt_and_store_transaction(
 ) -> i32 {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
         let tx_bytes = unsafe { slice::from_raw_parts(tx, tx_len) };
 
         // The consensus branch ID passed in here does not matter:
@@ -2473,7 +2484,7 @@ pub unsafe extern "C" fn zcashlc_propose_transfer(
 
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
 
         let account_uuid = account_uuid_from_bytes(account_uuid_bytes)?;
         let to = unsafe { CStr::from_ptr(to) }.to_str()?;
@@ -2593,7 +2604,7 @@ pub unsafe extern "C" fn zcashlc_propose_send_max_transfer(
 
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
 
         let account_uuid = account_uuid_from_bytes(account_uuid_bytes)?;
         let to = unsafe { CStr::from_ptr(to) }.to_str()?;
@@ -2700,7 +2711,7 @@ pub unsafe extern "C" fn zcashlc_propose_orchard_to_ironwood_migration(
 ) -> *mut ffi::BoxedSlice {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
         let account_uuid = account_uuid_from_bytes(account_uuid_bytes)?;
 
         let proposal =
@@ -2747,7 +2758,7 @@ pub unsafe extern "C" fn zcashlc_propose_transfer_from_uri(
 
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
 
         let account_uuid = account_uuid_from_bytes(account_uuid_bytes)?;
         let payment_uri_str = unsafe { CStr::from_ptr(payment_uri) }.to_str()?;
@@ -2869,7 +2880,7 @@ pub unsafe extern "C" fn zcashlc_propose_shielding(
 ) -> *mut ffi::BoxedSlice {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
 
         let account_uuid = account_uuid_from_bytes(account_uuid_bytes)?;
 
@@ -3068,7 +3079,7 @@ pub unsafe extern "C" fn zcashlc_create_proposed_transactions(
 
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
 
         let proposal =
             Proposal::decode(unsafe { slice::from_raw_parts(proposal_ptr, proposal_len) })
@@ -3096,7 +3107,7 @@ pub unsafe extern "C" fn zcashlc_create_proposed_transactions(
             &mut db_data,
             &network,
             &SystemClock,
-            &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+            &mut system_rng(),
             &prover,
             &prover,
             &SpendingKeys::from_unified_spending_key(usk),
@@ -3142,7 +3153,7 @@ pub unsafe extern "C" fn zcashlc_get_transaction(
 ) -> *mut ffi::TransactionData {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
         let txid_bytes = unsafe { *(txid_bytes.cast::<[u8; 32]>()) };
         let txid = TxId::from_bytes(txid_bytes);
         let Some(transaction) = db_data
@@ -3214,7 +3225,7 @@ pub unsafe extern "C" fn zcashlc_create_pczt_from_proposal(
 ) -> *mut ffi::BoxedSlice {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
 
         let proposal =
             Proposal::decode(unsafe { slice::from_raw_parts(proposal_ptr, proposal_len) })
@@ -3230,7 +3241,7 @@ pub unsafe extern "C" fn zcashlc_create_pczt_from_proposal(
                 &mut db_data,
                 &network,
                 &SystemClock,
-                &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+                &mut system_rng(),
                 account_uuid,
                 OvkPolicy::Sender,
                 &proposal,
@@ -3410,7 +3421,7 @@ pub unsafe extern "C" fn zcashlc_add_proofs_to_pczt(
                 })?;
             prover = prover
                 .create_orchard_proof(
-                    rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+                    system_rng(),
                     zcash_primitives::transaction::builder::cached_orchard_proving_key(
                         circuit_version,
                     ),
@@ -3434,7 +3445,7 @@ pub unsafe extern "C" fn zcashlc_add_proofs_to_pczt(
                 })?;
             prover = prover
                 .create_ironwood_proof(
-                    rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+                    system_rng(),
                     zcash_primitives::transaction::builder::cached_orchard_proving_key(
                         circuit_version,
                     ),
@@ -3461,7 +3472,7 @@ pub unsafe extern "C" fn zcashlc_add_proofs_to_pczt(
 
             prover = prover
                 .create_sapling_proofs(
-                    rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+                    system_rng(),
                     &local_prover,
                     &local_prover,
                 )
@@ -3551,7 +3562,7 @@ pub unsafe extern "C" fn zcashlc_extract_and_store_from_pczt(
 ) -> *mut ffi::BoxedSlice {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
 
         let pczt_with_proofs_bytes =
             unsafe { slice::from_raw_parts(pczt_with_proofs_ptr, pczt_with_proofs_len) };
@@ -3582,7 +3593,7 @@ pub unsafe extern "C" fn zcashlc_extract_and_store_from_pczt(
         let txid = extract_and_store_transaction_from_pczt::<_, ()>(
             &mut db_data,
             &SystemClock,
-            &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+            &mut system_rng(),
             pczt,
             sapling_vk.as_ref().map(|(s, o)| (s, o)),
             None,
@@ -3622,7 +3633,7 @@ pub unsafe extern "C" fn zcashlc_set_transaction_status(
 ) -> bool {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
 
         let txid_bytes = unsafe { slice::from_raw_parts(txid_bytes, txid_bytes_len) };
         let txid = TxId::read(txid_bytes)?;
@@ -3663,7 +3674,7 @@ pub unsafe extern "C" fn zcashlc_transaction_data_requests(
 ) -> *mut ffi::TransactionDataRequests {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
 
         Ok(ffi::TransactionDataRequests::ptr_from_vec(
             db_data
@@ -3727,7 +3738,7 @@ pub unsafe extern "C" fn zcashlc_fix_witnesses(
 ) {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
 
         let corrupt_ranges = db_data.check_witnesses()?;
         if let Some(nel_ranges) = NonEmpty::from_vec(corrupt_ranges) {
@@ -4180,7 +4191,7 @@ pub unsafe extern "C" fn zcashlc_get_exchange_rate_usd(
             tor_runtime
                 .client()
                 .get_latest_zec_to_usd_rate(
-                    &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+                    &mut system_rng(),
                     &exchanges,
                 )
                 .await
@@ -4315,7 +4326,7 @@ pub unsafe extern "C" fn zcashlc_get_exchange_rate_usd_from(
             tor_runtime
                 .client()
                 .get_latest_zec_to_usd_rate(
-                    &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+                    &mut system_rng(),
                     &exchanges,
                 )
                 .await
@@ -4611,7 +4622,7 @@ pub unsafe extern "C" fn zcashlc_tor_lwd_conn_update_transparent_address_transac
             .ok_or_else(|| anyhow!("A Tor lightwalletd connection is required"))?;
 
         let network = parse_network(network_id)?;
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
 
         let addr_str = unsafe { CStr::from_ptr(address).to_str()? };
         let addr = TransparentAddress::decode(&network, addr_str)?;
@@ -4685,7 +4696,7 @@ pub unsafe extern "C" fn zcashlc_tor_lwd_conn_fetch_utxos_by_address(
             .ok_or_else(|| anyhow!("A Tor lightwalletd connection is required"))?;
 
         let network = parse_network(network_id)?;
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
         let account_uuid = account_uuid_from_bytes(account_uuid_bytes)?;
 
         let addr_str = unsafe { CStr::from_ptr(address).to_str()? };
@@ -4755,7 +4766,7 @@ pub unsafe extern "C" fn zcashlc_tor_lwd_conn_check_single_use_taddr(
 
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
         let account_uuid = account_uuid_from_bytes(account_uuid_bytes)?;
 
         let lwd_conn = unsafe { lwd_conn.as_mut() }
@@ -5562,7 +5573,7 @@ pub unsafe extern "C" fn zcashlc_slipstream_open(
         // every open. Non-fatal by design — a wallet that cannot be marked must still open
         // and sync.
         let network_params = NetworkParams::Standard(network);
-        match unsafe { wallet_db(db_data, db_data_len, network_params) }.and_then(|mut wallet| {
+        match unsafe { wallet_db(system_rng(), db_data, db_data_len, network_params) }.and_then(|mut wallet| {
             retained_marks::reconcile_retained_anchor_marks(&mut wallet, &network_params)
         }) {
             Ok(0) => {}
@@ -6861,6 +6872,7 @@ pub unsafe extern "C" fn zcashlc_slipstream_wallet_summary(
                 let path_bytes = db_path.as_os_str().as_bytes();
                 let db_data = unsafe {
                     wallet_db(
+                        system_rng(),
                         path_bytes.as_ptr(),
                         path_bytes.len(),
                         NetworkParams::Standard(network),
@@ -6906,6 +6918,7 @@ pub unsafe extern "C" fn zcashlc_slipstream_wallet_summary(
                             let path_bytes = thread_db_path.as_os_str().as_bytes();
                             let db_data = unsafe {
                                 wallet_db(
+                                    system_rng(),
                                     path_bytes.as_ptr(),
                                     path_bytes.len(),
                                     NetworkParams::Standard(network),

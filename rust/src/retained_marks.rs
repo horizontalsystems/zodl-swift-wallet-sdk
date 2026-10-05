@@ -44,7 +44,7 @@ pub(crate) fn reconcile_retained_anchor_marks(
         rusqlite::Connection,
         NetworkParams,
         SystemClock,
-        rand::rand_core::UnwrapErr<rand::rngs::SysRng>,
+        crate::SystemRng,
     >,
     network: &NetworkParams,
 ) -> anyhow::Result<u64> {
@@ -113,7 +113,7 @@ mod tests {
 
     fn fresh_wallet(
         dir: &std::path::Path,
-    ) -> WalletDb<rusqlite::Connection, NetworkParams, SystemClock, rand::rand_core::UnwrapErr<rand::rngs::SysRng>>
+    ) -> WalletDb<rusqlite::Connection, NetworkParams, SystemClock, crate::SystemRng>
     {
         let path = dir.join("wallet.sqlite");
         let network = NetworkParams::Standard(Network::TestNetwork);
@@ -121,7 +121,7 @@ mod tests {
             &path,
             network,
             SystemClock,
-            rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+            crate::system_rng(),
         )
         .expect("opens a fresh wallet db");
         init_wallet_db(&mut db, None).expect("initializes the wallet schema");

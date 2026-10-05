@@ -853,7 +853,7 @@ mod tests {
             path,
             MAIN_NETWORK,
             SystemClock,
-            rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+            crate::system_rng(),
         )
         .expect("the wallet database must open");
         init_wallet_db(&mut db, None).expect("initializes the wallet schema");

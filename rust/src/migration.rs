@@ -75,6 +75,7 @@ use std::slice;
 use anyhow::anyhow;
 use ffi_helpers::panic::catch_panic;
 use orchard::keys::SpendingKey;
+use rand::CryptoRng;
 use rusqlite::{Connection, OptionalExtension};
 use zcash_client_backend::data_api::wallet::{
     TargetHeight,
@@ -118,6 +119,7 @@ use crate::migration_engine::{
 };
 use crate::migration_finalize;
 use crate::migration_plan_cache;
+use crate::{SystemRng, system_rng};
 use crate::{
     NETWORK_ID_MAINNET, NETWORK_ID_TESTNET, NetworkParams, account_uuid_from_bytes,
     free_ptr_from_vec, free_ptr_from_vec_with, parse_network, ptr_from_vec, unwrap_exc_or,
@@ -271,6 +273,7 @@ fn open_store_conn_read_only(db_path: &Path) -> anyhow::Result<Connection> {
 /// `SQLITE_OPEN_READ_ONLY` so the wallet handle cannot write either. The vtab module load is
 /// connection-local registration, not a database write.
 unsafe fn wallet_db_read_only(
+    rng: SystemRng,
     db_data: *const u8,
     db_data_len: usize,
     network: NetworkParams,
@@ -292,7 +295,7 @@ unsafe fn wallet_db_read_only(
             conn,
             network,
             SystemClock,
-            rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+            rng,
         )
             .with_anchor_retention_interval(crate::anchor_retention_interval(network)),
     )
@@ -308,6 +311,7 @@ unsafe fn wallet_db_read_only(
 /// - `db_data` must be valid for reads of `db_data_len` bytes and encode a filesystem path.
 /// - `account_uuid_bytes` must be valid for reads of 16 bytes.
 unsafe fn open(
+    rng: SystemRng,
     db_data: *const u8,
     db_data_len: usize,
     account_uuid_bytes: *const u8,
@@ -317,7 +321,7 @@ unsafe fn open(
     let db_path = PathBuf::from(OsStr::from_bytes(unsafe {
         slice::from_raw_parts(db_data, db_data_len)
     }));
-    let wallet = unsafe { crate::wallet_db(db_data, db_data_len, network.clone())? };
+    let wallet = unsafe { crate::wallet_db(rng, db_data, db_data_len, network.clone())? };
     let mut store_conn = open_store_conn(&db_path)?;
     init_immediate_runs(&store_conn)
         .map_err(|e| anyhow!("Error initializing immediate-run table: {e}"))?;
@@ -352,6 +356,7 @@ unsafe fn open(
 /// # Safety
 /// Same contract as [`open`].
 unsafe fn open_read(
+    rng: SystemRng,
     db_data: *const u8,
     db_data_len: usize,
     account_uuid_bytes: *const u8,
@@ -361,7 +366,7 @@ unsafe fn open_read(
     let db_path = PathBuf::from(OsStr::from_bytes(unsafe {
         slice::from_raw_parts(db_data, db_data_len)
     }));
-    let wallet = unsafe { wallet_db_read_only(db_data, db_data_len, network.clone())? };
+    let wallet = unsafe { wallet_db_read_only(rng, db_data, db_data_len, network.clone())? };
     let store_conn = open_store_conn_read_only(&db_path)?;
     let account = account_uuid_from_bytes(account_uuid_bytes)
         .map_err(|e| anyhow!("account uuid must be 16 bytes: {e}"))?;
@@ -692,12 +697,14 @@ fn reconcile_mined(ctx: &mut CallCtx) -> anyhow::Result<Option<MigrationState>> 
 /// Returns `Ok(None)` when there is nothing to migrate (the balance is zero, or entirely below the
 /// dust floor) — the "ask rust whether anything remains" answer after a completed run.
 fn plan_and_cache(
+    rng: &mut impl CryptoRng,
     ctx: &mut CallCtx,
     immediate: bool,
 ) -> anyhow::Result<Option<(MigrationPlan, BlockHeight, migration_plan_cache::PlanHandle)>> {
-    match compute_plan(ctx)? {
+    match compute_plan(rng, ctx)? {
         Some((plan, reference_height)) => {
             let handle = migration_plan_cache::set(
+                rng,
                 ctx.db_path.clone(),
                 ctx.account_bytes,
                 plan.clone(),
@@ -721,17 +728,19 @@ fn plan_and_cache(
 /// preview always describes the runs that get planned. An in-process account resolves to the
 /// engine's `plan_migration` default; the seam exists for the Keystone-tagged account, whose
 /// one-round bound no note cap can express. Sizing and viewing key come from one account-row read.
-fn compute_plan(ctx: &mut CallCtx) -> anyhow::Result<Option<(MigrationPlan, BlockHeight)>> {
+fn compute_plan(
+    rng: &mut impl CryptoRng,
+    ctx: &mut CallCtx,
+) -> anyhow::Result<Option<(MigrationPlan, BlockHeight)>> {
     let inputs = planning_inputs(&ctx.wallet, ctx.account)?;
     let backend =
         account_migration_with(&ctx.wallet, ctx.account, inputs.ufvk, &mut ctx.store_conn)?;
-    let mut rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
     match engine::plan_migration_sized_with(
         &default_portfolio(),
         inputs.sizing,
         &ctx.network,
         &backend,
-        &mut rng,
+        rng,
     ) {
         Ok(plan) => {
             // Planning itself just resolved the tip internally (`chain_tip_height`) to plan
@@ -755,17 +764,19 @@ fn compute_plan(ctx: &mut CallCtx) -> anyhow::Result<Option<(MigrationPlan, Bloc
 /// knows no chain tip (never synced) is a hard error, as for every planning read. A pure peek:
 /// nothing is cached, so a proposal under review is never superseded. Costs one planning pass per
 /// remaining run.
-fn estimate_runs(ctx: &mut CallCtx) -> anyhow::Result<Option<engine::MigrationRunEstimate>> {
+fn estimate_runs(
+    rng: &mut impl CryptoRng,
+    ctx: &mut CallCtx,
+) -> anyhow::Result<Option<engine::MigrationRunEstimate>> {
     let inputs = planning_inputs(&ctx.wallet, ctx.account)?;
     let backend =
         account_migration_with(&ctx.wallet, ctx.account, inputs.ufvk, &mut ctx.store_conn)?;
-    let mut rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
     match engine::estimate_migration_runs_sized_with(
         &default_portfolio(),
         inputs.sizing,
         &ctx.network,
         &backend,
-        &mut rng,
+        rng,
     ) {
         Ok(estimate) => Ok(Some(estimate)),
         // The estimator answers a zero balance with the zero-run estimate rather than this
@@ -1105,6 +1116,7 @@ fn encode_schedule_from_state(
 /// transfers' scheduled heights are rewritten to the commit tip (everything due at once;
 /// preparation mining order still gates transfers via their dependencies).
 fn commit_or_resume(
+    rng: &mut impl CryptoRng,
     ctx: &mut CallCtx,
     sk: Option<&SpendingKey>,
     unsigned_out: bool,
@@ -1135,7 +1147,6 @@ fn commit_or_resume(
         .map_err(|e| plan_stale(&e.to_string()))?;
 
     let target = ctx.target()?;
-    let mut rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
     let mut backend = account_migration(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
     let (state, unsigned) = if unsigned_out {
         let (state, unsigned) = engine::build_preparation_unsigned(
@@ -1143,7 +1154,7 @@ fn commit_or_resume(
             target,
             &mut backend,
             &cached.plan,
-            &mut rng,
+            &mut *rng,
             ReplanThreshold::DEFAULT,
         )
         .map_err(map_commit_err)?;
@@ -1165,7 +1176,7 @@ fn commit_or_resume(
             &mut backend,
             sk,
             &cached.plan,
-            &mut rng,
+            &mut *rng,
             ReplanThreshold::DEFAULT,
         )
         .map_err(map_commit_err)?;
@@ -1224,6 +1235,7 @@ fn map_rebuild_err(e: engine::RebuildError<AdapterError>) -> anyhow::Error {
 /// re-asks the engine what to serve, so an instruction that has gone stale between the advance
 /// that issued it and the serve that discharges it is refused here rather than acted on.
 fn serve_for_broadcast(
+    rng: impl CryptoRng,
     ctx: &mut CallCtx,
     state: &MigrationState,
     id: MigrationTransferId,
@@ -1236,11 +1248,7 @@ fn serve_for_broadcast(
         .ok_or_else(|| anyhow!("no migration transaction with id {}", u32::from(id)))?;
     let mut store = account_store(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
     let tx = store
-        .take_transaction_for_broadcast(
-            rand::rand_core::UnwrapErr(rand::rngs::SysRng),
-            state,
-            id,
-        )
+        .take_transaction_for_broadcast(rng, state, id)
         .map_err(|e| broadcast_seam_error(id, e))?;
     let mut raw = Vec::new();
     tx.write(&mut raw)
@@ -1258,7 +1266,13 @@ fn serve_for_broadcast(
 /// the needed anchor yet (a restored wallet mid-sync, a boundary not yet scanned past), the
 /// ordinary transient outcome that leaves the row `Signed` for a later attempt. An already-`Proved`
 /// row is a no-op `Ok(true)`, so callers may prove idempotently.
+///
+/// Takes two RNGs because the engine needs two at once: `prover_rng` is owned by the
+/// [`WalletMigrationProver`] for as long as it lives, and `rng` is lent to the proving call that
+/// borrows that prover.
 fn prove_one(
+    prover_rng: impl CryptoRng,
+    rng: &mut impl CryptoRng,
     ctx: &mut CallCtx,
     state: &mut MigrationState,
     id: MigrationTransferId,
@@ -1299,7 +1313,7 @@ fn prove_one(
             let fvk = stored_orchard_fvk(&ctx.wallet, ctx.account)?;
             let mut prover = WalletMigrationProver::new(
                 &mut ctx.wallet,
-                rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+                prover_rng,
                 ctx.account,
                 fvk,
             );
@@ -1310,7 +1324,7 @@ fn prove_one(
                 id,
                 preparation_anchor,
                 scanned_tip,
-                &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+                rng,
             )?
             else {
                 // Not scanned/retained yet — transient, retry on a later sweep.
@@ -2654,6 +2668,7 @@ fn remaining_orchard(ctx: &mut CallCtx) -> anyhow::Result<Zatoshis> {
 /// persists the engine's determinations, including the ZIP 318 overdue re-spread, so a hidden
 /// second one is not free.
 fn drive_advance(
+    rng: &mut impl CryptoRng,
     ctx: &mut CallCtx,
     state: &mut MigrationState,
     estimated_tip: i64,
@@ -2669,7 +2684,7 @@ fn drive_advance(
         )),
         // librustzcash #2910: re-spreading a missed broadcast schedule draws fresh
         // inter-broadcast gaps, so advancing needs entropy.
-        &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+        rng,
     )
     .map_err(|e| anyhow!("advancing the migration failed: {e}"))
 }
@@ -2700,7 +2715,9 @@ pub unsafe extern "C" fn zcashlc_migration_advance_step(
     estimated_tip: i64,
 ) -> *mut FfiMigrationAdvanceStep {
     let res = catch_panic(|| {
-        let mut ctx = unsafe { open(db_data, db_data_len, account_uuid_bytes, network_id)? };
+        let mut ctx = unsafe {
+            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+        };
         // A plain load, NOT `reconcile_mined`: `advance_migration` sweeps every in-flight
         // transaction and promotes the ones the wallet's scan has seen mine, so reconciling first
         // would only ask the same question twice.
@@ -2732,7 +2749,7 @@ pub unsafe extern "C" fn zcashlc_migration_advance_step(
         // librustzcash #2936: the advance returns the verified step plus a next-wake OUTLOOK
         // (`Advance::next`) — this conduit marshals both, the step via the borrow `.step()`
         // returns and the outlook via `.next()`, onto every arm below.
-        let advance = drive_advance(&mut ctx, &mut state, estimated_tip)?;
+        let advance = drive_advance(&mut system_rng(), &mut ctx, &mut state, estimated_tip)?;
         let next = advance.next();
         Ok(match advance.step() {
             // Both are BARE: neither upstream step names a transaction — Replan is a verdict
@@ -2790,7 +2807,9 @@ pub unsafe extern "C" fn zcashlc_migration_progress(
     network_id: u32,
 ) -> *mut FfiMigrationProgress {
     let res = catch_panic(|| {
-        let mut ctx = unsafe { open_read(db_data, db_data_len, account_uuid_bytes, network_id)? };
+        let mut ctx = unsafe {
+            open_read(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+        };
         let engine_state = {
             let store = account_store(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
             store
@@ -2870,7 +2889,9 @@ pub unsafe extern "C" fn zcashlc_migration_sync_wakeups(
                 len: 0,
             }))
         };
-        let mut ctx = unsafe { open_read(db_data, db_data_len, account_uuid_bytes, network_id)? };
+        let mut ctx = unsafe {
+            open_read(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+        };
         let Some(state) = ({
             let store = account_store(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
             store
@@ -2887,7 +2908,7 @@ pub unsafe extern "C" fn zcashlc_migration_sync_wakeups(
         // and expiry is judged at `tip + 1` internally.
         let tip = ctx.tip()?;
         let wakeups = state
-            .sync_wakeup_schedule(tip, &WakeupParams::DEFAULT, &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng))
+            .sync_wakeup_schedule(tip, &WakeupParams::DEFAULT, &mut system_rng())
             .map_err(|e| match e {
                 WakeupScheduleError::InfeasibleTransfer(id) => wakeup_infeasible(id),
             })?;
@@ -3120,7 +3141,9 @@ pub unsafe extern "C" fn zcashlc_migration_transaction_statuses(
     network_id: u32,
 ) -> *mut FfiMigrationTransactionStatuses {
     let res = catch_panic(|| {
-        let mut ctx = unsafe { open_read(db_data, db_data_len, account_uuid_bytes, network_id)? };
+        let mut ctx = unsafe {
+            open_read(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+        };
         let Some(state) = ({
             let store = account_store(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
             // `latest_migration`, not the pending-only `get_migration`: unlike the sibling reads
@@ -3169,10 +3192,12 @@ pub unsafe extern "C" fn zcashlc_migration_is_note_split_needed(
     network_id: u32,
 ) -> bool {
     let res = catch_panic(|| {
-        let mut ctx = unsafe { open(db_data, db_data_len, account_uuid_bytes, network_id)? };
+        let mut ctx = unsafe {
+            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+        };
         // `compute_plan`, NOT `plan_and_cache`: this is a pure peek — caching its throwaway plan
         // would supersede the handle of a proposal the user is currently reviewing.
-        Ok(match compute_plan(&mut ctx)? {
+        Ok(match compute_plan(&mut system_rng(), &mut ctx)? {
             Some((plan, _)) => plan.preparation().transaction_count() > 0,
             None => false,
         })
@@ -3215,7 +3240,9 @@ pub unsafe extern "C" fn zcashlc_migration_has_overdue_transfers(
     estimated_tip: i64,
 ) -> bool {
     let res = catch_panic(|| {
-        let mut ctx = unsafe { open_read(db_data, db_data_len, account_uuid_bytes, network_id)? };
+        let mut ctx = unsafe {
+            open_read(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+        };
         let Some(state) = ({
             let store = account_store(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
             store
@@ -3251,7 +3278,9 @@ pub unsafe extern "C" fn zcashlc_migration_has_invalid_transfers(
     network_id: u32,
 ) -> bool {
     let res = catch_panic(|| {
-        let mut ctx = unsafe { open_read(db_data, db_data_len, account_uuid_bytes, network_id)? };
+        let mut ctx = unsafe {
+            open_read(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+        };
         let Some(state) = ({
             let store = account_store(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
             store
@@ -3302,8 +3331,14 @@ pub unsafe extern "C" fn zcashlc_migration_prepare_note_split(
     network_id: u32,
 ) -> *mut FfiNoteSplitProposal {
     let res = catch_panic(|| {
-        let mut ctx = unsafe { open(db_data, db_data_len, account_uuid_bytes, network_id)? };
-        let (values, fee, proposal_handle) = match plan_and_cache(&mut ctx, false)? {
+        let mut ctx = unsafe {
+            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+        };
+        let (values, fee, proposal_handle) = match plan_and_cache(
+            &mut system_rng(),
+            &mut ctx,
+            false,
+        )? {
             Some((plan, _, handle)) => {
                 let split = plan.denominations();
                 let values: Vec<i64> = split
@@ -3351,7 +3386,9 @@ pub unsafe extern "C" fn zcashlc_migration_sign_note_split(
     usk_len: usize,
 ) -> *mut FfiPreparedTransfer {
     let res = catch_panic(|| {
-        let mut ctx = unsafe { open(db_data, db_data_len, account_uuid_bytes, network_id)? };
+        let mut ctx = unsafe {
+            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+        };
         // The decoded spending key is handed straight to the engine's signing entry point, which
         // derives its own full viewing key and checks it against the account's before building
         // anything. It never reaches the adapter: no migration type holds spend authority, so the
@@ -3359,7 +3396,13 @@ pub unsafe extern "C" fn zcashlc_migration_sign_note_split(
         let usk = unsafe { crate::decode_usk(usk_ptr, usk_len)? };
 
         let (mut state, _) =
-            commit_or_resume(&mut ctx, Some(usk.orchard()), false, proposal_handle)?;
+            commit_or_resume(
+                &mut system_rng(),
+                &mut ctx,
+                Some(usk.orchard()),
+                false,
+                proposal_handle,
+            )?;
 
         // The preparation transaction to prove now and return for immediate broadcast (see
         // [`ceremony_preparation_pick`] for which row and why). Proven now, against the wallet's
@@ -3373,7 +3416,7 @@ pub unsafe extern "C" fn zcashlc_migration_sign_note_split(
             ceremony_preparation_pick(&state, DuenessTargets::at(target)).ok_or_else(|| {
                 anyhow!("the committed migration has no broadcastable preparation transaction")
             })?;
-        if !prove_one(&mut ctx, &mut state, first_prep)? {
+        if !prove_one(system_rng(), &mut system_rng(), &mut ctx, &mut state, first_prep)? {
             return Err(anyhow!(
                 "the note split is not yet finalizable — its funding note is not witnessable; sync first"
             ));
@@ -3385,7 +3428,7 @@ pub unsafe extern "C" fn zcashlc_migration_sign_note_split(
         // the platform records the broadcast — which is why it hands a transaction back at all
         // instead of deferring to the drive, whose window for this preparation opens a few blocks
         // ahead.
-        let (raw, txid) = serve_for_broadcast(&mut ctx, &state, first_prep)?;
+        let (raw, txid) = serve_for_broadcast(system_rng(), &mut ctx, &state, first_prep)?;
         FfiPreparedTransfer::from_parts(first_prep, txid, raw)
     });
     unwrap_exc_or_null(res)
@@ -3413,8 +3456,10 @@ pub unsafe extern "C" fn zcashlc_migration_residual_after_migration(
     network_id: u32,
 ) -> i64 {
     let res = catch_panic(|| {
-        let mut ctx = unsafe { open(db_data, db_data_len, account_uuid_bytes, network_id)? };
-        Ok(match estimate_runs(&mut ctx)? {
+        let mut ctx = unsafe {
+            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+        };
+        Ok(match estimate_runs(&mut system_rng(), &mut ctx)? {
             Some(estimate) if estimate.final_residual() > Zatoshis::ZERO => {
                 zat_to_i64(estimate.final_residual())
             }
@@ -3450,7 +3495,9 @@ pub unsafe extern "C" fn zcashlc_migration_lock_residual(
     network_id: u32,
 ) -> i64 {
     let res = catch_panic(|| {
-        let mut ctx = unsafe { open(db_data, db_data_len, account_uuid_bytes, network_id)? };
+        let mut ctx = unsafe {
+            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+        };
         // Selection targets the next block, mirroring the adapter's own selection target.
         let target = TargetHeight::from(u32::from(ctx.tip()?) + 1);
         let received = ctx
@@ -3523,7 +3570,9 @@ pub unsafe extern "C" fn zcashlc_migration_unlock_residual(
     network_id: u32,
 ) -> i64 {
     let res = catch_panic(|| {
-        let mut ctx = unsafe { open(db_data, db_data_len, account_uuid_bytes, network_id)? };
+        let mut ctx = unsafe {
+            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+        };
         let cleared = ctx
             .wallet
             .clear_locked_outputs(ctx.account)
@@ -3560,8 +3609,10 @@ pub unsafe extern "C" fn zcashlc_migration_estimate_runs(
     network_id: u32,
 ) -> *mut FfiMigrationRunEstimate {
     let res = catch_panic(|| {
-        let mut ctx = unsafe { open(db_data, db_data_len, account_uuid_bytes, network_id)? };
-        let estimate = estimate_runs(&mut ctx)?;
+        let mut ctx = unsafe {
+            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+        };
+        let estimate = estimate_runs(&mut system_rng(), &mut ctx)?;
         let (runs, final_residual) = match &estimate {
             Some(est) => (
                 est.runs()
@@ -3612,8 +3663,10 @@ pub unsafe extern "C" fn zcashlc_migration_propose_transfers(
     network_id: u32,
 ) -> *mut FfiMigrationSchedule {
     let res = catch_panic(|| {
-        let mut ctx = unsafe { open(db_data, db_data_len, account_uuid_bytes, network_id)? };
-        match plan_and_cache(&mut ctx, false)? {
+        let mut ctx = unsafe {
+            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+        };
+        match plan_and_cache(&mut system_rng(), &mut ctx, false)? {
             Some((plan, reference_height, handle)) => {
                 encode_schedule_from_plan(&plan, reference_height, handle)
             }
@@ -3647,9 +3700,11 @@ pub unsafe extern "C" fn zcashlc_migration_sign_and_store_schedule(
     usk_len: usize,
 ) -> bool {
     let res = catch_panic(|| {
-        let mut ctx = unsafe { open(db_data, db_data_len, account_uuid_bytes, network_id)? };
+        let mut ctx = unsafe {
+            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+        };
         let usk = unsafe { crate::decode_usk(usk_ptr, usk_len)? };
-        commit_or_resume(&mut ctx, Some(usk.orchard()), false, proposal_handle)?;
+        commit_or_resume(&mut system_rng(), &mut ctx, Some(usk.orchard()), false, proposal_handle)?;
         Ok(true)
     });
     unwrap_exc_or(res, false)
@@ -3702,7 +3757,9 @@ pub unsafe extern "C" fn zcashlc_migration_prove_transactions(
     max_proofs: i64,
 ) -> *mut FfiMigrationProveOutcome {
     let res = catch_panic(|| {
-        let mut ctx = unsafe { open(db_data, db_data_len, account_uuid_bytes, network_id)? };
+        let mut ctx = unsafe {
+            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+        };
         let ids: Vec<MigrationTransferId> = unsafe { slice_or_empty(ids, ids_len) }
             .iter()
             .map(|id| MigrationTransferId::new(*id))
@@ -3728,7 +3785,7 @@ pub unsafe extern "C" fn zcashlc_migration_prove_transactions(
         }
         let cap = u32::try_from(max_proofs).ok().filter(|&n| n > 0);
         let outcome = prove_named_rows(&mut ctx, &mut state, &ids, cap, |ctx, state, id| {
-            prove_one(ctx, state, id)
+            prove_one(system_rng(), &mut system_rng(), ctx, state, id)
         })?;
         Ok(FfiMigrationProveOutcome::from_outcome(outcome))
     });
@@ -3769,7 +3826,9 @@ pub unsafe extern "C" fn zcashlc_migration_take_broadcast_transaction(
     id: u32,
 ) -> *mut FfiPreparedTransfer {
     let res = catch_panic(|| {
-        let mut ctx = unsafe { open(db_data, db_data_len, account_uuid_bytes, network_id)? };
+        let mut ctx = unsafe {
+            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+        };
         let id = MigrationTransferId::new(id);
         // A plain load, NOT `reconcile_mined`: the advance that issued this instruction already
         // swept in-flight transactions and promoted the ones the wallet's scan had seen mine, so
@@ -3785,7 +3844,7 @@ pub unsafe extern "C" fn zcashlc_migration_take_broadcast_transaction(
                 u32::from(id)
             ));
         };
-        let (raw, txid) = serve_for_broadcast(&mut ctx, &state, id)?;
+        let (raw, txid) = serve_for_broadcast(system_rng(), &mut ctx, &state, id)?;
         FfiPreparedTransfer::from_parts(id, txid, raw)
     });
     unwrap_exc_or_null(res)
@@ -3840,7 +3899,9 @@ pub unsafe extern "C" fn zcashlc_migration_take_preparation_by_txid(
     txid_ptr: *const u8,
 ) -> *mut FfiPreparedTransfer {
     let res = catch_panic(|| {
-        let mut ctx = unsafe { open(db_data, db_data_len, account_uuid_bytes, network_id)? };
+        let mut ctx = unsafe {
+            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+        };
         // Checked, not coerced: `slice_or_empty` only tolerates NULL at length 0, and reading 32
         // bytes from a null pointer is undefined behaviour — which a public C ABI symbol must
         // refuse rather than risk. Mirrors `zcashlc_migration_record_transfer_result`'s own
@@ -3885,7 +3946,7 @@ pub unsafe extern "C" fn zcashlc_migration_take_preparation_by_txid(
                 u32::from(id)
             ));
         }
-        let (raw, served_txid) = serve_for_broadcast(&mut ctx, &state, id)?;
+        let (raw, served_txid) = serve_for_broadcast(system_rng(), &mut ctx, &state, id)?;
         FfiPreparedTransfer::from_parts(id, served_txid, raw)
     });
     unwrap_exc_or_null(res)
@@ -3914,7 +3975,9 @@ pub unsafe extern "C" fn zcashlc_migration_record_transfer_result(
     txid_bytes: *const u8,
 ) -> bool {
     let res = catch_panic(|| {
-        let mut ctx = unsafe { open(db_data, db_data_len, account_uuid_bytes, network_id)? };
+        let mut ctx = unsafe {
+            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+        };
         let id = MigrationTransferId::new(transfer_id);
         match result_tag {
             0 => {
@@ -3998,7 +4061,9 @@ pub unsafe extern "C" fn zcashlc_migration_record_immediate_run(
     txid_bytes: *const u8,
 ) -> bool {
     let res = catch_panic(|| {
-        let ctx = unsafe { open(db_data, db_data_len, account_uuid_bytes, network_id)? };
+        let ctx = unsafe {
+            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+        };
         if txid_bytes.is_null() {
             return Err(anyhow!("txid_bytes is null"));
         }
@@ -4034,7 +4099,9 @@ pub unsafe extern "C" fn zcashlc_migration_restart_step(
     network_id: u32,
 ) -> *mut FfiMigrationSchedule {
     let res = catch_panic(|| {
-        let mut ctx = unsafe { open(db_data, db_data_len, account_uuid_bytes, network_id)? };
+        let mut ctx = unsafe {
+            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+        };
         {
             let mut store = account_store(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
             // The engine's own cancel: releases every note reservation the pending run's
@@ -4047,7 +4114,7 @@ pub unsafe extern "C" fn zcashlc_migration_restart_step(
                 .map(|_outcome| ())
                 .map_err(|e| anyhow!("cancelling the migration failed: {e}"))?;
         }
-        match plan_and_cache(&mut ctx, false)? {
+        match plan_and_cache(&mut system_rng(), &mut ctx, false)? {
             Some((plan, reference_height, handle)) => {
                 encode_schedule_from_plan(&plan, reference_height, handle)
             }
@@ -4103,7 +4170,9 @@ pub unsafe extern "C" fn zcashlc_migration_refresh_stale_transfers(
     usk_len: usize,
 ) -> *mut FfiMigrationSchedule {
     let res = catch_panic(|| {
-        let mut ctx = unsafe { open(db_data, db_data_len, account_uuid_bytes, network_id)? };
+        let mut ctx = unsafe {
+            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+        };
         // As on the commit lane: the decoded key is handed to the engine's signing entry point
         // here and nowhere else, and `None` is the external-signer lane that never had one.
         let usk = if usk_ptr.is_null() {
@@ -4133,7 +4202,7 @@ pub unsafe extern "C" fn zcashlc_migration_refresh_stale_transfers(
             return encode_schedule_from_state(&state, tip);
         }
 
-        let mut rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
+        let mut rng = system_rng();
         let mut backend = account_migration(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
         for id in &expired {
             if let Some(sk) = usk.as_ref().map(|usk| usk.orchard()) {
@@ -4195,8 +4264,16 @@ pub unsafe extern "C" fn zcashlc_migration_create_unsigned_note_split_pczts(
     proposal_handle: u64,
 ) -> *mut FfiUnsignedTransferPczts {
     let res = catch_panic(|| {
-        let mut ctx = unsafe { open(db_data, db_data_len, account_uuid_bytes, network_id)? };
-        let (state, unsigned) = commit_or_resume(&mut ctx, None, true, proposal_handle)?;
+        let mut ctx = unsafe {
+            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+        };
+        let (state, unsigned) = commit_or_resume(
+            &mut system_rng(),
+            &mut ctx,
+            None,
+            true,
+            proposal_handle,
+        )?;
         let prep_ids: HashSet<MigrationTransferId> = state
             .transactions()
             .iter()
@@ -4234,7 +4311,9 @@ pub unsafe extern "C" fn zcashlc_migration_store_signed_note_split_pczts(
     pczt_lens: *const usize,
 ) -> *mut FfiPreparedTransfer {
     let res = catch_panic(|| {
-        let mut ctx = unsafe { open(db_data, db_data_len, account_uuid_bytes, network_id)? };
+        let mut ctx = unsafe {
+            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+        };
         let signed = unsafe { decode_signed_pairs(ids, ids_len, pczts, pczt_lens)? };
         let mut store = account_store(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
         let mut state = store
@@ -4285,8 +4364,16 @@ pub unsafe extern "C" fn zcashlc_migration_create_unsigned_transfer_pczts(
     proposal_handle: u64,
 ) -> *mut FfiUnsignedTransferPczts {
     let res = catch_panic(|| {
-        let mut ctx = unsafe { open(db_data, db_data_len, account_uuid_bytes, network_id)? };
-        let (state, unsigned) = commit_or_resume(&mut ctx, None, true, proposal_handle)?;
+        let mut ctx = unsafe {
+            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+        };
+        let (state, unsigned) = commit_or_resume(
+            &mut system_rng(),
+            &mut ctx,
+            None,
+            true,
+            proposal_handle,
+        )?;
         let transfer_ids: HashSet<MigrationTransferId> = state
             .transactions()
             .iter()
@@ -4396,7 +4483,9 @@ pub unsafe extern "C" fn zcashlc_migration_store_signed_schedule_pczts(
     pczt_lens: *const usize,
 ) -> bool {
     let res = catch_panic(|| {
-        let mut ctx = unsafe { open(db_data, db_data_len, account_uuid_bytes, network_id)? };
+        let mut ctx = unsafe {
+            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+        };
         let signed = unsafe { decode_signed_pairs(ids, ids_len, pczts, pczt_lens)? };
         let mut store = account_store(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
         let mut state = store
@@ -4851,7 +4940,7 @@ mod tests {
         use zcash_keys::keys::Era;
         use zcash_protocol::consensus::MAIN_NETWORK;
 
-        let mut db = WalletDb::for_path(path, MAIN_NETWORK, SystemClock, rand::rand_core::UnwrapErr(rand::rngs::SysRng))
+        let mut db = WalletDb::for_path(path, MAIN_NETWORK, SystemClock, system_rng())
             .expect("the wallet database must open");
         let seed = SecretVec::new(vec![7u8; 32]);
         let treestate = TreeState {
@@ -5682,6 +5771,7 @@ mod tests {
 
         let mut ctx = unsafe {
             open(
+                system_rng(),
                 path_bytes.as_ptr(),
                 path_bytes.len(),
                 account_bytes.as_ptr(),
@@ -5690,7 +5780,7 @@ mod tests {
         }
         .expect("the fixture context opens");
 
-        let (plan, _reference_height, _handle) = plan_and_cache(&mut ctx, false)
+        let (plan, _reference_height, _handle) = plan_and_cache(&mut system_rng(), &mut ctx, false)
             .expect("planning must succeed")
             .expect("the funded account has a real migration plan");
 
@@ -5986,7 +6076,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut wallet = WalletDb::for_path(path, MAIN_NETWORK, SystemClock, rand::rand_core::UnwrapErr(rand::rngs::SysRng))
+        let mut wallet = WalletDb::for_path(path, MAIN_NETWORK, SystemClock, system_rng())
             .expect("the fixture wallet database must reopen");
 
         // Height 0, empty frontier: the exact chain state `create_fixture_account_with_usk`'s
@@ -6054,6 +6144,7 @@ mod tests {
 
         let mut ctx = unsafe {
             open(
+                system_rng(),
                 path_bytes.as_ptr(),
                 path_bytes.len(),
                 account_bytes.as_ptr(),
@@ -6166,6 +6257,7 @@ mod tests {
 
         let mut ctx = unsafe {
             open(
+                system_rng(),
                 path_bytes.as_ptr(),
                 path_bytes.len(),
                 account_bytes.as_ptr(),
@@ -6174,7 +6266,7 @@ mod tests {
         }
         .expect("the fixture context opens");
 
-        let (plan, _reference_height, handle) = plan_and_cache(&mut ctx, false)
+        let (plan, _reference_height, handle) = plan_and_cache(&mut system_rng(), &mut ctx, false)
             .expect("planning must succeed")
             .expect("the funded account has a real migration plan");
         assert_ne!(handle, 0, "a real cached plan must mint a non-zero handle");
@@ -6185,7 +6277,13 @@ mod tests {
 
         let usk = unsafe { crate::decode_usk(usk_bytes.as_ptr(), usk_bytes.len()) }
             .expect("the fixture usk decodes");
-        let (state, unsigned) = commit_or_resume(&mut ctx, Some(usk.orchard()), false, handle)
+        let (state, unsigned) = commit_or_resume(
+            &mut system_rng(),
+            &mut ctx,
+            Some(usk.orchard()),
+            false,
+            handle,
+        )
             .expect("commit with the plan's own handle must succeed");
         assert!(
             unsigned.is_empty(),
@@ -6239,6 +6337,7 @@ mod tests {
 
         let mut ctx = unsafe {
             open(
+                system_rng(),
                 path_bytes.as_ptr(),
                 path_bytes.len(),
                 account_bytes.as_ptr(),
@@ -6247,10 +6346,10 @@ mod tests {
         }
         .expect("the fixture context opens");
 
-        let (_plan1, _ref1, handle1) = plan_and_cache(&mut ctx, false)
+        let (_plan1, _ref1, handle1) = plan_and_cache(&mut system_rng(), &mut ctx, false)
             .expect("the first planning call must succeed")
             .expect("the funded account has a real migration plan");
-        let (_plan2, _ref2, handle2) = plan_and_cache(&mut ctx, false)
+        let (_plan2, _ref2, handle2) = plan_and_cache(&mut system_rng(), &mut ctx, false)
             .expect("the second planning call must succeed")
             .expect("the funded account still has a real migration plan (nothing was spent)");
         assert_ne!(
@@ -6260,7 +6359,7 @@ mod tests {
 
         let usk = unsafe { crate::decode_usk(usk_bytes.as_ptr(), usk_bytes.len()) }
             .expect("the fixture usk decodes");
-        let err = commit_or_resume(&mut ctx, Some(usk.orchard()), false, handle1)
+        let err = commit_or_resume(&mut system_rng(), &mut ctx, Some(usk.orchard()), false, handle1)
             .expect_err("committing with the SUPERSEDED first handle must fail");
         let message = err.to_string();
         assert!(
@@ -6301,6 +6400,7 @@ mod tests {
 
         let mut ctx = unsafe {
             open(
+                system_rng(),
                 path_bytes.as_ptr(),
                 path_bytes.len(),
                 account_bytes.as_ptr(),
@@ -6309,7 +6409,7 @@ mod tests {
         }
         .expect("the fixture context opens");
 
-        let (plan, _reference_height, handle) = plan_and_cache(&mut ctx, false)
+        let (plan, _reference_height, handle) = plan_and_cache(&mut system_rng(), &mut ctx, false)
             .expect("planning must succeed")
             .expect("the funded account has a real migration plan");
         assert_ne!(handle, 0, "a real cached plan must mint a non-zero handle");
@@ -6327,7 +6427,13 @@ mod tests {
         )
         .expect("the foreign usk must derive");
 
-        let err = commit_or_resume(&mut ctx, Some(foreign_usk.orchard()), false, handle)
+        let err = commit_or_resume(
+            &mut system_rng(),
+            &mut ctx,
+            Some(foreign_usk.orchard()),
+            false,
+            handle,
+        )
             .expect_err("committing with a foreign spending key must fail");
         let message = err.to_string();
         assert!(
@@ -6374,6 +6480,7 @@ mod tests {
         let path_bytes = path.to_str().unwrap().as_bytes();
         let mut ctx = unsafe {
             open(
+                system_rng(),
                 path_bytes.as_ptr(),
                 path_bytes.len(),
                 account.as_ptr(),
@@ -6386,7 +6493,13 @@ mod tests {
         // empty here (no `plan_and_cache` call ever ran), so this would fail with
         // `PlanLookupError::Missing` if the handle were consulted at all.
         let bogus_handle: u64 = 0xDEAD_BEEF_DEAD_BEEF;
-        let (resumed, unsigned) = commit_or_resume(&mut ctx, None, false, bogus_handle)
+        let (resumed, unsigned) = commit_or_resume(
+            &mut system_rng(),
+            &mut ctx,
+            None,
+            false,
+            bogus_handle,
+        )
             .expect("a stored non-terminal run resumes regardless of the handle");
 
         assert_eq!(
@@ -6430,6 +6543,7 @@ mod tests {
 
         let mut ctx = unsafe {
             open(
+                system_rng(),
                 path_bytes.as_ptr(),
                 path_bytes.len(),
                 account_bytes.as_ptr(),
@@ -6438,12 +6552,12 @@ mod tests {
         }
         .expect("the fixture context opens");
 
-        let (_plan, _reference_height, handle) = plan_and_cache(&mut ctx, false)
+        let (_plan, _reference_height, handle) = plan_and_cache(&mut system_rng(), &mut ctx, false)
             .expect("planning must succeed")
             .expect("the funded account has a real migration plan");
 
         // CREATE path: fresh commit, unsigned.
-        let (state, created) = commit_or_resume(&mut ctx, None, true, handle)
+        let (state, created) = commit_or_resume(&mut system_rng(), &mut ctx, None, true, handle)
             .expect("the fresh unsigned commit must succeed");
         assert!(
             !created.is_empty(),
@@ -6468,7 +6582,7 @@ mod tests {
         // RE-SERVE path: a second call against the SAME now-stored, non-terminal run (the handle
         // is irrelevant here — see
         // `commit_or_resume_resumes_a_stored_non_terminal_run_without_consulting_the_handle`).
-        let (_, reserved) = commit_or_resume(&mut ctx, None, true, handle)
+        let (_, reserved) = commit_or_resume(&mut system_rng(), &mut ctx, None, true, handle)
             .expect("resuming the stored run must succeed");
         assert_eq!(
             reserved.len(),
@@ -6660,6 +6774,7 @@ mod tests {
 
         let mut ctx = unsafe {
             open(
+                system_rng(),
                 path_bytes.as_ptr(),
                 path_bytes.len(),
                 account_bytes.as_ptr(),
@@ -6667,14 +6782,14 @@ mod tests {
             )
         }
         .expect("the fixture context opens");
-        let (_plan, _reference_height, handle) = plan_and_cache(&mut ctx, false)
+        let (_plan, _reference_height, handle) = plan_and_cache(&mut system_rng(), &mut ctx, false)
             .expect("planning must succeed")
             .expect("the funded account has a real migration plan");
 
         // The EXTERNAL-SIGNER lane, exactly as the two create-unsigned entry points drive it: no
         // spending key, `unsigned_out` set. The returned PCZTs are the engine's own bytes, with no
         // SDK post-processing between the builder and this assertion.
-        let (_state, unsigned) = commit_or_resume(&mut ctx, None, true, handle)
+        let (_state, unsigned) = commit_or_resume(&mut system_rng(), &mut ctx, None, true, handle)
             .expect("the unsigned external-signer commit must succeed");
         assert!(
             !unsigned.is_empty(),
@@ -6981,6 +7096,7 @@ mod tests {
         let path_bytes = path.to_str().unwrap().as_bytes();
         let ctx = unsafe {
             open(
+                system_rng(),
                 path_bytes.as_ptr(),
                 path_bytes.len(),
                 account_bytes.as_ptr(),
@@ -7062,6 +7178,7 @@ mod tests {
         let path_bytes = path.to_str().unwrap().as_bytes();
         let ctx = unsafe {
             open(
+                system_rng(),
                 path_bytes.as_ptr(),
                 path_bytes.len(),
                 account_bytes.as_ptr(),
@@ -7363,6 +7480,7 @@ mod tests {
         let path_bytes = path.to_str().unwrap().as_bytes();
         let mut ctx = unsafe {
             open(
+                system_rng(),
                 path_bytes.as_ptr(),
                 path_bytes.len(),
                 account_bytes.as_ptr(),
@@ -7370,7 +7488,7 @@ mod tests {
             )
         }
         .expect("the fixture wallet opens");
-        let (plan, _) = compute_plan(&mut ctx)
+        let (plan, _) = compute_plan(&mut system_rng(), &mut ctx)
             .expect("planning must succeed")
             .expect("the funded account has a plan");
         assert_eq!(
@@ -8390,7 +8508,7 @@ mod tests {
             id,
             preparation_anchor,
             h(5_000),
-            &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+            &mut system_rng(),
         )
         .map(|outcome| outcome.map(|proved| proved.apply(state)))
     }
@@ -8925,6 +9043,7 @@ mod tests {
         seed_placeholder_received_note(&path, [0u8; 32]);
         let ctx = unsafe {
             open(
+                system_rng(),
                 path_bytes.as_ptr(),
                 path_bytes.len(),
                 account.as_ptr(),
@@ -11522,6 +11641,7 @@ mod tests {
         let path_bytes = path.to_str().unwrap().as_bytes();
         let mut ctx = unsafe {
             open(
+                system_rng(),
                 path_bytes.as_ptr(),
                 path_bytes.len(),
                 account.as_ptr(),
@@ -11533,7 +11653,7 @@ mod tests {
             .expect("the fixture store opens");
         store
             .take_transaction_for_broadcast(
-                rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+                system_rng(),
                 state,
                 MigrationTransferId::new(id),
             )

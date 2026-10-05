@@ -62,7 +62,7 @@ pub(crate) type MigrationWallet = zcash_client_sqlite::WalletDb<
     rusqlite::Connection,
     NetworkParams,
     SystemClock,
-    rand::rand_core::UnwrapErr<rand::rngs::SysRng>,
+    crate::SystemRng,
 >;
 
 /// The account-scoped pool-migration store, over the second connection into the wallet database

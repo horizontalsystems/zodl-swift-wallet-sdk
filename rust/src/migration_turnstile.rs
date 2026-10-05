@@ -38,7 +38,7 @@ type Db = WalletDb<
     rusqlite::Connection,
     NetworkParams,
     SystemClock,
-    rand::rand_core::UnwrapErr<rand::rngs::SysRng>,
+    crate::SystemRng,
 >;
 
 type MigrationProposal = Proposal<StandardFeeRule, <Db as InputSource>::NoteRef>;

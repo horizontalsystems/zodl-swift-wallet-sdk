@@ -87,15 +87,16 @@ fn store() -> &'static Mutex<HashMap<Key, CachedPlan>> {
 /// Records the most recently previewed plan for `(db_path, account)`, replacing any previous one
 /// (each propose call replaces any prior unconsumed proposal), and returns the fresh handle that
 /// now identifies it. Any handle previously issued for the key is thereby invalidated:
-/// committing with it fails with [`PlanLookupError::Superseded`].
+/// committing with it fails with [`PlanLookupError::Superseded`]. The handle is drawn from `rng`.
 pub(crate) fn set(
+    rng: &mut impl Rng,
     db_path: PathBuf,
     account: [u8; 16],
     plan: MigrationPlan,
     immediate: bool,
 ) -> PlanHandle {
     let handle = loop {
-        let candidate = rand::rand_core::UnwrapErr(rand::rngs::SysRng).next_u64();
+        let candidate = rng.next_u64();
         if candidate != 0 {
             break candidate;
         }
