@@ -31,9 +31,7 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `init(card:network:endpoint:isTorEnabled:storageDirectory:loggingPolicy:)`, then `check()` (syncs
   the card wallet from its birthday and returns a `GiftCardStatus`: `.ready`, `.pending` while the
   card's funds wait for their 10 confirmations, `.dust` when the fee would take all of its
-  spendable funds, or `.empty`, with `total`, `spendable` and `pending` amounts, and, when
-  `.pending`, `confirmationsRemaining`: how many more blocks until all of `pending` is spendable,
-  or `nil` when that is unknown),
+  spendable funds, or `.empty`, with `total`, `spendable` and `pending` amounts),
   `redeem(to:memo:)` (sends the whole spendable balance, with an optional memo, minus the ZIP 317
   fee to a `UnifiedAddress` and returns the `TransactionSubmitResult`s), and `cleanup()` (stops the
   temporary wallet and deletes all of its files). `isTorEnabled` routes the card wallet's birthday

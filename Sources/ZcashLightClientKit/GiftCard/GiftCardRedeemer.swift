@@ -38,18 +38,12 @@ public struct GiftCardStatus: Equatable {
     public let spendable: Zatoshi
     /// The value still waiting for confirmations: `total - spendable`.
     public let pending: Zatoshi
-    /// How many more blocks must be mined before all of ``pending`` becomes spendable, under the
-    /// card wallet's confirmation policy (ZIP 315). Set only in the ``State/pending`` state, and
-    /// `nil` there too when it cannot be worked out (for instance, the chain tip is unknown).
-    public let confirmationsRemaining: Int?
 
     /// - Parameters:
     ///   - balance: the card account's balance, if the account has one.
     ///   - spendableCoversFee: whether the spendable value exceeds the fee of the transaction
     ///     that sweeps it; only meaningful when it is non-zero.
-    ///   - confirmationsRemaining: blocks until the pending value is spendable; kept only when the
-    ///     resulting state is ``State/pending``.
-    init(balance: AccountBalance?, spendableCoversFee: Bool, confirmationsRemaining: Int? = nil) {
+    init(balance: AccountBalance?, spendableCoversFee: Bool) {
         let total = balance?.shieldedTotal() ?? .zero
         let spendable = balance?.shieldedSpendableValue ?? .zero
         self.total = total
@@ -64,7 +58,6 @@ public struct GiftCardStatus: Equatable {
         } else {
             state = .empty
         }
-        self.confirmationsRemaining = state == .pending ? confirmationsRemaining : nil
     }
 }
 
@@ -373,16 +366,7 @@ public actor GiftCardRedeemer {
         if let spendable = balance?.shieldedSpendableValue, spendable > .zero {
             coversFee = try await spendableCoversFee(accountUUID: accountUUID)
         }
-        let status = GiftCardStatus(balance: balance, spendableCoversFee: coversFee)
-        guard status.state == .pending, let policy = cardWalletConfirmationsPolicy() else {
-            return status
-        }
-        let remaining = Self.confirmationsRemaining(
-            received: try await synchronizer.allReceivedTransactions(),
-            chainTip: synchronizer.latestState.latestBlockHeight,
-            policy: policy
-        )
-        return GiftCardStatus(balance: balance, spendableCoversFee: coversFee, confirmationsRemaining: remaining)
+        return GiftCardStatus(balance: balance, spendableCoversFee: coversFee)
     }
 
     private func performRedeem(to recipient: UnifiedAddress, memo: Memo?, recordIn destination: Synchronizer?) async throws -> Redemption {
@@ -587,33 +571,6 @@ extension GiftCardRedeemer {
     /// untrusted, so they need 10. Internal, so that a test pins it.
     func cardWalletConfirmationsPolicy() -> ConfirmationsPolicy? {
         (initializer.rustBackend as? ZcashRustBackend)?.confirmationsPolicy
-    }
-
-    /// How many more blocks must be mined before every received note still waiting for
-    /// confirmations becomes spendable, or `nil` when none is (or the chain tip is unknown).
-    ///
-    /// This is ZIP 315's rule as librustzcash applies it when it selects notes: a note in a
-    /// transaction mined at height `h` is spendable in a transaction targeting `tip + 1` once
-    /// `h <= tip + 1 - required`, where `required` is the policy's trusted count for a trusted
-    /// transaction and its untrusted count otherwise. Unmined receives are left out: they are not
-    /// part of the card's balance yet. Internal, so that a test pins it.
-    static func confirmationsRemaining(
-        received: [ZcashTransaction.Overview],
-        chainTip: BlockHeight,
-        policy: ConfirmationsPolicy
-    ) -> Int? {
-        guard chainTip > 0 else { return nil }
-        let targetHeight = chainTip + 1
-        return received
-            .compactMap { transaction -> Int? in
-                guard !transaction.isSentTransaction, let minedHeight = transaction.minedHeight, minedHeight > 0 else {
-                    return nil
-                }
-                let required = Int(transaction.isTrusted ? policy.trusted : policy.untrusted)
-                let remaining = minedHeight + required - targetHeight
-                return remaining > 0 ? remaining : nil
-            }
-            .max()
     }
 
     /// Whether sweeping the card's spendable funds would leave anything for the recipient.
