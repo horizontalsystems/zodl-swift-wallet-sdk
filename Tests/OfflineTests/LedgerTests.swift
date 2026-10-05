@@ -559,7 +559,7 @@ final class LedgerErrorMappingTests: XCTestCase {
     }
 
     func testARefusalFromTheDeviceOSIsAWrongApp() {
-        for statusWord: UInt16 in [0x6E01, 0x6511] {
+        for statusWord: UInt16 in [0x6E01, 0x6511, 0x6D01] {
             let error = deviceRefusal(statusWord).zcashError
             guard case let .ledgerWrongApp(mappedStatusWord) = error else {
                 return XCTFail("Unexpected error \(error.code) for status word \(statusWord)")

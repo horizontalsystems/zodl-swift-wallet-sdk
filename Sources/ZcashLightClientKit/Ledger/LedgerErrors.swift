@@ -10,6 +10,8 @@ private let swDeviceDashboard: UInt16 = 0x6E01
 /// The device OS's "wrong length" answer: a command's data length doesn't match the fixed length of
 /// the OS instruction with the same code, so a Zcash command reached the dashboard, not the Zcash app.
 private let swOsWrongLength: UInt16 = 0x6511
+/// The device OS's "unknown instruction" answer: the dashboard doesn't recognize the command code at all.
+private let swOsInsNotSupported: UInt16 = 0x6D01
 
 extension LedgerFFIError {
     /// The public error for this failure.
@@ -31,10 +33,12 @@ extension LedgerFFIError {
         case .derivationBudgetExhausted:
             return .ledgerDerivationBudgetExhausted
         case .deviceRefused:
-            // The engine reports these two answers from the device OS as a plain, unclassified refusal;
-            // both mean the Zcash app is not running, so they are `ledgerWrongApp` like any other
-            // unrecognized command, not a device condition.
-            if statusWord == swDeviceDashboard || statusWord == swOsWrongLength {
+            // The engine reports these three answers from the device OS as a plain, unclassified
+            // refusal; all three mean the Zcash app is not running, so they are `ledgerWrongApp` like
+            // any other unrecognized command, not a device condition. Newer pczt-ledger releases
+            // classify all three as `wrongApp` themselves, so this mapping is a backstop for an engine
+            // that doesn't.
+            if statusWord == swDeviceDashboard || statusWord == swOsWrongLength || statusWord == swOsInsNotSupported {
                 return .ledgerWrongApp(statusWord ?? 0)
             }
             return .ledgerDeviceRefused(statusWord ?? 0, isTransient)
