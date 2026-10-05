@@ -10,13 +10,21 @@ import Foundation
 public struct GiftCardStatus: Equatable {
     /// What the card can do right now.
     public enum State: Equatable {
-        /// The card has funds that can be redeemed now: ``GiftCardStatus/spendable`` is non-zero.
+        /// The card has funds that can be redeemed now: ``GiftCardStatus/spendable`` is more than
+        /// the fee of the transaction that sweeps it.
         case ready
-        /// The card has funds, but none are spendable yet: they are waiting for confirmations.
+        /// The card has funds, but not enough of them are spendable yet: they are waiting for
+        /// confirmations.
         ///
-        /// Card funds come from another wallet, so they need 10 confirmations (roughly 12 minutes)
+        /// Card funds come from another wallet, so they are untrusted in the sense of
+        /// [ZIP 315](https://zips.z.cash/zip-0315) and need 10 confirmations (roughly 12 minutes)
         /// before they can be spent. Call ``GiftCardRedeemer/check()`` again later.
         case pending
+        /// The card's spendable funds do not exceed the fee of the transaction that would sweep
+        /// them, and nothing else is on its way: redeeming it would leave nothing for the
+        /// recipient. ``GiftCardRedeemer/redeem(to:memo:recordIn:)`` throws
+        /// ``ZcashError/giftCardNothingToRedeem`` for it.
+        case dust
         /// The card holds nothing: it was already redeemed, or it was never funded (or its funding
         /// transaction is not mined yet, or `birthdayHeight` is past it).
         case empty
@@ -31,16 +39,22 @@ public struct GiftCardStatus: Equatable {
     /// The value still waiting for confirmations: `total - spendable`.
     public let pending: Zatoshi
 
-    init(balance: AccountBalance?) {
+    /// - Parameters:
+    ///   - balance: the card account's balance, if the account has one.
+    ///   - spendableCoversFee: whether the spendable value exceeds the fee of the transaction
+    ///     that sweeps it; only meaningful when it is non-zero.
+    init(balance: AccountBalance?, spendableCoversFee: Bool) {
         let total = balance?.shieldedTotal() ?? .zero
         let spendable = balance?.shieldedSpendableValue ?? .zero
         self.total = total
         self.spendable = spendable
         self.pending = total - spendable
-        if spendable > .zero {
+        if spendable > .zero && spendableCoversFee {
             state = .ready
-        } else if total > .zero {
+        } else if pending > .zero {
             state = .pending
+        } else if spendable > .zero {
+            state = .dust
         } else {
             state = .empty
         }
@@ -52,7 +66,8 @@ public struct GiftCardStatus: Equatable {
 /// The flow is three calls:
 ///
 /// 1. ``check()`` creates the card wallet from the card's seed and birthday, syncs it, and reports
-///    what it holds (``GiftCardStatus``): ready, pending confirmations, or empty.
+///    what it holds (``GiftCardStatus``): ready, pending confirmations, dust (less than the fee),
+///    or empty.
 /// 2. ``redeem(to:memo:recordIn:)`` sends the card's entire spendable balance, minus the fee, to
 ///    the given address. The transaction discards the outgoing viewing key (``OvkPolicy/discard``):
 ///    the card's key — which its issuer can rederive — cannot reveal where the funds went. It only
@@ -60,6 +75,8 @@ public struct GiftCardStatus: Equatable {
 ///    parameters. Given the user's own synchronizer as the destination, the claim is recorded
 ///    there at once as a trusted transaction (ZIP 315), so the main wallet shows it immediately
 ///    and can spend it after 3 confirmations instead of the 10 of an ordinary external receive.
+///    That is sound because the claim spends notes that already had 10 confirmations in the card
+///    wallet, and this device built and signed it; see `docs/GIFT_CARDS.md`.
 /// 3. ``cleanup()`` stops the card wallet and deletes every file it created.
 ///
 /// ### Isolation and lifecycle
@@ -67,7 +84,13 @@ public struct GiftCardStatus: Equatable {
 /// The card wallet is an `SDKSynchronizer` of its own, with a custom alias derived from a hash of
 /// the card's funding address (never `.default`) and all of its files in a directory of its own
 /// under `storageDirectory`. It runs alongside the app's main synchronizer without touching its
-/// data. Tor and exchange-rate fetching are off for the card wallet.
+/// data. Exchange-rate fetching is off for the card wallet. Tor follows `isTorEnabled`: pass the
+/// main wallet's setting, so that a user who chose Tor does not reveal their IP address together
+/// with the card's birthday, its sync and the claim.
+///
+/// The card wallet uses the SDK's transfer confirmation policy (ZIP 315): 3 confirmations for
+/// trusted notes and 10 for untrusted ones. Every note on a card comes from another wallet, so
+/// it needs 10.
 ///
 /// - The SDK does not stop two synchronizers from sharing an alias, so this type does: only one
 ///   redeemer per card may be alive in the process at a time. Creating a second one throws
@@ -83,8 +106,9 @@ public struct GiftCardStatus: Equatable {
 ///   stops the wait (the wallet keeps syncing) and throws `CancellationError`.
 /// - ``cleanup()`` is always safe for the funds: the card's key is in the link, not in the
 ///   temporary wallet. Unredeemed funds stay on the card and a new redeemer can sweep them.
-/// - Releasing a redeemer without ``cleanup()`` stops its wallet but leaves its files behind
-///   until a redeemer for the same card is created and cleaned up.
+/// - Releasing a redeemer without ``cleanup()`` (or a crash, or the app being killed) leaves its
+///   files behind until a redeemer for the same card is created and cleaned up. They hold the
+///   card's keys and the claim's recipient, so call ``removeLeftoverWallets(in:)`` at launch.
 /// - After a redeem whose submission failed, the card wallet considers the notes spent until the
 ///   transaction expires, so a second ``redeem(to:)`` on the same redeemer finds nothing to
 ///   spend. Clean up and create a new redeemer to retry; the notes are spent at most once on
@@ -125,6 +149,9 @@ public actor GiftCardRedeemer {
     ///   - card: the card to redeem.
     ///   - network: the app's network. It must be the card's network.
     ///   - endpoint: the lightwalletd server the card wallet syncs from and submits to.
+    ///   - isTorEnabled: whether the card wallet reaches `endpoint` over Tor: its birthday lookup,
+    ///     its sync and the claim's submission. Pass the main wallet's setting; with `false` the
+    ///     server sees the device's IP address with all three.
     ///   - storageDirectory: the directory under which the card wallet's own directory is created.
     ///     The app's caches or temporary directory is fine: everything in it is deleted by
     ///     ``cleanup()``, and losing it never loses funds.
@@ -137,7 +164,8 @@ public actor GiftCardRedeemer {
         card: GiftCard,
         network: ZcashNetwork,
         endpoint: LightWalletEndpoint,
-        storageDirectory: URL = FileManager.default.temporaryDirectory.appendingPathComponent("ZcashGiftCards", isDirectory: true),
+        isTorEnabled: Bool,
+        storageDirectory: URL = GiftCardRedeemer.defaultStorageDirectory,
         loggingPolicy: Initializer.LoggingPolicy = .noLogging
     ) throws {
         guard card.network == network.networkType else {
@@ -169,7 +197,7 @@ public actor GiftCardRedeemer {
             saplingParamsSourceURL: .default,
             alias: alias,
             loggingPolicy: loggingPolicy,
-            isTorEnabled: false,
+            isTorEnabled: isTorEnabled,
             isExchangeRateEnabled: false
         )
 
@@ -188,16 +216,21 @@ public actor GiftCardRedeemer {
     }
 
     /// Fetches the server's tree state for the block before the card's birthday, so the card
-    /// wallet scans from the birthday itself. A fetch failure leaves the bundled checkpoint in
-    /// place: slower, never wrong.
+    /// wallet scans from the birthday itself. A fetch failure, or a state for another height,
+    /// leaves the bundled checkpoint in place: slower, never wrong. The fetch goes over Tor when
+    /// the card wallet uses it.
     private func fetchExactBirthday() async {
-        guard card.birthdayHeight > 1 else { return }
+        // The rust parser guarantees a birthday at or above NU5 activation, so `- 1` is a block.
+        let height = card.birthdayHeight - 1
         do {
+            let sdkFlags = initializer.container.resolve(SDKFlags.self)
             let treeState = try await initializer.lightWalletService.getTreeState(
-                BlockID(height: UInt64(card.birthdayHeight - 1)),
-                mode: .direct
+                BlockID(height: UInt64(height)),
+                mode: await sdkFlags.ifTor(.uniqueTor)
             )
-            checkpointSource.use(Checkpoint(treeState: treeState))
+            if !checkpointSource.use(treeState, forBirthday: card.birthdayHeight) {
+                initializer.logger.warn("Gift card: the server sent a tree state for another height; using the bundled checkpoint")
+            }
         } catch {
             initializer.logger.warn("Gift card: tree state for the birthday unavailable, using the bundled checkpoint")
         }
@@ -214,6 +247,10 @@ public actor GiftCardRedeemer {
     ///
     /// The first call restores the card wallet from the card's birthday, which downloads and scans
     /// the blocks since then. It returns once the wallet is up to date.
+    ///
+    /// When the card has spendable funds, this also works out, without creating anything, whether
+    /// they cover the fee of the transaction that would sweep them; when they do not, the state is
+    /// ``GiftCardStatus/State/dust`` rather than ``GiftCardStatus/State/ready``.
     ///
     /// - Returns: the card's balance and whether it can be redeemed now.
     /// - Throws: the sync error if the card wallet cannot sync (for instance, the server is
@@ -242,8 +279,8 @@ public actor GiftCardRedeemer {
     /// an Orchard receiver (every wallet's own unified address does). Only spendable funds are
     /// swept; value still waiting for confirmations stays on the card.
     ///
-    /// When `destination` is given, every accepted claim transaction is handed to it through
-    /// `Synchronizer.recordTrustedTransaction(_:txId:)` once the submission is over: the wallet
+    /// When `destination` is given, every accepted claim transaction is stored in it once the
+    /// submission is over, and marked as trusted: the wallet
     /// shows the receive at once, and treats it as trusted in the sense of
     /// [ZIP 315](https://zips.z.cash/zip-0315) — this device authored the transaction — so the funds
     /// are spendable after 3 confirmations rather than the 10 of an external receive. This works
@@ -256,10 +293,13 @@ public actor GiftCardRedeemer {
     ///   - recipient: the user's own address, on the card's network.
     ///   - memo: an optional memo for the claim transaction.
     ///   - destination: the synchronizer of the wallet `recipient` belongs to, or `nil` to record
-    ///     the claim nowhere.
+    ///     the claim nowhere. Only the SDK's own synchronizers (`SDKSynchronizer`,
+    ///     `SlipstreamSynchronizer`) can record it; with any other conformer the claim is not
+    ///     recorded and ``Redemption/recordedInDestination`` is `false`.
     /// - Returns: the submission results and whether the destination recorded the claim.
     /// - Throws: ``ZcashError/giftCardRedeemerNotReady`` before ``check()`` has prepared the
-    ///   card wallet, ``ZcashError/giftCardNothingToRedeem`` when nothing is spendable,
+    ///   card wallet, ``ZcashError/giftCardNothingToRedeem`` when nothing is spendable or the fee
+    ///   would take everything (``GiftCardStatus/State/dust``),
     ///   ``ZcashError/giftCardNetworkMismatch`` for an address on another network, and the
     ///   proposal and creation errors of `Synchronizer.proposeSendMax(accountUUID:recipient:memo:mode:)`
     ///   and `Synchronizer.createProposedTransactions(proposal:spendingKey:ovkPolicy:)`. The
@@ -321,8 +361,12 @@ public actor GiftCardRedeemer {
         // sync; only a later error belongs to this attempt.
         try await waitUntilUpToDate(ignoringStaleError: restarting)
 
-        let balances = try await synchronizer.getAccountsBalances()
-        return GiftCardStatus(balance: balances[accountUUID])
+        let balance = try await synchronizer.getAccountsBalances()[accountUUID]
+        var coversFee = true
+        if let spendable = balance?.shieldedSpendableValue, spendable > .zero {
+            coversFee = try await spendableCoversFee(accountUUID: accountUUID)
+        }
+        return GiftCardStatus(balance: balance, spendableCoversFee: coversFee)
     }
 
     private func performRedeem(to recipient: UnifiedAddress, memo: Memo?, recordIn destination: Synchronizer?) async throws -> Redemption {
@@ -341,14 +385,22 @@ public actor GiftCardRedeemer {
             throw ZcashError.giftCardNothingToRedeem
         }
 
-        let proposal = try await synchronizer.proposeSendMax(
-            accountUUID: accountUUID,
-            recipient: .unified(recipient),
-            memo: memo,
-            mode: .maxSpendable
-        )
-        let spendingKey = try DerivationTool(networkType: card.network)
-            .deriveUnifiedSpendingKey(seed: card.seed.bytes, accountIndex: Zip32AccountIndex(0))
+        let proposal: Proposal
+        do {
+            proposal = try await synchronizer.proposeSendMax(
+                accountUUID: accountUUID,
+                recipient: .unified(recipient),
+                memo: memo,
+                mode: .maxSpendable
+            )
+        } catch ZcashError.rustProposalInsufficientFunds {
+            // The fee would take everything: a dust card.
+            throw ZcashError.giftCardNothingToRedeem
+        }
+        let tool = DerivationTool(networkType: card.network)
+        let spendingKey = try card.seed.withBytes { seed in
+            try tool.deriveUnifiedSpendingKey(seed: seed, accountIndex: Zip32AccountIndex(0))
+        }
 
         let stream = try await synchronizer.createProposedTransactions(
             proposal: proposal,
@@ -363,51 +415,19 @@ public actor GiftCardRedeemer {
 
         var recorded = false
         if let destination {
-            let cardWallet = initializer.rustBackend
-            recorded = await Self.record(
-                results,
-                in: destination,
-                rawTransaction: { txId in try await cardWallet.getTransaction(txId: txId)?.raw },
-                logger: initializer.logger
-            )
-        }
-        return Redemption(results: results, recordedInDestination: recorded)
-    }
-
-    /// Hands every accepted transaction in `results` to `destination` as a trusted transaction.
-    ///
-    /// Nothing here can fail the redemption: the transactions are already with the servers. A
-    /// missing raw transaction or a destination error is logged — without the error's associated
-    /// values, which may echo caller input — and reported through the return value.
-    ///
-    /// - Parameters:
-    ///   - results: the submission results of the claim.
-    ///   - destination: the synchronizer to record the claim in.
-    ///   - rawTransaction: looks up the raw bytes of a transaction of the card wallet by its id.
-    /// - Returns: `true` when at least one transaction was accepted and every accepted one was
-    ///   recorded.
-    static func record(
-        _ results: [TransactionSubmitResult],
-        in destination: Synchronizer,
-        rawTransaction: (Data) async throws -> Data?,
-        logger: Logger
-    ) async -> Bool {
-        var recordedAny = false
-        for result in results {
-            guard case .success(let txId) = result else { continue }
-            do {
-                guard let raw = try await rawTransaction(txId) else {
-                    logger.warn("Gift card: the claim transaction is not in the card wallet; the destination will learn about it from the chain")
-                    return false
-                }
-                try await destination.recordTrustedTransaction(raw, txId: TxId([UInt8](txId)))
-                recordedAny = true
-            } catch {
-                logger.warn("Gift card: recording the claim in the destination wallet failed: \(error.localizedDescription)")
-                return false
+            if let recorder = destination as? TrustedTransactionRecording {
+                let cardWallet = initializer.rustBackend
+                recorded = await Self.record(
+                    results,
+                    in: recorder,
+                    rawTransaction: { txId in try await cardWallet.getTransaction(txId: txId)?.raw },
+                    logger: initializer.logger
+                )
+            } else {
+                initializer.logger.warn("Gift card: the destination cannot record trusted transactions; it will learn about the claim from the chain")
             }
         }
-        return recordedAny
+        return Redemption(results: results, recordedInDestination: recorded)
     }
 
     private func performCleanup() async throws {
@@ -441,21 +461,27 @@ public actor GiftCardRedeemer {
         // claim. Rebuilding one from the card's birthday costs seconds, so start clean.
         try? FileManager.default.removeItem(at: rootDirectory)
 
-        await fetchExactBirthday()
         try FileManager.default.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
         // The directory holds a wallet database for a key that is also in the link; it has no
-        // business in a device backup.
+        // business in a device backup. It is created before the birthday fetch, which may start
+        // the card wallet's Tor client in it.
         var directory = rootDirectory
         var values = URLResourceValues()
         values.isExcludedFromBackup = true
         try? directory.setResourceValues(values)
 
-        _ = try await synchronizer.prepare(
-            with: card.seed.bytes,
-            walletBirthday: card.birthdayHeight,
-            name: "Gift card",
-            keySource: nil
-        )
+        await fetchExactBirthday()
+
+        let synchronizer = self.synchronizer
+        let birthday = card.birthdayHeight
+        _ = try await card.seed.withBytesAsync { seed in
+            try await synchronizer.prepare(
+                with: seed,
+                walletBirthday: birthday,
+                name: "Gift card",
+                keySource: nil
+            )
+        }
 
         guard let account = try await synchronizer.listAccounts().first else {
             throw ZcashError.giftCardRedeemerNotReady
@@ -486,6 +512,120 @@ public actor GiftCardRedeemer {
         } onCancel: {
             waiter.finish(.failure(CancellationError()))
         }
+    }
+}
+
+// MARK: - Leftover card wallets
+
+public extension GiftCardRedeemer {
+    /// The directory card wallets are created under unless the app chooses another one.
+    static let defaultStorageDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ZcashGiftCards", isDirectory: true)
+
+    /// Deletes the card wallets that earlier redeemers left in `storageDirectory`: released
+    /// without ``cleanup()``, or cut short by a crash or the app being killed.
+    ///
+    /// A leftover card wallet holds the card's keys, its notes and the claim transaction with its
+    /// recipient, so call this when the app starts. It never touches the wallet of a redeemer that
+    /// is alive in this process, nor anything in `storageDirectory` that is not a card wallet.
+    /// Losing a card wallet never loses funds: the card's key is in its link.
+    ///
+    /// - Parameter storageDirectory: the directory passed to ``init(card:network:endpoint:isTorEnabled:storageDirectory:loggingPolicy:)``.
+    /// - Returns: the number of card wallets deleted.
+    /// - Throws: the first error from deleting a card wallet; the others are still attempted.
+    @discardableResult
+    static func removeLeftoverWallets(in storageDirectory: URL = GiftCardRedeemer.defaultStorageDirectory) throws -> Int {
+        let fileManager = FileManager.default
+        guard let names = try? fileManager.contentsOfDirectory(atPath: storageDirectory.path) else {
+            return 0
+        }
+        let prefix = ZcashSynchronizerAlias.custom(GiftCard.aliasPrefix).description
+
+        // The registry stays locked while deleting, so that no redeemer for one of these cards
+        // can be created, and start writing its wallet, between the check and the deletion.
+        return try GiftCardRedeemerRegistry.withActiveAliases { active in
+            let activeNames = Set(active.map(\.description))
+            var removed = 0
+            var firstError: Error?
+            for name in names where name.hasPrefix(prefix) && !activeNames.contains(name) {
+                do {
+                    try fileManager.removeItem(at: storageDirectory.appendingPathComponent(name, isDirectory: true))
+                    removed += 1
+                } catch {
+                    firstError = firstError ?? error
+                }
+            }
+            if let firstError {
+                throw firstError
+            }
+            return removed
+        }
+    }
+}
+
+// MARK: - Helpers
+
+extension GiftCardRedeemer {
+    /// The confirmation policy the card wallet spends with: the backend's transfer policy, 3
+    /// confirmations for trusted notes and 10 for untrusted ones (ZIP 315). Card notes are
+    /// untrusted, so they need 10. Internal, so that a test pins it.
+    func cardWalletConfirmationsPolicy() -> ConfirmationsPolicy? {
+        (initializer.rustBackend as? ZcashRustBackend)?.confirmationsPolicy
+    }
+
+    /// Whether sweeping the card's spendable funds would leave anything for the recipient.
+    ///
+    /// librustzcash computes the fee: a send-max proposal (never turned into a transaction) to
+    /// the card's own address, which has the same Orchard receiver as any wallet's, fails with
+    /// insufficient funds exactly when the fee takes everything.
+    private func spendableCoversFee(accountUUID: AccountUUID) async throws -> Bool {
+        do {
+            _ = try await synchronizer.proposeSendMax(
+                accountUUID: accountUUID,
+                recipient: .unified(card.fundingAddress),
+                memo: nil,
+                mode: .maxSpendable
+            )
+            return true
+        } catch ZcashError.rustProposalInsufficientFunds {
+            return false
+        }
+    }
+
+    /// Hands every accepted transaction in `results` to `destination` as a trusted transaction.
+    ///
+    /// Nothing here can fail the redemption: the transactions are already with the servers. A
+    /// missing raw transaction or a destination error is logged — without the error's associated
+    /// values, which may echo caller input — and reported through the return value.
+    ///
+    /// - Parameters:
+    ///   - results: the submission results of the claim.
+    ///   - destination: the synchronizer to record the claim in.
+    ///   - rawTransaction: looks up the raw bytes of a transaction of the card wallet by its id.
+    /// - Returns: `true` when at least one transaction was accepted and every accepted one was
+    ///   recorded.
+    static func record(
+        _ results: [TransactionSubmitResult],
+        in destination: TrustedTransactionRecording,
+        rawTransaction: (Data) async throws -> Data?,
+        logger: Logger
+    ) async -> Bool {
+        var recordedAny = false
+        for result in results {
+            guard case .success(let txId) = result else { continue }
+            do {
+                guard let raw = try await rawTransaction(txId) else {
+                    logger.warn("Gift card: the claim transaction is not in the card wallet; the destination will learn about it from the chain")
+                    return false
+                }
+                try await destination.recordTrustedTransaction(raw, txId: try TxId([UInt8](txId)))
+                recordedAny = true
+            } catch {
+                logger.warn("Gift card: recording the claim in the destination wallet failed: \(error.localizedDescription)")
+                return false
+            }
+        }
+        return recordedAny
     }
 
     /// Waits for `publisher` to complete, or for `timeout` to pass, whichever comes first.
@@ -524,6 +664,13 @@ enum GiftCardRedeemerRegistry {
         lock.lock()
         defer { lock.unlock() }
         active.remove(alias)
+    }
+
+    /// Runs `body` with the active aliases, holding off every claim and release until it returns.
+    static func withActiveAliases<T>(_ body: (Set<ZcashSynchronizerAlias>) throws -> T) rethrows -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return try body(active)
     }
 }
 

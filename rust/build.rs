@@ -73,6 +73,7 @@ fn main() {
         .rename_item("Eip681Erc20Request", "FfiEip681Erc20Request")
         .rename_item("GiftCardLink", "FfiGiftCardLink")
         .rename_item("GiftCardOrigin", "FfiGiftCardOrigin")
+        .rename_item("GiftCardLinkError", "FfiGiftCardLinkError")
         .generate()
     {
         b.write_to_file("target/Headers/zcashlc.h");

@@ -8,16 +8,21 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `zcashlc_parse_gift_card_link(link)` reads a gift card link — any `https` URL whose fragment
-  carries a `v=1` card (`#v=1&key=…&height=…`) or the legacy JSON payment-link encoding at
+- `zcashlc_parse_gift_card_link(link, error_out)` reads a gift card link — any `https` URL whose
+  fragment carries a `v=1` card (`#v=1&key=…&height=…`) or the legacy JSON payment-link encoding at
   `/payment-links/open#vN=` — without touching a database or the network, and returns an
   `FfiGiftCardLink`: its `origin` (`FfiGiftCardOrigin`: `V1`, `LegacyV1`, `LegacyV2`, `LegacyV3`),
-  `network_id` (`0` testnet, `1` mainnet;
-  regtest cards are refused), `birthday_height`, the informational amount (`has_amount`/`amount`,
-  in zatoshis), a nullable `description`, the card wallet's Orchard-only `funding_address`, and the
-  64-byte BIP 39 `seed` of the card wallet (ZIP 32 account 0). Free it with
-  `zcashlc_free_gift_card`, which zeroes the seed. On failure it returns null with the last error
-  set; the error never contains any part of the link, which carries a spending secret.
+  `network_id` (`0` testnet, `1` mainnet; regtest cards are refused), `birthday_height` (never
+  below the network's NU5 activation height), the informational amount (`has_amount`/`amount`, in
+  zatoshis), a nullable `description` (sanitized: control whitespace becomes a space, other
+  control and invisible formatting characters such as bidi overrides are removed), the card
+  wallet's Orchard-only `funding_address`, and the 64-byte BIP 39 `seed` of the card wallet (ZIP 32
+  account 0). Free it with `zcashlc_free_gift_card`, which zeroes the seed. On failure it returns
+  null, writes the reason to `error_out` when that is non-null, and sets the last error; neither
+  contains any part of the link, which carries a spending secret. The reason is a stable
+  `FfiGiftCardLinkError`: `NotAGiftLink`, `UnsupportedVersion`, `WrongNetwork` (regtest or an
+  unknown network), `InvalidBirthday` (malformed, or below NU5 activation) or `InvalidLink`
+  (anything else).
 - `zcashlc_set_transaction_trust(db_data, db_data_len, txid_bytes, txid_bytes_len, trusted,
   network_id)` marks a stored transaction as trusted or untrusted in the sense of ZIP 315
   (`WalletWrite::set_tx_trust`): the outputs of a trusted transaction become spendable after the

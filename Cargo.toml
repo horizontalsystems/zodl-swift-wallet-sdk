@@ -62,9 +62,11 @@ ur-registry = { git = "https://github.com/KeystoneHQ/keystone-sdk-rust", rev = "
 eip681 = "0.1.0"
 
 # Gift cards (`rust/src/liberated_payment.rs`): payment secrets are BIP 39 entropy encoded as
-# Bech32m.
+# Bech32m. Descriptions are percent-encoded and legacy payloads are base64url (`base64`, below);
+# both crates are librustzcash dependencies already in the lockfile.
 bech32 = "0.11"
 bip0039 = { version = "0.14", default-features = false, features = ["std"] }
+percent-encoding = "2"
 
 # Infrastructure
 prost = "0.14"

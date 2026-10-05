@@ -20,7 +20,10 @@ import Foundation
 /// to the user's own wallet without leaving the recipient recoverable from the card's key.
 ///
 /// The card's seed never leaves the SDK, and the value's `description`, `debugDescription` and
-/// reflection are redacted so that printing or logging a card cannot leak it.
+/// reflection are redacted so that printing or logging a card cannot leak it. The seed is held in
+/// a buffer that is wiped when the last copy of the card is released, and it takes no part in
+/// equality: two cards are equal when their public fields are, and the funding address, derived
+/// from the seed, already identifies the card.
 public struct GiftCard: Equatable, Undescribable {
     /// The encoding a gift card link was read from.
     public enum Origin: Equatable, Sendable {
@@ -35,8 +38,50 @@ public struct GiftCard: Equatable, Undescribable {
     }
 
     /// The card wallet's 64-byte BIP 39 seed, kept out of every textual representation.
-    struct Seed: Equatable, Undescribable {
-        let bytes: [UInt8]
+    ///
+    /// The bytes live in memory this object owns and wipes when it is released, never in a Swift
+    /// array that could be copied and left behind. ``withBytes(_:)`` and ``withBytesAsync(_:)``
+    /// lend them out as a temporary array, wiped as soon as the call returns, for the SDK calls
+    /// that take `[UInt8]`.
+    final class Seed: Undescribable {
+        private let storage: UnsafeMutableRawBufferPointer
+
+        /// Copies `bytes` into wipeable storage. The caller wipes its own copy.
+        init(copying bytes: UnsafeRawBufferPointer) {
+            storage = UnsafeMutableRawBufferPointer.allocate(byteCount: bytes.count, alignment: 1)
+            storage.copyMemory(from: bytes)
+        }
+
+        deinit {
+            Self.wipe(storage)
+            storage.deallocate()
+        }
+
+        var count: Int { storage.count }
+
+        /// Calls `body` with a temporary copy of the seed, which is wiped when `body` returns.
+        ///
+        /// A callee that keeps the array keeps its own copy, which this cannot wipe; the SDK calls
+        /// this is used for (wallet preparation, key derivation) pass it on to the rust layer and
+        /// drop it.
+        func withBytesAsync<T>(_ body: ([UInt8]) async throws -> T) async rethrows -> T {
+            var bytes = [UInt8](storage)
+            defer { bytes.withUnsafeMutableBytes { Self.wipe($0) } }
+            return try await body(bytes)
+        }
+
+        /// The synchronous form of ``withBytesAsync(_:)``.
+        func withBytes<T>(_ body: ([UInt8]) throws -> T) rethrows -> T {
+            var bytes = [UInt8](storage)
+            defer { bytes.withUnsafeMutableBytes { Self.wipe($0) } }
+            return try body(bytes)
+        }
+
+        /// Zeroes `buffer` with `memset_s`, which the compiler may not elide.
+        private static func wipe(_ buffer: UnsafeMutableRawBufferPointer) {
+            guard let base = buffer.baseAddress, !buffer.isEmpty else { return }
+            _ = memset_s(base, buffer.count, 0, buffer.count)
+        }
     }
 
     /// The encoding the link was read from.
@@ -46,7 +91,7 @@ public struct GiftCard: Equatable, Undescribable {
     public let network: NetworkType
 
     /// The height from which the card wallet scans for its funds; at or below the height of the
-    /// transaction that funded the card.
+    /// transaction that funded the card, and never below the network's NU5 activation height.
     public let birthdayHeight: BlockHeight
 
     /// The amount the link says the card holds, if it states one.
@@ -55,8 +100,8 @@ public struct GiftCard: Equatable, Undescribable {
     /// ``GiftCardRedeemer/check()`` finds on chain is authoritative.
     public let statedAmount: Zatoshi?
 
-    /// The message the link carries, if any. It is text chosen by whoever made the link; display
-    /// it as untrusted user content.
+    /// The message the link carries, if any, sanitized as ``init(link:)`` describes. It is text
+    /// chosen by whoever made the link; display it as untrusted user content.
     public let message: String?
 
     /// The card wallet's Orchard-only default address, which the card is funded at.
@@ -90,13 +135,35 @@ public struct GiftCard: Equatable, Undescribable {
     /// Parsing is done by the SDK's rust layer. It is offline: no database, no network.
     /// Surrounding whitespace is ignored.
     ///
+    /// The link's description is sanitized by the rust layer before it becomes ``message``: line
+    /// breaks and other control whitespace become a space, and control and invisible formatting
+    /// characters (bidi overrides and isolates, zero-width spaces and the like) are removed. A
+    /// description that is blank afterwards is absent.
+    ///
     /// - Parameter link: the link, as scanned or opened.
-    /// - Throws: ``ZcashError/rustParseGiftCardLink(_:)`` when the text is not a gift card link the
-    ///   SDK can read (malformed, unsupported version, or a regtest card). The error's message
-    ///   names the problem and never includes any part of the link.
+    /// - Throws: one error per reason the SDK cannot read the link, none of which carries any part
+    ///   of it:
+    ///   - ``ZcashError/giftCardLinkNotAGiftCard``: not an `https` URL carrying a gift card.
+    ///   - ``ZcashError/giftCardLinkUnsupportedVersion``: a gift card link of a newer version.
+    ///   - ``ZcashError/giftCardLinkUnsupportedNetwork``: a card for regtest or an unknown network.
+    ///   - ``ZcashError/giftCardLinkInvalidBirthday``: a malformed birthday height, or one below the
+    ///     network's NU5 activation height.
+    ///   - ``ZcashError/giftCardLinkInvalid``: any other malformed link.
     public init(link: String) throws {
         self = try ZcashKeyDerivationBackend.parseGiftCardLink(link)
     }
+
+    public static func == (lhs: GiftCard, rhs: GiftCard) -> Bool {
+        lhs.origin == rhs.origin
+            && lhs.network == rhs.network
+            && lhs.birthdayHeight == rhs.birthdayHeight
+            && lhs.statedAmount == rhs.statedAmount
+            && lhs.message == rhs.message
+            && lhs.fundingAddress == rhs.fundingAddress
+    }
+
+    /// The start of every card wallet's custom alias.
+    static let aliasPrefix = "giftcard_"
 
     /// A synchronizer alias unique to this card.
     ///
@@ -105,6 +172,6 @@ public struct GiftCard: Equatable, Undescribable {
     var synchronizerAlias: ZcashSynchronizerAlias {
         let digest = SHA256.hash(data: Data(fundingAddress.stringEncoded.utf8))
         let prefix = digest.prefix(8).map { String(format: "%02x", $0) }.joined()
-        return .custom("giftcard_\(prefix)")
+        return .custom("\(Self.aliasPrefix)\(prefix)")
     }
 }

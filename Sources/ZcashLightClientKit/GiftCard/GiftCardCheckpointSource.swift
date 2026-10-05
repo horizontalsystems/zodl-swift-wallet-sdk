@@ -24,12 +24,24 @@ final class GiftCardCheckpointSource: CheckpointSource {
 
     var saplingActivation: Checkpoint { bundled.saplingActivation }
 
-    /// Remembers a checkpoint fetched for the card's birthday; `birthday(for:)` serves it for any
-    /// birthday at or above its height.
-    func use(_ checkpoint: Checkpoint) {
+    /// Remembers the server's tree state for the block before the card's birthday, which
+    /// `birthday(for:)` then serves for any birthday above it.
+    ///
+    /// The state is only used when its height is exactly `birthday - 1`, the height it was
+    /// requested for. A server that answers with another height, by mistake or on purpose, would
+    /// otherwise move the start of the scan: past the card's funds, making a funded card look
+    /// empty, or far before them. Such a state is ignored and the bundled checkpoint applies.
+    ///
+    /// - Returns: whether the state was used.
+    @discardableResult
+    func use(_ treeState: TreeState, forBirthday birthday: BlockHeight) -> Bool {
+        guard birthday > 0, treeState.height == UInt64(birthday - 1) else {
+            return false
+        }
         lock.lock()
-        exact = checkpoint
+        exact = Checkpoint(treeState: treeState)
         lock.unlock()
+        return true
     }
 
     func latestKnownCheckpoint() -> Checkpoint {

@@ -289,8 +289,6 @@ public enum ZcashErrorCode: String {
     case rustSlipstreamUnsupported = "ZRUST0097"
     /// The engine could not prove its previous pass and wallet writer had stopped before a wallet mutation; the mutation was refused.
     case slipstreamEngineNotQuiescent = "ZRUST0155"
-    /// The text is not a gift card link the SDK can read: it is malformed, of an unsupported
-    case rustParseGiftCardLink = "ZRUST0156"
     /// The rust layer could not tell whether a proposal needs the Sapling proving parameters,
     case rustProposalRequiresSaplingParams = "ZRUST0157"
     /// Error from rust layer when calling ZcashRustBackend.setTransactionTrust
@@ -575,6 +573,16 @@ public enum ZcashErrorCode: String {
     case giftCardNothingToRedeem = "ZGIFT0004"
     /// The redeemer was cleaned up and can no longer be used. Create a new one.
     case giftCardRedeemerCleanedUp = "ZGIFT0005"
+    /// The text is not a gift card link: it is not an `https` URL with a gift card in its
+    case giftCardLinkNotAGiftCard = "ZGIFT0006"
+    /// The text is a gift card link of a version this SDK does not read. A newer SDK may read
+    case giftCardLinkUnsupportedVersion = "ZGIFT0007"
+    /// The gift card is for a network this SDK cannot redeem on (regtest, or an unknown one).
+    case giftCardLinkUnsupportedNetwork = "ZGIFT0008"
+    /// The gift card link's birthday height is malformed, or below the network's NU5 activation
+    case giftCardLinkInvalidBirthday = "ZGIFT0009"
+    /// The gift card link is malformed: a field is missing, repeated or invalid, the key is not
+    case giftCardLinkInvalid = "ZGIFT0010"
     /// Attempt to init TxId with input that is not 32 bytes.
     case txIdNot32Bytes = "ZMODEL0001"
     /// Attempt to init TxId with invalid hex encoding.

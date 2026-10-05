@@ -3120,6 +3120,7 @@ dependencies = [
  "orchard",
  "pasta_curves",
  "pczt",
+ "percent-encoding",
  "prost 0.14.4",
  "rand 0.10.3",
  "rayon",

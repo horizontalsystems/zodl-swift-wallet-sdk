@@ -16,39 +16,50 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   payment-link encoding at `/payment-links/open#vN=`; `GiftCard.Origin` names the encoding read
   (`.zodl`, `.legacyV1`, `.legacyV2`, `.legacyV3`). It exposes the card's `origin`, `network`,
   `birthdayHeight`, the unverified `statedAmount` and `message` the link carries, and the card
-  wallet's Orchard-only
-  `fundingAddress`. Parsing is offline. An unreadable link throws `ZcashError.rustParseGiftCardLink`
-  (`ZRUST0156`), whose message never contains any part of the link. The card's seed is not
-  exposed, and `description`, `debugDescription` and reflection of a `GiftCard` are redacted.
+  wallet's Orchard-only `fundingAddress`. Parsing is offline. `message` is sanitized: line breaks
+  and other control whitespace become a space, and control and invisible formatting characters
+  (bidi overrides and isolates, zero-width spaces and the like) are removed; a message that is
+  blank afterwards is `nil`. A link whose birthday is below the network's NU5 activation height is
+  refused, since cards hold Orchard funds only. An unreadable link throws one error per reason:
+  `giftCardLinkNotAGiftCard` (`ZGIFT0006`), `giftCardLinkUnsupportedVersion` (`ZGIFT0007`),
+  `giftCardLinkUnsupportedNetwork` (`ZGIFT0008`), `giftCardLinkInvalidBirthday` (`ZGIFT0009`) or
+  `giftCardLinkInvalid` (`ZGIFT0010`); none carries any part of the link. The card's seed is not
+  exposed, takes no part in `==`, and is wiped from memory when the card is released;
+  `description`, `debugDescription` and reflection of a `GiftCard` are redacted.
 - `GiftCardRedeemer` sweeps a card into the user's wallet through a temporary wallet that runs
-  beside the app's synchronizer: `init(card:network:endpoint:storageDirectory:loggingPolicy:)`,
-  then `check()` (syncs the card wallet from its birthday and returns a `GiftCardStatus`: `.ready`,
-  `.pending` while the card's funds wait for their 10 confirmations, or `.empty`, with `total`,
-  `spendable` and `pending` amounts), `redeem(to:memo:)` (sends the whole spendable balance, with an optional memo, minus the
-  ZIP 317 fee to a `UnifiedAddress` and returns the `TransactionSubmitResult`s), and `cleanup()`
-  (stops the temporary wallet and deletes all of its files). The redeeming transaction discards
-  the outgoing viewing key, so the card's key — which the card's issuer can rederive — does not
-  reveal the recipient, and it needs no Sapling parameters for an address with an Orchard
+  beside the app's synchronizer:
+  `init(card:network:endpoint:isTorEnabled:storageDirectory:loggingPolicy:)`, then `check()` (syncs
+  the card wallet from its birthday and returns a `GiftCardStatus`: `.ready`, `.pending` while the
+  card's funds wait for their 10 confirmations, `.dust` when the fee would take all of its
+  spendable funds, or `.empty`, with `total`, `spendable` and `pending` amounts),
+  `redeem(to:memo:)` (sends the whole spendable balance, with an optional memo, minus the ZIP 317
+  fee to a `UnifiedAddress` and returns the `TransactionSubmitResult`s), and `cleanup()` (stops the
+  temporary wallet and deletes all of its files). `isTorEnabled` routes the card wallet's birthday
+  lookup, sync and claim submission over Tor; pass the main wallet's setting, since with `false`
+  the server sees the device's IP address with the card and its claim. The redeeming transaction
+  discards the outgoing viewing key, so the card's key — which the card's issuer can rederive —
+  does not reveal the recipient, and it needs no Sapling parameters for an address with an Orchard
   receiver. `check()` downloads and scans the blocks since the card's birthday. Only one redeemer
   per card may be alive at a time. New errors: `giftCardNetworkMismatch` (`ZGIFT0001`),
   `giftCardRedeemerAlreadyActive` (`ZGIFT0002`), `giftCardRedeemerNotReady` (`ZGIFT0003`),
-  `giftCardNothingToRedeem` (`ZGIFT0004`) and `giftCardRedeemerCleanedUp` (`ZGIFT0005`).
-- `Synchronizer.recordTrustedTransaction(_:txId:)` and `Synchronizer.setTransactionTrust(txId:trusted:)`
-  (on `SDKSynchronizer` and `SlipstreamSynchronizer`; other conformers get a throwing default) let
-  a wallet treat a specific external transaction as trusted in the sense of ZIP 315. The former
-  stores the raw transaction at once — the receive shows before any sync, unmined — and marks it
-  as trusted, so its outputs are spendable after the trusted confirmation count (3) instead of the
-  untrusted one (10) that every other external receive gets. Both work while the synchronizer is
-  stopped. A `txId` that is not the raw transaction's throws
-  `ZcashError.synchronizerTrustedTransactionIdMismatch` (`ZSYNCO0010`); a backend failure throws
-  `ZcashError.rustSetTransactionTrust` (`ZRUST0158`).
+  `giftCardNothingToRedeem` (`ZGIFT0004`, also thrown for a `.dust` card) and
+  `giftCardRedeemerCleanedUp` (`ZGIFT0005`).
+- `GiftCardRedeemer.removeLeftoverWallets(in:)` deletes the card wallets earlier redeemers left in
+  a storage directory (released without `cleanup()`, or cut short by a crash or a kill), and
+  returns how many it deleted. Such a wallet holds the card's keys and the claim's recipient, so
+  call it at launch. It never touches a redeemer alive in the process, nor anything that is not a
+  card wallet. `GiftCardRedeemer.defaultStorageDirectory` is the directory both use by default.
 - `GiftCardRedeemer.redeem(to:memo:recordIn:)` takes the user's own `Synchronizer` and, after the
-  sweep is accepted, records the claim transaction in it through `recordTrustedTransaction`: the
-  main wallet shows the incoming gift at once and can spend it after 3 confirmations. It returns a
+  sweep is accepted, stores the claim transaction in it as trusted in the sense of ZIP 315: the
+  main wallet shows the incoming gift at once and can spend it after 3 confirmations instead of
+  the 10 of an external receive. This works while the destination is stopped, and only with the
+  SDK's own synchronizers (`SDKSynchronizer`, `SlipstreamSynchronizer`). It returns a
   `GiftCardRedeemer.Redemption` with the submission `results` and `recordedInDestination`, which is
   `false` — never an error — when the destination could not record the claim; the funds are on
   chain regardless, and the destination learns about them when it next syncs. `redeem(to:memo:)`
-  is unchanged and records nothing.
+  is unchanged and records nothing. A failure to record is logged with
+  `ZcashError.synchronizerTrustedTransactionIdMismatch` (`ZSYNCO0010`) or
+  `ZcashError.rustSetTransactionTrust` (`ZRUST0158`).
 - `OvkPolicy` (`.sender`, `.discard`) and
   `Synchronizer.createProposedTransactions(proposal:spendingKey:ovkPolicy:)` /
   `Broadcaster.createProposedTransactions(proposal:spendingKey:ovkPolicy:)`. With `.discard` the
@@ -65,6 +76,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`ZRUST0157`).
 
 ## Changed
+
+- `TxId.init(_ id: [UInt8])` now throws `ZcashError.txIdNot32Bytes` (`ZMODEL0001`) unless `id` is
+  exactly 32 bytes, so call sites need `try`. `TxId.id` is now a `let`: assigning to it no longer
+  compiles; create a new `TxId` instead.
 
 ### NU7 pre-release crates
 
@@ -85,7 +100,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `GiftCardRedeemer` starts the card wallet at the exact height in the link: it fetches the
   server's tree state for the block before the birthday instead of rounding down to the nearest
   bundled checkpoint (up to 2,500 blocks on mainnet, 10,000 on testnet), so `check()` scans only
-  the blocks since the card was funded. Without a server the bundled checkpoint is still used.
+  the blocks since the card was funded. Without a server, or when the server answers with the
+  state of another height, the bundled checkpoint is used.
 - `GiftCardRedeemer` never reuses a card wallet left behind by an earlier redeemer (a crash or a
   killed app): the leftover directory is deleted before the wallet is created, so a stale birthday
   or a half-finished claim cannot carry over. Rebuilding one costs seconds.

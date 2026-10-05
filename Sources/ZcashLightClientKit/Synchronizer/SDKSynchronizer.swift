@@ -1389,7 +1389,7 @@ public class SDKSynchronizer: Synchronizer {
     // synchronizer is stopped so that the two wallets do not compete for the database executor.
     // They need neither a sync session nor the `.synced` state.
 
-    public func recordTrustedTransaction(_ rawTransaction: Data, txId: TxId) async throws {
+    func recordTrustedTransaction(_ rawTransaction: Data, txId: TxId) async throws {
         let storedTxId = try await initializer.rustBackend.decryptAndStoreTransaction(
             txBytes: rawTransaction.bytes,
             minedHeight: nil
@@ -1400,7 +1400,9 @@ public class SDKSynchronizer: Synchronizer {
         try await initializer.rustBackend.setTransactionTrust(txId: storedTxId, trusted: true)
     }
 
-    public func setTransactionTrust(txId: TxId, trusted: Bool) async throws {
+    /// Marks a stored transaction as trusted or untrusted (ZIP 315). Internal: see
+    /// `TrustedTransactionRecording`.
+    func setTransactionTrust(txId: TxId, trusted: Bool) async throws {
         try await initializer.rustBackend.setTransactionTrust(txId: Data(txId.id), trusted: trusted)
     }
 
@@ -1876,3 +1878,5 @@ extension SessionTicker {
         }
     }
 }
+
+extension SDKSynchronizer: TrustedTransactionRecording {}

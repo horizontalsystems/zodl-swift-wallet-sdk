@@ -15,21 +15,39 @@ The host is not part of the card and the link fragment never reaches a server. A
 link can spend the card, including its issuer, who can rederive the key. `GiftCard.origin` reports
 the encoding a link was read from (`.zodl` for `v=1`, `.legacyV1`/`.legacyV2`/`.legacyV3`).
 
+Parsing is done by the SDK's rust layer, from the module the card tooling shares, so every client
+reads a link the same way:
+
+- The birthday must be at or above the network's NU5 activation height. Cards hold Orchard funds
+  only, which cannot exist before NU5, and a lower height would only make the card wallet scan
+  millions of blocks for nothing. Such a link throws `giftCardLinkInvalidBirthday`.
+- `message` is sanitized: line breaks and other control whitespace become a space, and control and
+  invisible formatting characters (bidi overrides and isolates, zero-width spaces and the like)
+  are removed. A message that is blank afterwards is `nil`. It is still text anyone could have
+  written; show it as untrusted content.
+- A malformed `amount` or `desc` is read as absent rather than refusing a funded card; `v`, `key`
+  and `height` are strict.
+
 ## Redeeming
 
 ```swift
-let card = try GiftCard(link: scannedText)          // offline; throws ZcashError.rustParseGiftCardLink
+// At launch: delete card wallets a crash or a killed app left behind.
+try? GiftCardRedeemer.removeLeftoverWallets()
+
+let card = try GiftCard(link: scannedText)          // offline; see "Errors" below
 
 let redeemer = try GiftCardRedeemer(
     card: card,
     network: ZcashNetworkBuilder.network(for: .mainnet),
-    endpoint: endpoint                               // the app's lightwalletd endpoint
+    endpoint: endpoint,                              // the app's lightwalletd endpoint
+    isTorEnabled: mainWalletUsesTor                  // the main wallet's Tor setting
 )
 
 let status = try await redeemer.check()             // syncs the card wallet from its birthday
 switch status.state {
 case .ready:   break                                // status.spendable can be swept now
 case .pending: break                                // waiting for 10 confirmations; check() again later
+case .dust:    break                                // the fee would take everything; nothing to redeem
 case .empty:   break                                // already redeemed, or never funded
 }
 
@@ -55,19 +73,38 @@ try await redeemer.cleanup()                        // stops and deletes the tem
   without a destination and returns the results alone.
 - With an address that has an Orchard receiver, no Sapling parameters are downloaded.
 
-## Trust of the claim transaction (ZIP 315)
+## Confirmations (ZIP 315)
 
-To the user's main wallet, the claim is a payment from another wallet. Left to chain scanning, it
-would appear only once a sync finds it, and [ZIP 315](https://zips.z.cash/zip-0315) would hold its
-outputs for 10 confirmations before they can be spent, as for any external receive. But this device
-authored the claim — it chose the recipient and built the transaction — so ZIP 315's allowance for
-wallets to "enable specific external transactions as trusted" applies, and the SDK uses it:
+[ZIP 315](https://zips.z.cash/zip-0315) distinguishes trusted notes (the wallet's own change, or
+outputs of transactions the wallet chose to trust) from untrusted ones (anything received from
+another wallet). Both wallets in a redemption use the SDK's transfer policy: **3 confirmations
+for trusted notes, 10 for untrusted ones.** The SDK's tests pin both numbers.
+
+**The card side: 10.** Every note on a card was sent by another wallet — the issuer's — so it is
+untrusted, and `check()` reports `.pending` until it has 10 confirmations. This is the guard that
+matters: the issuer can rederive the card's key, and could in principle try to undo the funding
+with a reorg. Ten confirmations is ZIP 315's bar for funds that someone else controlled.
+
+**The claim side: 3.** The claim spends only notes that already had 10 confirmations, and this
+device chose its recipient, built it and signed it. To the main wallet it looks like an external
+receive, which would wait 10 confirmations more, but ZIP 315 lets a wallet "enable specific external
+transactions as trusted", and the claim is the case it describes: the risk the 10-confirmation
+rule guards against (someone else's transaction being replaced) does not apply to a transaction
+whose inputs were final and whose construction this device controlled. So the SDK records it as
+trusted, and the main wallet can spend the gift after 3 confirmations — the same wait as its own
+change.
+
+## Trust of the claim transaction
 
 - Pass the main wallet's synchronizer as `recordIn:`. Once a server has accepted the claim,
-  `GiftCardRedeemer` reads the raw transaction back from the card wallet and calls
-  `Synchronizer.recordTrustedTransaction(_:txId:)` on the destination, which stores it (the receive
-  shows at once, unmined, with its memo) and marks it trusted. The main wallet can then spend the
-  gift after 3 confirmations instead of 10. The next sync mines the stored transaction as usual.
+  `GiftCardRedeemer` reads the raw transaction back from the card wallet and stores it in the
+  destination (the receive shows at once, unmined, with its memo), marked as trusted. The main
+  wallet can then spend the gift after 3 confirmations instead of 10. The next sync mines the
+  stored transaction as usual.
+- Only the SDK's own synchronizers (`SDKSynchronizer`, `SlipstreamSynchronizer`) can record the
+  claim. The trust calls are internal to the SDK: which transaction to trust is decided by the
+  redeemer, never by a caller with an arbitrary transaction or id. With any other conformer,
+  `recordedInDestination` is `false` and the claim arrives through sync.
 - The call goes straight to the wallet database, so it works while the main synchronizer is
   stopped — which is how an app typically runs a claim, so the two wallets do not compete for the
   shared database executor. Restart the main synchronizer afterwards.
@@ -76,9 +113,6 @@ wallets to "enable specific external transactions as trusted" applies, and the S
   claim from the chain, as an ordinary (untrusted, 10-confirmation) receive. Nothing is lost.
 - Only accepted submissions (`.success`) are recorded. A transaction rejected by every server is
   not stored in the destination.
-- Trust is per transaction and reversible: `Synchronizer.setTransactionTrust(txId:trusted:)` marks
-  any transaction the wallet already knows as trusted or untrusted; the status of an unknown
-  transaction is not recorded, so store it first (`recordTrustedTransaction` does both).
 - Trust shortens the wait; it does not weaken safety against reorgs beyond what ZIP 315 accepts
   for the wallet's own transactions, and it never makes an unmined output spendable.
 
@@ -98,18 +132,35 @@ wallets to "enable specific external transactions as trusted" applies, and the S
 - `cleanup()` never loses funds: the key is in the link. If a submission failed, clean up and use
   a new redeemer to retry, because the old one treats the notes as spent until its transaction
   expires.
-- Tor and exchange-rate fetching are off for the card wallet, and logging is off by default so the
+- A card wallet holds the card's keys, its notes and the claim with its recipient. A redeemer
+  released without `cleanup()`, a crash or a killed app leaves it on disk (excluded from backups).
+  Call `GiftCardRedeemer.removeLeftoverWallets(in:)` at launch, with the same `storageDirectory`;
+  it never touches a redeemer alive in the process.
+- Tor follows `isTorEnabled`: the birthday lookup, the sync and the claim's submission all go over
+  Tor when it is `true`. Pass the main wallet's setting; with `false` the server sees the device's
+  IP address together with the card's birthday, its sync and the claim.
+- The birthday lookup asks the server for the tree state of the block before the card's birthday
+  and uses it only if the state is for exactly that height; otherwise the card wallet starts from
+  the nearest bundled checkpoint below, which is slower but never wrong.
+- Exchange-rate fetching is off for the card wallet, and logging is off by default so the
   transaction that links the card to the user's address does not end up in shared logs.
 
 ## Errors
 
+The parse errors come from a stable code the rust layer reports, not from its message text, and
+none of them carries any part of the link.
+
 | Error | Meaning |
 |---|---|
-| `rustParseGiftCardLink` (`ZRUST0156`) | Not a readable gift card link. The message never contains the link. |
+| `giftCardLinkNotAGiftCard` (`ZGIFT0006`) | Not an `https` URL carrying a gift card. |
+| `giftCardLinkUnsupportedVersion` (`ZGIFT0007`) | A gift card link of a version this SDK does not read. |
+| `giftCardLinkUnsupportedNetwork` (`ZGIFT0008`) | A card for regtest or an unknown network. |
+| `giftCardLinkInvalidBirthday` (`ZGIFT0009`) | Malformed birthday, or below NU5 activation. |
+| `giftCardLinkInvalid` (`ZGIFT0010`) | Any other malformed link. |
 | `giftCardNetworkMismatch` (`ZGIFT0001`) | The card, or the redeem address, is for another network. |
 | `giftCardRedeemerAlreadyActive` (`ZGIFT0002`) | Another redeemer for this card is alive. |
 | `giftCardRedeemerNotReady` (`ZGIFT0003`) | `redeem(to:)` before `check()`. |
-| `giftCardNothingToRedeem` (`ZGIFT0004`) | Nothing spendable: empty, or still pending. |
+| `giftCardNothingToRedeem` (`ZGIFT0004`) | Nothing spendable: empty, still pending, or dust (the fee would take everything). |
 | `giftCardRedeemerCleanedUp` (`ZGIFT0005`) | The redeemer was cleaned up. |
 
 `check()` also rethrows the card wallet's sync error, and `redeem(to:)` the errors of
