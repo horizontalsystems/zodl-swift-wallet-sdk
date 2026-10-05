@@ -23,8 +23,7 @@ use pczt::{
     roles::{combiner::Combiner, prover::Prover},
 };
 use prost::Message;
-use rand::rngs::OsRng;
-use secrecy::Secret;
+use secrecy::{ExposeSecret, Secret};
 use tor_rtcompat::ToplevelBlockOn as _;
 use tracing::{debug, metadata::LevelFilter};
 use tracing_subscriber::prelude::*;
@@ -99,6 +98,7 @@ mod derivation;
 mod eip681;
 mod error_report;
 mod ext_schema;
+mod legacy_ufvk;
 mod ffi;
 mod interactive_qos;
 mod migration;
@@ -188,7 +188,9 @@ unsafe fn wallet_db(
     db_data: *const u8,
     db_data_len: usize,
     network: NetworkParams,
-) -> anyhow::Result<WalletDb<rusqlite::Connection, NetworkParams, SystemClock, OsRng>> {
+) -> anyhow::Result<
+    WalletDb<rusqlite::Connection, NetworkParams, SystemClock, rand::rand_core::UnwrapErr<rand::rngs::SysRng>>,
+> {
     let db_data = Path::new(OsStr::from_bytes(unsafe {
         slice::from_raw_parts(db_data, db_data_len)
     }));
@@ -200,8 +202,13 @@ unsafe fn wallet_db(
         .map_err(|e| anyhow!("Error setting wallet database busy_timeout: {}", e))?;
     rusqlite::vtab::array::load_module(&conn)
         .map_err(|e| anyhow!("Error loading wallet database array module: {}", e))?;
-    Ok(WalletDb::from_connection(conn, network, SystemClock, OsRng)
-        .with_anchor_retention_interval(anchor_retention_interval(network)))
+    Ok(WalletDb::from_connection(
+        conn,
+        network,
+        SystemClock,
+        rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+    )
+    .with_anchor_retention_interval(anchor_retention_interval(network)))
 }
 
 /// Helper method for construcing a FsBlockDb value from path data provided over the FFI.
@@ -403,6 +410,16 @@ pub unsafe extern "C" fn zcashlc_init_data_database(
 ) -> i32 {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
+        {
+            // See `legacy_ufvk`: a database from before `full_account_ids` needs its stored
+            // viewing keys re-encoded, or that migration rejects the wallet's own seed.
+            let path = Path::new(OsStr::from_bytes(unsafe {
+                slice::from_raw_parts(db_data, db_data_len)
+            }));
+            let conn = rusqlite::Connection::open(path)
+                .map_err(|e| anyhow!("Error opening wallet database connection: {}", e))?;
+            legacy_ufvk::realign_legacy_ufvk_encodings(&conn, &network)?;
+        }
         let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
 
         let seed = if seed.is_null() {
@@ -603,7 +620,7 @@ pub unsafe extern "C" fn zcashlc_create_account(
         let encoded = usk.to_bytes(Era::Orchard);
         Ok(Box::into_raw(Box::new(ffi::BinaryKey::new(
             account_uuid,
-            encoded,
+            encoded.expose_secret().to_vec(),
         ))))
     });
     unwrap_exc_or_null(res)
@@ -2961,6 +2978,8 @@ pub unsafe extern "C" fn zcashlc_create_proposed_transactions(
         let txids = create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
             &mut db_data,
             &network,
+            &SystemClock,
+            &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
             &prover,
             &prover,
             &SpendingKeys::from_unified_spending_key(usk),
@@ -3093,6 +3112,8 @@ pub unsafe extern "C" fn zcashlc_create_pczt_from_proposal(
             let pczt = create_pczt_from_proposal::<_, _, Infallible, _, Infallible, _>(
                 &mut db_data,
                 &network,
+                &SystemClock,
+                &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
                 account_uuid,
                 OvkPolicy::Sender,
                 &proposal,
@@ -3272,6 +3293,7 @@ pub unsafe extern "C" fn zcashlc_add_proofs_to_pczt(
                 })?;
             prover = prover
                 .create_orchard_proof(
+                    rand::rand_core::UnwrapErr(rand::rngs::SysRng),
                     zcash_primitives::transaction::builder::cached_orchard_proving_key(
                         circuit_version,
                     ),
@@ -3295,6 +3317,7 @@ pub unsafe extern "C" fn zcashlc_add_proofs_to_pczt(
                 })?;
             prover = prover
                 .create_ironwood_proof(
+                    rand::rand_core::UnwrapErr(rand::rngs::SysRng),
                     zcash_primitives::transaction::builder::cached_orchard_proving_key(
                         circuit_version,
                     ),
@@ -3320,7 +3343,11 @@ pub unsafe extern "C" fn zcashlc_add_proofs_to_pczt(
             let local_prover = LocalTxProver::new(spend_params, output_params);
 
             prover = prover
-                .create_sapling_proofs(&local_prover, &local_prover)
+                .create_sapling_proofs(
+                    rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+                    &local_prover,
+                    &local_prover,
+                )
                 .map_err(|e| anyhow!("Failed to create Sapling proofs for PCZT: {:?}", e))?;
         }
         assert!(!prover.requires_sapling_proofs());
@@ -3437,6 +3464,8 @@ pub unsafe extern "C" fn zcashlc_extract_and_store_from_pczt(
 
         let txid = extract_and_store_transaction_from_pczt::<_, ()>(
             &mut db_data,
+            &SystemClock,
+            &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
             pczt,
             sapling_vk.as_ref().map(|(s, o)| (s, o)),
             None,
@@ -4033,7 +4062,10 @@ pub unsafe extern "C" fn zcashlc_get_exchange_rate_usd(
         let rate = tor_runtime.runtime().block_on(async {
             tor_runtime
                 .client()
-                .get_latest_zec_to_usd_rate(&exchanges)
+                .get_latest_zec_to_usd_rate(
+                    &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+                    &exchanges,
+                )
                 .await
         })?;
 
@@ -4165,7 +4197,10 @@ pub unsafe extern "C" fn zcashlc_get_exchange_rate_usd_from(
         let rate = tor_runtime.runtime().block_on(async {
             tor_runtime
                 .client()
-                .get_latest_zec_to_usd_rate(&exchanges)
+                .get_latest_zec_to_usd_rate(
+                    &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+                    &exchanges,
+                )
                 .await
         })?;
 
@@ -4836,6 +4871,12 @@ pub extern "C" fn zcashlc_set_custom_network(
         nu6_1: height(nu6_1),
         nu6_2: height(nu6_2),
         nu6_3: height(nu6_3),
+        // No FFI parameter supplies this: `zcashlc_set_custom_network`'s argument list
+        // predates NU7, and the Swift caller has no height to pass. `None` ("not
+        // activated") is what every other upgrade here gets when the caller has no
+        // value for it, and is the only choice that leaves this function's behavior
+        // exactly as it was before NU7 existed.
+        nu7: None,
     };
 
     match CUSTOM_PARAMS.write() {
@@ -4968,6 +5009,7 @@ mod tests {
                 nu6_1: height,
                 nu6_2: height,
                 nu6_3: height,
+                nu7: height,
             },
         };
         assert_eq!(
@@ -7362,6 +7404,7 @@ mod slipstream_anchor_retention_tests {
             nu6_1: None,
             nu6_2: None,
             nu6_3: None,
+            nu7: None,
         };
         assert_eq!(slipstream_anchor_retention_floor(&no_nu63), None);
     }

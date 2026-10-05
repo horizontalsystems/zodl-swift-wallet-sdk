@@ -271,6 +271,7 @@ mod tests {
                         nu6_1: genesis,
                         nu6_2: genesis,
                         nu6_3: genesis,
+                        nu7: None,
                     },
                 }
             }
@@ -297,6 +298,7 @@ mod tests {
                 nu6_1: at(NetworkUpgrade::Nu6_1),
                 nu6_2: at(NetworkUpgrade::Nu6_2),
                 nu6_3: Some(BlockHeight::from_u32(nu6_3)),
+                nu7: at(NetworkUpgrade::Nu7),
             },
         }
     }

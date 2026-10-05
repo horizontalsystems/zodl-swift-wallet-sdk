@@ -161,7 +161,7 @@ pub(super) fn sign_delegation_request(
 
     let signature = ask
         .randomize(&alpha)
-        .sign(rand::rngs::OsRng, &request.sighash);
+        .sign(rand::rand_core::UnwrapErr(rand::rngs::SysRng), &request.sighash);
     let bytes: [u8; 64] = (&signature).into();
     Ok(bytes)
 }
