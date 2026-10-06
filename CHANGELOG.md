@@ -11,6 +11,13 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `NetworkActivationHeights.nu7` sets the NU7 activation height of a custom or regtest network.
   A `nil` height means "not activated".
 
+- `AwaitableStopSynchronizer.stopAndWait()` lets clients of `SDKSynchronizer` and
+  `SlipstreamSynchronizer` wait until the synchronizer's stop operation finishes, including
+  earlier queued lifecycle work in Slipstream. Idle and unprepared calls complete without waiting
+  for a new state-stream event. Existing `Synchronizer` conformers need no new requirement, and
+  `stop()` still returns immediately. This boundary does not promise full engine quiescence:
+  cancelled background tasks are not necessarily joined, and Slipstream can still report a
+  non-quiescent stop. Coordinate subsequent starts when pausing the main wallet for a gift claim.
 - `GiftCard` reads a gift card link with `GiftCard(link:)`: any `https` URL whose fragment carries
   a `v=1` card (`#v=1&key=…&height=…`, as `https://gift.zodl.com/` issues) or the legacy JSON
   payment-link encoding at `/payment-links/open#vN=`; `GiftCard.Origin` names the encoding read

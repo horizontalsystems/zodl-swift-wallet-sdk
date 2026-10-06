@@ -11,7 +11,7 @@ import Combine
 
 /// Synchronizer implementation for UIKit and iOS 13+
 // swiftlint:disable type_body_length file_length
-public class SDKSynchronizer: Synchronizer {
+public class SDKSynchronizer: AwaitableStopSynchronizer {
     public var alias: ZcashSynchronizerAlias { initializer.alias }
 
     private lazy var streamsUpdateQueue = { DispatchQueue(label: "streamsUpdateQueue_\(initializer.alias.description)") }()
@@ -267,24 +267,36 @@ public class SDKSynchronizer: Synchronizer {
         }
     }
 
-    /// Stops the synchronizer
+    /// Stops the synchronizer and waits for its stop body, including processor actions and Tor dormancy.
+    /// Does not join the processor's cancelled sync or mempool tasks.
+    public func stopAndWait() async {
+        await stopTask().value
+    }
+
+    /// Requests a stop and returns immediately while the stop body runs in its own task.
     public func stop() {
-        // Calling `await blockProcessor.stop()` make take some time. If the downloading of blocks is in progress then this method inside waits until
-        // downloading is really done. Which could block execution of the code on the client side. So it's better strategy to spin up new task and
-        // exit fast on client side.
+        _ = stopTask()
+    }
+
+    /// Both entry points own exactly one stop task. Caller cancellation cannot skip its teardown.
+    private func stopTask() -> Task<Void, Never> {
         Task(priority: .high) {
-            await sdkFlags.sdkStopped()
-
-            let status = await self.status
-            guard status != .stopped, status != .disconnected else {
-                logger.info("attempted to stop when status was: \(status)")
-                return
-            }
-
-            await blockProcessor.stop()
-            await exchangeRateTor?.sleep()
-            await httpTor?.sleep()
+            await self.stopImpl()
         }
+    }
+
+    private func stopImpl() async {
+        await sdkFlags.sdkStopped()
+
+        let status = await self.status
+        guard status != .stopped, status != .disconnected else {
+            logger.info("attempted to stop when status was: \(status)")
+            return
+        }
+
+        await blockProcessor.stop()
+        await exchangeRateTor?.sleep()
+        await httpTor?.sleep()
     }
 
     // MARK: Witnesses Fix

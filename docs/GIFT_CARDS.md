@@ -51,7 +51,7 @@ case .dust:    break                                // the fee would take everyt
 case .empty:   break                                // already redeemed, or never funded
 }
 
-mainSynchronizer.stop()                             // optional: lets the claim have the database
+await mainSynchronizer.stopAndWait()                // optional: await the main wallet's stop operation
 let redemption = try await redeemer.redeem(
     to: myUnifiedAddress,
     memo: try Memo(string: "Gift card"),
@@ -104,7 +104,15 @@ the ordinary untrusted policy; it is not a claim that an attack has been reprodu
   `false` and the claim arrives through sync.
 - The call goes straight to the wallet database, so it works while the main synchronizer is
   stopped — which is how an app typically runs a claim, so the two wallets do not compete for the
-  shared database executor. Restart the main synchronizer afterwards.
+  shared database executor. The example uses a main synchronizer typed as
+  `AwaitableStopSynchronizer`, the optional capability both SDK implementations support. Await
+  `stopAndWait()` before starting work that needs the stop operation to finish; synchronous
+  `stop()` only requests it. Completion includes classic processor actions and Tor dormancy, or
+  Slipstream's queued teardown and earlier lifecycle work. It completes even when no new stopped
+  state is emitted, including idle or unprepared paths. This is not full engine quiescence: classic
+  cancelled background tasks are not joined, and Slipstream's engine can return a non-quiescent
+  stop. Keep ownership of the pause so other app lifecycle paths do not start the main wallet
+  while the claim is running, then restart it afterwards.
 - Recording can never fail the redemption: the funds are already on their way. A failure is logged
   and reported as `Redemption.recordedInDestination == false`; the main wallet then learns about the
   claim from the chain, as an ordinary untrusted receive. Nothing is lost.
