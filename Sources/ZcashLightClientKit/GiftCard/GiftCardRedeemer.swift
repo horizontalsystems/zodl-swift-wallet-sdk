@@ -339,6 +339,8 @@ public actor GiftCardRedeemer {
 
     /// Stops the card wallet and deletes every file it created, then frees the card for another
     /// redeemer. The redeemer cannot be used afterwards. Calling it again does nothing.
+    /// Cancellation does not interrupt cleanup. Until wipe reports terminal completion, the
+    /// redeemer and its alias stay owned; a stalled wipe can keep this call pending indefinitely.
     ///
     /// - Throws: the error from deleting the files, if any; the wallet is stopped and the card
     ///   freed regardless.
@@ -484,8 +486,8 @@ public actor GiftCardRedeemer {
 
         synchronizer.stop()
         // `wipe()` waits for a running sync to stop and closes the wallet's database connections
-        // before deleting its files. A failure here is not fatal: the directory removal below
-        // deletes the same files.
+        // before deleting its files. Retain this operation and its alias until that wipe really
+        // completes. Only a terminal failure permits the directory-removal fallback below.
         try? await Self.awaitCompletion(of: synchronizer.wipe())
 
         if FileManager.default.fileExists(atPath: rootDirectory.path) {
@@ -672,19 +674,14 @@ extension GiftCardRedeemer {
         return recordedAny
     }
 
-    /// Waits for `publisher` to complete, or for `timeout` to pass, whichever comes first.
-    ///
-    /// `wipe()` reports through a `PassthroughSubject` that a task completes, so a wipe that
-    /// finishes before this subscribes would never be observed; the timeout bounds that case.
-    private static func awaitCompletion(
-        of publisher: AnyPublisher<Void, Error>,
-        timeout: TimeInterval = 30
-    ) async throws {
+    /// Waits for terminal completion, even when the caller is cancelled. A pending wipe must
+    /// keep its wallet and alias owned; elapsed time is not evidence that deletion is safe.
+    static func awaitCompletion(of publisher: AnyPublisher<Void, Error>) async throws {
         let waiter = PublisherCompletionWaiter()
         // The waiter owns the subscription; keep it alive until the continuation resumes.
         defer { withExtendedLifetime(waiter) {} }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            waiter.begin(continuation: continuation, publisher: publisher, timeout: timeout)
+            waiter.begin(continuation: continuation, publisher: publisher)
         }
     }
 }
@@ -784,17 +781,13 @@ private final class SyncWaiter {
     }
 }
 
-/// Resumes a continuation once, when a `Void` publisher completes or a timeout passes.
+/// Resumes a continuation once, only when a `Void` publisher completes.
 private final class PublisherCompletionWaiter {
     private let lock = NSLock()
     private var cancellable: AnyCancellable?
 
-    func begin(continuation: CheckedContinuation<Void, Error>, publisher: AnyPublisher<Void, Error>, timeout: TimeInterval) {
+    func begin(continuation: CheckedContinuation<Void, Error>, publisher: AnyPublisher<Void, Error>) {
         let resumed = OneShot()
-        DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
-            guard resumed.fire() else { return }
-            continuation.resume()
-        }
         let cancellable = publisher.sink(
             receiveCompletion: { completion in
                 guard resumed.fire() else { return }

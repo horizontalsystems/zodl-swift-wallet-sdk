@@ -112,6 +112,12 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Fixed
 
+- `GiftCardRedeemer.cleanup()` now retains the temporary wallet and card alias until wipe
+  actually completes, including when its caller is cancelled or releases its reference. A
+  deadline no longer permits early deletion or same-card reuse. A stalled wipe can keep cleanup
+  pending; terminal wipe failure still allows directory removal, whose errors reach the caller.
+  Public signatures are unchanged. (MOB-2138)
+
 - `GiftCardRedeemer.check()` and the `redeem` overloads now throw `CancellationError` for
   cancelled queued calls before running them. Cancellation observed after redemption preparation
   or immediately before native claim creation also prevents creating and submitting a claim.

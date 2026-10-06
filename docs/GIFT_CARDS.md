@@ -144,7 +144,12 @@ the ordinary untrusted policy; it is not a claim that an attack has been reprodu
   it cannot be cancelled or rolled back; cancellation does not establish whether the claim was
   created or submitted, so recheck the card before retrying.
 - `cleanup()` runs to completion even when the calling task is cancelled, including when it was
-  queued behind another operation.
+  queued behind another operation. It retains the redeemer and card alias until `wipe()` reports
+  terminal completion, then removes the remaining directory. Only terminal wipe failure permits
+  the directory-removal fallback; directory deletion errors are returned to the caller. A stalled
+  wipe can keep cleanup and same-card reuse pending indefinitely. Cancellation or dropping the
+  caller's reference does not authorize early deletion or release, and leftover-wallet cleanup
+  continues to skip this wallet. This does not promise universal engine quiescence.
 - `cleanup()` never loses funds: the key is in the link. If a submission failed, clean up and use
   a new redeemer to retry, because the old one treats the notes as spent until its transaction
   expires.

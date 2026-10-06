@@ -37,11 +37,15 @@ final class GiftCardCancellationTests: ZcashTestCase {
         // cannot execute before the redemption has joined the queue behind the held check.
         _ = await fixture.redeemer.cardWalletConfirmationsPolicy()
         redemption.cancel()
-        fixture.encoder.propose = nil
+        fixture.encoder.propose = {
+            XCTFail("Cancelled queued redemption must not prepare a proposal")
+            return FfiProposalFixtures.makeProposal(steps: [])
+        }
         await gate.open()
         _ = try await predecessor.value
         await fulfillment(of: [redemptionFinished], timeout: 5)
         await assertCancellation(redemption)
+        fixture.encoder.propose = nil
 
         XCTAssertEqual(fixture.encoder.createdTransactions.count, 0)
         XCTAssertEqual(fixture.encoder.submittedTransactions.count, 0)
