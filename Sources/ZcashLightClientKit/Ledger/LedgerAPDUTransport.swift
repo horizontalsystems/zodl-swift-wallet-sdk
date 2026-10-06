@@ -12,6 +12,11 @@ import Foundation
 ///
 /// An implementation must keep these rules, which the signing ceremony relies on:
 ///
+/// - One transport talks to one peripheral for its whole lifetime. The pairing and signing code
+///   reads the connected device's identity once, through this transport, and trusts every later
+///   reply on it to come from that same device; a transport that could redirect to a different
+///   peripheral partway through its life would invalidate that binding for every exchange after
+///   the switch.
 /// - One exchange at a time. A reply is only ever the answer to the command last sent, and nothing
 ///   in a reply says which command it answers.
 /// - The reply is the raw payload: the response data followed by the two-byte status word. A

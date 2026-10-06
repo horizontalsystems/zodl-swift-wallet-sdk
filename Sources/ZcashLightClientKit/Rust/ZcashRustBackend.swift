@@ -653,9 +653,9 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
     }
 
     // DB-READ (audited 2026-09-16): zcashlc_ledger_sign_session_new — WalletRead::get_account and
-    // WalletRead::get_transparent_address_metadata, both SELECT-only in zcash_client_sqlite 0.22.0
-    // (wallet::get_account; wallet::transparent::get_transparent_address_metadata and its
-    // find_gap_start). The PCZT is stamped and redacted in memory; nothing is written.
+    // WalletRead::get_transparent_address_metadata, both SELECT-only in zcash_client_sqlite
+    // 0.23.0-pre.0 (wallet::get_account; wallet::transparent::get_transparent_address_metadata and
+    // its find_gap_start). The PCZT is stamped and redacted in memory; nothing is written.
     func createLedgerSignSession(
         accountUUID: AccountUUID,
         pczt: Pczt,
