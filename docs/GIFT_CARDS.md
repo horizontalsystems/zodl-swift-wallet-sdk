@@ -87,12 +87,16 @@ with a reorg. Ten confirmations is ZIP 315's bar for funds that someone else con
 
 **The claim side: 3.** The claim spends only notes that already had 10 confirmations, and this
 device chose its recipient, built it and signed it. To the main wallet it looks like an external
-receive, which would wait 10 confirmations more, but ZIP 315 lets a wallet "enable specific external
-transactions as trusted", and the claim is the case it describes: the risk the 10-confirmation
-rule guards against (someone else's transaction being replaced) does not apply to a transaction
-whose inputs were final and whose construction this device controlled. So the SDK records it as
-trusted, and the main wallet can spend the gift after 3 confirmations — the same wait as its own
-change.
+receive, which would wait 10 confirmations more; ZIP 315 lets a wallet "enable specific external
+transactions as trusted", and the SDK records the claim as trusted, so the main wallet can spend
+the gift after 3 confirmations — the same wait as its own change.
+
+That is a product decision, and it carries a residual risk that the 10-confirmation rule would have
+covered. The card's spending key is in the link, so anyone holding the link — including whoever
+minted the card — can sign a competing spend of the same notes. If such a spend wins a reorg of 3
+to 9 blocks, the claim is undone, and anything the user already spent from the gift after its
+third confirmation is undone with it. The SDK accepts that risk for gift cards in exchange for the
+shorter wait; it does not apply to the card side, which keeps the full 10.
 
 ## Trust of the claim transaction
 
@@ -116,8 +120,10 @@ change.
   wallet `recipient` belongs to) is not stored there, so nothing is trusted and the flag is `false`.
 - Only accepted submissions (`.success`) are recorded. A transaction rejected by every server is
   not stored in the destination.
-- Trust shortens the wait; it does not weaken safety against reorgs beyond what ZIP 315 accepts
-  for the wallet's own transactions, and it never makes an unmined output spendable.
+- Trust shortens the wait, and so weakens safety against reorgs for the claim: a reorg of 3 to 9
+  blocks that replaces it with a competing spend by another holder of the card link undoes a gift
+  the user may already have spent from (see [Confirmations](#confirmations-zip-315)). This is an
+  accepted product decision. Trust never makes an unmined output spendable.
 
 ## Lifecycle and concurrency
 
