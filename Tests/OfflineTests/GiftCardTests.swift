@@ -365,6 +365,66 @@ final class GiftCardTests: ZcashTestCase {
         try await next.cleanup()
     }
 
+    func testOldRedeemerDeinitCannotReleaseItsReplacement() async throws {
+        let card = try GiftCard(link: Self.zodlTestnetLink)
+        let network = ZcashNetworkBuilder.network(for: .testnet)
+        var old: GiftCardRedeemer? = try GiftCardRedeemer(
+            card: card,
+            network: network,
+            endpoint: LightWalletEndpointBuilder.default,
+            isTorEnabled: false,
+            storageDirectory: testTempDirectory
+        )
+        weak var oldReference = old
+        try await old?.cleanup()
+
+        let replacement = try GiftCardRedeemer(
+            card: card,
+            network: network,
+            endpoint: LightWalletEndpointBuilder.default,
+            isTorEnabled: false,
+            storageDirectory: testTempDirectory
+        )
+        old = nil
+        // The completed cleanup task may briefly retain the old actor until its tail finishes.
+        // Wait for its actual release so this tests deinit rather than that temporary retention.
+        while oldReference != nil {
+            await Task.yield()
+        }
+        XCTAssertNil(oldReference)
+
+        XCTAssertThrowsError(
+            try GiftCardRedeemer(
+                card: card,
+                network: network,
+                endpoint: LightWalletEndpointBuilder.default,
+                isTorEnabled: false,
+                storageDirectory: testTempDirectory
+            )
+        ) { error in
+            guard case ZcashError.giftCardRedeemerAlreadyActive = error else {
+                return XCTFail("Unexpected error \(error.localizedDescription)")
+            }
+        }
+
+        let directory = testTempDirectory.appendingPathComponent(replacement.alias.description, isDirectory: true)
+        let marker = directory.appendingPathComponent("live-wallet-marker")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data([1]).write(to: marker)
+        XCTAssertEqual(try GiftCardRedeemer.removeLeftoverWallets(in: testTempDirectory), 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path), "the replacement still owns its wallet")
+
+        try await replacement.cleanup()
+        let next = try GiftCardRedeemer(
+            card: card,
+            network: network,
+            endpoint: LightWalletEndpointBuilder.default,
+            isTorEnabled: false,
+            storageDirectory: testTempDirectory
+        )
+        try await next.cleanup()
+    }
+
     func testReleasingARedeemerFreesTheCard() throws {
         let card = try GiftCard(link: Self.zodlTestnetLink)
         let network = ZcashNetworkBuilder.network(for: .testnet)

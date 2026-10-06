@@ -105,6 +105,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Fixed
 
+- Cleaning up a gift-card redeemer and later releasing it no longer frees the card's replacement
+  redeemer. The replacement remains protected from duplicate redeemers and leftover-wallet cleanup.
 - `GiftCardRedeemer` starts the card wallet at the exact height in the link: it fetches the
   server's tree state for the block before the birthday instead of rounding down to the nearest
   bundled checkpoint (up to 2,500 blocks on mainnet, 10,000 on testnet), so `check()` scans only

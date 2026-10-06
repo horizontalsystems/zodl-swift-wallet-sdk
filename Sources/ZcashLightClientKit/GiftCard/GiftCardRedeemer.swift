@@ -135,6 +135,7 @@ public actor GiftCardRedeemer {
     /// to log.
     public nonisolated let alias: ZcashSynchronizerAlias
 
+    private let owner: UUID
     private let network: ZcashNetwork
     private let rootDirectory: URL
     private let initializer: Initializer
@@ -174,7 +175,8 @@ public actor GiftCardRedeemer {
         }
 
         let alias = card.synchronizerAlias
-        guard GiftCardRedeemerRegistry.claim(alias) else {
+        let owner = UUID()
+        guard GiftCardRedeemerRegistry.claim(alias, owner: owner) else {
             throw ZcashError.giftCardRedeemerAlreadyActive
         }
 
@@ -209,6 +211,7 @@ public actor GiftCardRedeemer {
 
         self.card = card
         self.alias = alias
+        self.owner = owner
         self.network = network
         self.rootDirectory = rootDirectory
         self.initializer = initializer
@@ -241,7 +244,7 @@ public actor GiftCardRedeemer {
         // A redeemer released without `cleanup()` must not leave its wallet syncing, nor keep the
         // card from being redeemed again. Its files stay behind; see the type's documentation.
         synchronizer.stop()
-        GiftCardRedeemerRegistry.release(alias)
+        GiftCardRedeemerRegistry.release(alias, owner: owner)
     }
 
     /// Creates (on first use) and syncs the card wallet, then reports what the card holds.
@@ -437,7 +440,7 @@ public actor GiftCardRedeemer {
         }
         isCleanedUp = true
         accountUUID = nil
-        defer { GiftCardRedeemerRegistry.release(alias) }
+        defer { GiftCardRedeemerRegistry.release(alias, owner: owner) }
 
         synchronizer.stop()
         // `wipe()` waits for a running sync to stop and closes the wallet's database connections
@@ -653,25 +656,32 @@ extension GiftCardRedeemer {
 /// what keeps two redeemers of the same card apart.
 enum GiftCardRedeemerRegistry {
     private static let lock = NSLock()
-    private static var active: Set<ZcashSynchronizerAlias> = []
+    private static var active: [ZcashSynchronizerAlias: UUID] = [:]
 
-    static func claim(_ alias: ZcashSynchronizerAlias) -> Bool {
+    static func claim(_ alias: ZcashSynchronizerAlias, owner: UUID) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return active.insert(alias).inserted
+        guard active[alias] == nil else {
+            return false
+        }
+        active[alias] = owner
+        return true
     }
 
-    static func release(_ alias: ZcashSynchronizerAlias) {
+    static func release(_ alias: ZcashSynchronizerAlias, owner: UUID) {
         lock.lock()
         defer { lock.unlock() }
-        active.remove(alias)
+        guard active[alias] == owner else {
+            return
+        }
+        active.removeValue(forKey: alias)
     }
 
     /// Runs `body` with the active aliases, holding off every claim and release until it returns.
     static func withActiveAliases<T>(_ body: (Set<ZcashSynchronizerAlias>) throws -> T) rethrows -> T {
         lock.lock()
         defer { lock.unlock() }
-        return try body(active)
+        return try body(Set(active.keys))
     }
 }
 
