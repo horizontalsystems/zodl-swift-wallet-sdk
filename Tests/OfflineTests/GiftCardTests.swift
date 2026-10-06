@@ -251,8 +251,8 @@ final class GiftCardTests: ZcashTestCase {
     // MARK: - Confirmation policy (ZIP 315)
 
     /// Card notes come from another wallet, so they are untrusted and need 10 confirmations; the
-    /// claim recorded as trusted in the main wallet needs 3. Both come from the transfer policy,
-    /// which this pins so that a change to the default cannot loosen the card side unnoticed.
+    /// claim is also untrusted in the main wallet and needs 10. Both use the transfer policy,
+    /// which this pins so that a change to the default cannot loosen either wait unnoticed.
     func testConfirmationPoliciesArePinned() async throws {
         let card = try GiftCard(link: Self.zodlTestnetLink)
         let redeemer = try GiftCardRedeemer(
@@ -270,10 +270,10 @@ final class GiftCardTests: ZcashTestCase {
         XCTAssertEqual(cardPolicy.toBackend().untrusted, 10)
         XCTAssertEqual(cardPolicy.toBackend().trusted, 3)
 
-        // The destination wallet spends a recorded (trusted) claim under the same transfer policy.
+        // The destination wallet spends a recorded untrusted claim under the same transfer policy.
         let walletPolicy = ConfirmationsPolicy.defaultTransferPolicy()
-        XCTAssertEqual(walletPolicy.trusted, 3, "a recorded claim is trusted: 3 confirmations")
-        XCTAssertEqual(walletPolicy.untrusted, 10)
+        XCTAssertEqual(walletPolicy.trusted, 3)
+        XCTAssertEqual(walletPolicy.untrusted, 10, "a recorded claim is untrusted: 10 confirmations")
 
         try await redeemer.cleanup()
     }
@@ -455,9 +455,9 @@ final class GiftCardTests: ZcashTestCase {
     private static let claimTxId = Data(repeating: 0xC1, count: 32)
     private static let claimRaw = Data([0x05, 0x00, 0x00, 0x80, 0x0A, 0x27, 0xA7, 0x26, 0x01])
 
-    private func makeDestination() -> TrustedTransactionRecordingMock {
-        let destination = TrustedTransactionRecordingMock()
-        destination.recordTrustedTransactionTxIdClosure = { _, _ in }
+    private func makeDestination() -> IncomingTransactionRecordingMock {
+        let destination = IncomingTransactionRecordingMock()
+        destination.recordIncomingTransactionTxIdClosure = { _, _ in }
         return destination
     }
 
@@ -467,7 +467,7 @@ final class GiftCardTests: ZcashTestCase {
         return logger
     }
 
-    func testAnAcceptedClaimIsRecordedInTheDestinationAsTrusted() async {
+    func testAnAcceptedClaimIsRecordedInTheDestination() async {
         let destination = makeDestination()
         let logger = makeLogger()
         var lookedUp: [Data] = []
@@ -484,9 +484,9 @@ final class GiftCardTests: ZcashTestCase {
 
         XCTAssertTrue(recorded)
         XCTAssertEqual(lookedUp, [Self.claimTxId], "the raw transaction comes from the card wallet, by the accepted txid")
-        XCTAssertEqual(destination.recordTrustedTransactionTxIdCallsCount, 1)
-        XCTAssertEqual(destination.recordTrustedTransactionTxIdReceivedArguments?.rawTransaction, Self.claimRaw)
-        XCTAssertEqual(destination.recordTrustedTransactionTxIdReceivedArguments?.txId, try TxId([UInt8](Self.claimTxId)))
+        XCTAssertEqual(destination.recordIncomingTransactionTxIdCallsCount, 1)
+        XCTAssertEqual(destination.recordIncomingTransactionTxIdReceivedArguments?.rawTransaction, Self.claimRaw)
+        XCTAssertEqual(destination.recordIncomingTransactionTxIdReceivedArguments?.txId, try TxId([UInt8](Self.claimTxId)))
         XCTAssertEqual(logger.warnFileFunctionLineCallsCount, 0)
     }
 
@@ -503,18 +503,21 @@ final class GiftCardTests: ZcashTestCase {
         let recorded = await GiftCardRedeemer.record(results, in: destination, rawTransaction: { _ in Self.claimRaw }, logger: logger)
 
         XCTAssertTrue(recorded)
-        XCTAssertEqual(destination.recordTrustedTransactionTxIdCallsCount, 1)
-        XCTAssertEqual(destination.recordTrustedTransactionTxIdReceivedArguments?.txId, try TxId([UInt8](Self.claimTxId)))
+        XCTAssertEqual(destination.recordIncomingTransactionTxIdCallsCount, 1)
+        XCTAssertEqual(destination.recordIncomingTransactionTxIdReceivedArguments?.txId, try TxId([UInt8](Self.claimTxId)))
 
         // Nothing accepted: nothing to record, and nothing claims to have been.
         let rejectedOnly = await GiftCardRedeemer.record(
             [.grpcFailure(txId: other, error: .timeOut)],
             in: destination,
-            rawTransaction: { _ in XCTFail("no lookup for a rejected transaction"); return nil },
+            rawTransaction: { _ in
+                XCTFail("no lookup for a rejected transaction")
+                return nil
+            },
             logger: logger
         )
         XCTAssertFalse(rejectedOnly)
-        XCTAssertEqual(destination.recordTrustedTransactionTxIdCallsCount, 1)
+        XCTAssertEqual(destination.recordIncomingTransactionTxIdCallsCount, 1)
     }
 
     func testRedeemWithoutADestinationTouchesNone() async throws {
@@ -550,7 +553,7 @@ final class GiftCardTests: ZcashTestCase {
 
     func testADestinationFailureIsLoggedAndReportedNotThrown() async {
         let destination = makeDestination()
-        destination.recordTrustedTransactionTxIdThrowableError = ZcashError.rustDecryptAndStoreTransaction("destination is busy")
+        destination.recordIncomingTransactionTxIdThrowableError = ZcashError.rustDecryptAndStoreTransaction("destination is busy")
         let logger = makeLogger()
 
         let recorded = await GiftCardRedeemer.record(
@@ -583,7 +586,7 @@ final class GiftCardTests: ZcashTestCase {
         )
 
         XCTAssertFalse(recorded)
-        XCTAssertEqual(destination.recordTrustedTransactionTxIdCallsCount, 0)
+        XCTAssertEqual(destination.recordIncomingTransactionTxIdCallsCount, 0)
         XCTAssertEqual(logger.warnFileFunctionLineCallsCount, 1)
     }
 

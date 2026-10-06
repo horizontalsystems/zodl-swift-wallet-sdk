@@ -1928,10 +1928,10 @@ public actor SlipstreamSynchronizer: Synchronizer {
         }
     }
 
-    // Trusted external transactions (ZIP 315): straight to the wallet database, like
-    // `SDKSynchronizer`; see `TrustedTransactionRecording`.
+    // Immediate incoming transactions: straight to the wallet database, like
+    // `SDKSynchronizer`; see `IncomingTransactionRecording`.
 
-    func recordTrustedTransaction(_ rawTransaction: Data, txId: TxId) async throws {
+    func recordIncomingTransaction(_ rawTransaction: Data, txId: TxId) async throws {
         let storedTxId = try await initializer.rustBackend.decryptAndStoreTransaction(
             txBytes: rawTransaction.bytes,
             minedHeight: nil
@@ -1939,11 +1939,10 @@ public actor SlipstreamSynchronizer: Synchronizer {
         guard storedTxId == Data(txId.id) else {
             throw ZcashError.synchronizerTrustedTransactionIdMismatch
         }
-        try await initializer.rustBackend.setTransactionTrust(txId: storedTxId, trusted: true)
+        try await initializer.rustBackend.setTransactionTrust(txId: storedTxId, trusted: false)
     }
 
-    /// Marks a stored transaction as trusted or untrusted (ZIP 315). Internal: see
-    /// `TrustedTransactionRecording`.
+    /// Marks a stored transaction as trusted or untrusted (ZIP 315). Internal to the SDK.
     func setTransactionTrust(txId: TxId, trusted: Bool) async throws {
         try await initializer.rustBackend.setTransactionTrust(txId: Data(txId.id), trusted: trusted)
     }
@@ -2998,4 +2997,4 @@ private extension SlipstreamSynchronizer {
     }
 }
 
-extension SlipstreamSynchronizer: TrustedTransactionRecording {}
+extension SlipstreamSynchronizer: IncomingTransactionRecording {}

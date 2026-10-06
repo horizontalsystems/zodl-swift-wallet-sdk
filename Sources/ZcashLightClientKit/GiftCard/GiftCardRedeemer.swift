@@ -73,10 +73,9 @@ public struct GiftCardStatus: Equatable {
 ///    the card's key — which its issuer can rederive — cannot reveal where the funds went. It only
 ///    spends Orchard and Ironwood notes to an Orchard receiver, so it never downloads the Sapling
 ///    parameters. Given the user's own synchronizer as the destination, the claim is recorded
-///    there at once as a trusted transaction (ZIP 315), so the main wallet shows it immediately
-///    and can spend it after 3 confirmations instead of the 10 of an ordinary external receive.
-///    That is sound because the claim spends notes that already had 10 confirmations in the card
-///    wallet, and this device built and signed it; see `docs/GIFT_CARDS.md`.
+///    there at once as an untrusted transaction (ZIP 315), so the main wallet shows it immediately
+///    and can spend it after the default ten confirmations for an external receive. The issuer
+///    and anyone holding the link share the card's spending key; see `docs/GIFT_CARDS.md`.
 /// 3. ``cleanup()`` stops the card wallet and deletes every file it created.
 ///
 /// ### Isolation and lifecycle
@@ -119,10 +118,9 @@ public actor GiftCardRedeemer {
         /// The submission result of each created transaction (usually one). A `.success` means a
         /// server accepted it; the funds arrive once it is mined.
         public let results: [TransactionSubmitResult]
-        /// Whether every accepted claim transaction was handed to the destination synchronizer as a
-        /// trusted transaction. `false` when no destination was given, when no transaction was
-        /// accepted, or when the destination failed to record one (including when the claim does
-        /// not involve the destination's wallet, so it stored nothing); the redemption itself is
+        /// Whether every accepted claim transaction was handed to the destination synchronizer as an
+        /// untrusted transaction. `false` when no destination was given, when no transaction was
+        /// accepted, or when the destination failed to record one; the redemption itself is
         /// unaffected, and the destination learns about the claim when it next syncs, as an
         /// ordinary external receive.
         public let recordedInDestination: Bool
@@ -276,7 +274,7 @@ public actor GiftCardRedeemer {
     }
 
     /// Sends the card's entire spendable balance, minus the fee, to `recipient`, and records the
-    /// claim in `destination` as a trusted transaction.
+    /// claim in `destination` as an untrusted transaction.
     ///
     /// The transaction discards the outgoing viewing key, so the card's key cannot reveal the
     /// recipient or the amount, and it does not need the Sapling parameters when `recipient` has
@@ -284,10 +282,11 @@ public actor GiftCardRedeemer {
     /// swept; value still waiting for confirmations stays on the card.
     ///
     /// When `destination` is given, every accepted claim transaction is stored in it once the
-    /// submission is over, and marked as trusted: the wallet
-    /// shows the receive at once, and treats it as trusted in the sense of
-    /// [ZIP 315](https://zips.z.cash/zip-0315) — this device authored the transaction — so the funds
-    /// are spendable after 3 confirmations rather than the 10 of an external receive. This works
+    /// submission is over, and marked as untrusted: the wallet shows the receive at once, and
+    /// follows the ordinary external-receive policy of [ZIP 315](https://zips.z.cash/zip-0315).
+    /// The default transfer policy requires ten confirmations before its funds are spendable.
+    /// Constructing the claim here does not establish exclusive control over the card's inputs,
+    /// because its issuer and anyone holding the link share the spending key. This works
     /// while `destination` is stopped. A failure to record never fails the redemption, since the
     /// funds are already on their way on chain: it is logged, and reported through
     /// ``Redemption/recordedInDestination``; the destination then learns about the claim when it
@@ -419,7 +418,7 @@ public actor GiftCardRedeemer {
 
         var recorded = false
         if let destination {
-            if let recorder = destination as? TrustedTransactionRecording {
+            if let recorder = destination as? IncomingTransactionRecording {
                 let cardWallet = initializer.rustBackend
                 recorded = await Self.record(
                     results,
@@ -428,7 +427,9 @@ public actor GiftCardRedeemer {
                     logger: initializer.logger
                 )
             } else {
-                initializer.logger.warn("Gift card: the destination cannot record trusted transactions; it will learn about the claim from the chain")
+                initializer.logger.warn(
+                    "Gift card: the destination cannot record incoming transactions; it will learn about the claim from the chain"
+                )
             }
         }
         return Redemption(results: results, recordedInDestination: recorded)
@@ -596,7 +597,7 @@ extension GiftCardRedeemer {
         }
     }
 
-    /// Hands every accepted transaction in `results` to `destination` as a trusted transaction.
+    /// Hands every accepted transaction in `results` to `destination` as an untrusted receive.
     ///
     /// Nothing here can fail the redemption: the transactions are already with the servers. A
     /// missing raw transaction or a destination error is logged — without the error's associated
@@ -610,7 +611,7 @@ extension GiftCardRedeemer {
     ///   recorded.
     static func record(
         _ results: [TransactionSubmitResult],
-        in destination: TrustedTransactionRecording,
+        in destination: IncomingTransactionRecording,
         rawTransaction: (Data) async throws -> Data?,
         logger: Logger
     ) async -> Bool {
@@ -622,7 +623,7 @@ extension GiftCardRedeemer {
                     logger.warn("Gift card: the claim transaction is not in the card wallet; the destination will learn about it from the chain")
                     return false
                 }
-                try await destination.recordTrustedTransaction(raw, txId: try TxId([UInt8](txId)))
+                try await destination.recordIncomingTransaction(raw, txId: try TxId([UInt8](txId)))
                 recordedAny = true
             } catch {
                 logger.warn("Gift card: recording the claim in the destination wallet failed: \(error.localizedDescription)")

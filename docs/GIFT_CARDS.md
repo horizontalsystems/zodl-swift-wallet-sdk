@@ -85,45 +85,35 @@ untrusted, and `check()` reports `.pending` until it has 10 confirmations. This 
 matters: the issuer can rederive the card's key, and could in principle try to undo the funding
 with a reorg. Ten confirmations is ZIP 315's bar for funds that someone else controlled.
 
-**The claim side: 3.** The claim spends only notes that already had 10 confirmations, and this
-device chose its recipient, built it and signed it. To the main wallet it looks like an external
-receive, which would wait 10 confirmations more; ZIP 315 lets a wallet "enable specific external
-transactions as trusted", and the SDK records the claim as trusted, so the main wallet can spend
-the gift after 3 confirmations — the same wait as its own change.
+**The claim side: 10.** The destination records the claim as an untrusted external receive and
+uses the default ten-confirmation wait. Even after the card's funding has ten confirmations,
+the issuer and anyone holding the link still share its spending key and could construct a
+competing spend of the same inputs. Building and signing the claim on this device therefore does
+not establish exclusive control over those inputs. This is the shared-key risk that motivates
+the ordinary untrusted policy; it is not a claim that an attack has been reproduced.
 
-That is a product decision, and it carries a residual risk that the 10-confirmation rule would have
-covered. The card's spending key is in the link, so anyone holding the link — including whoever
-minted the card — can sign a competing spend of the same notes. If such a spend wins a reorg of 3
-to 9 blocks, the claim is undone, and anything the user already spent from the gift after its
-third confirmation is undone with it. The SDK accepts that risk for gift cards in exchange for the
-shorter wait; it does not apply to the card side, which keeps the full 10.
-
-## Trust of the claim transaction
+## Immediate claim recording
 
 - Pass the main wallet's synchronizer as `recordIn:`. Once a server has accepted the claim,
   `GiftCardRedeemer` reads the raw transaction back from the card wallet and stores it in the
-  destination (the receive shows at once, unmined, with its memo), marked as trusted. The main
-  wallet can then spend the gift after 3 confirmations instead of 10. The next sync mines the
-  stored transaction as usual.
+  destination (the receive shows at once, unmined, with its memo), explicitly marked as untrusted.
+  The main wallet follows its normal external-receive policy: ten confirmations by default before
+  the gift becomes spendable. The next sync mines the stored transaction as usual.
 - Only the SDK's own synchronizers (`SDKSynchronizer`, `SlipstreamSynchronizer`) can record the
-  claim. The trust calls are internal to the SDK: which transaction to trust is decided by the
-  redeemer, never by a caller with an arbitrary transaction or id. With any other conformer,
-  `recordedInDestination` is `false` and the claim arrives through sync.
+  claim. Recording is internal to the SDK. With any other conformer, `recordedInDestination` is
+  `false` and the claim arrives through sync.
 - The call goes straight to the wallet database, so it works while the main synchronizer is
   stopped — which is how an app typically runs a claim, so the two wallets do not compete for the
   shared database executor. Restart the main synchronizer afterwards.
 - Recording can never fail the redemption: the funds are already on their way. A failure is logged
   and reported as `Redemption.recordedInDestination == false`; the main wallet then learns about the
-  claim from the chain, as an ordinary (untrusted, 10-confirmation) receive. Nothing is lost.
-- `recordedInDestination` is `true` only when the claim is actually stored in the destination and
-  marked as trusted. A claim that does not involve the destination's wallet (`recordIn:` is not the
-  wallet `recipient` belongs to) is not stored there, so nothing is trusted and the flag is `false`.
+  claim from the chain, as an ordinary untrusted receive. Nothing is lost.
 - Only accepted submissions (`.success`) are recorded. A transaction rejected by every server is
   not stored in the destination.
-- Trust shortens the wait, and so weakens safety against reorgs for the claim: a reorg of 3 to 9
-  blocks that replaces it with a competing spend by another holder of the card link undoes a gift
-  the user may already have spent from (see [Confirmations](#confirmations-zip-315)). This is an
-  accepted product decision. Trust never makes an unmined output spendable.
+- Recording a claim explicitly clears any prior trusted status for that transaction, including
+  when repeated. It does not migrate other stored trust records or change the SDK's general
+  support for marking transactions as trusted or untrusted.
+- Immediate history visibility does not make an unmined output spendable.
 
 ## Lifecycle and concurrency
 
