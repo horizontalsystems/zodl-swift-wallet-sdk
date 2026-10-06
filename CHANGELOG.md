@@ -64,8 +64,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GiftCardRedeemer.Redemption` with the submission `results` and `recordedInDestination`, which is
   `false` — never an error — when the destination could not record the claim, including when the
   claim does not involve the destination's wallet and so was not stored there; the funds are on
-  chain once mined, and the destination learns about them when it next syncs. Anyone holding the
-  card link, including whoever minted the card, can sign a competing spend of its notes, so the
+  chain once mined. When the claim pays the destination wallet, normal sync can discover it;
+  an unrelated `recordIn:` wallet does not receive the claim. Anyone holding the card link,
+  including whoever minted the card, can sign a competing spend of its notes, so the
   claim keeps the ordinary untrusted confirmation wait. `redeem(to:memo:)`
   is unchanged and records nothing. A failure to record is logged with
   `ZcashError.synchronizerTrustedTransactionIdMismatch` (`ZSYNCO0010`) or

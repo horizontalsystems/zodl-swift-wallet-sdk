@@ -121,9 +121,9 @@ public actor GiftCardRedeemer {
         /// Whether every accepted claim transaction was handed to the destination synchronizer as an
         /// untrusted transaction. `false` when no destination was given, when no transaction was
         /// accepted, or when the destination failed to record one (including when the claim does
-        /// not involve its wallet, so it stored nothing); the redemption itself is
-        /// unaffected, and the destination learns about the claim when it next syncs, as an
-        /// ordinary external receive.
+        /// not involve its wallet, so it stored nothing). The redemption itself is unaffected.
+        /// When the claim pays this wallet, normal sync can discover it as an ordinary external
+        /// receive. An unrelated destination wallet does not receive the claim.
         public let recordedInDestination: Bool
     }
 

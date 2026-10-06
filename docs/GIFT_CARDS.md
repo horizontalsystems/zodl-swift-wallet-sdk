@@ -118,8 +118,9 @@ a ten-confirmation wait eliminate every possible reorg.
   stop. Keep ownership of the pause so other app lifecycle paths do not start the main wallet
   while the claim is running, then restart it afterwards.
 - Recording can never fail the redemption: the funds are already on their way. A failure is logged
-  and reported as `Redemption.recordedInDestination == false`; the main wallet then learns about the
-  claim from the chain, as an ordinary untrusted receive. Nothing is lost.
+  and reported as `Redemption.recordedInDestination == false`. When the claim pays the specified
+  wallet, normal sync can discover it from the chain as an ordinary untrusted receive. An unrelated
+  `recordIn:` wallet does not receive the claim.
 - `recordedInDestination` is `true` only when the claim is stored in the destination and
   explicitly marked as untrusted. A claim that does not involve the destination wallet
   (`recordIn:` is not the wallet `recipient` belongs to) is not stored there, so the flag is `false`.
