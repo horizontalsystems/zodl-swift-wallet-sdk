@@ -137,6 +137,14 @@ the ordinary untrusted policy; it is not a claim that an attack has been reprodu
   `giftCardRedeemerAlreadyActive` until the first is cleaned up or released.
 - Calls on a redeemer run one at a time, in order. Cancelling the task awaiting `check()` stops
   the wait (throws `CancellationError`); the card wallet keeps syncing until `cleanup()`.
+- A cancelled queued `check()` or `redeem(to:memo:recordIn:)` throws `CancellationError`
+  when its turn arrives. Cancellation is checked again after redemption preparation and on the
+  database executor immediately before native claim creation. Cancellation observed at these
+  checkpoints prevents storing or submitting a claim. Once synchronous native creation starts,
+  it cannot be cancelled or rolled back; cancellation does not establish whether the claim was
+  created or submitted, so recheck the card before retrying.
+- `cleanup()` runs to completion even when the calling task is cancelled, including when it was
+  queued behind another operation.
 - `cleanup()` never loses funds: the key is in the link. If a submission failed, clean up and use
   a new redeemer to retry, because the old one treats the notes as spent until its transaction
   expires.

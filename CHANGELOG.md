@@ -112,6 +112,13 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Fixed
 
+- `GiftCardRedeemer.check()` and the `redeem` overloads now throw `CancellationError` for
+  cancelled queued calls before running them. Cancellation observed after redemption preparation
+  or immediately before native claim creation also prevents creating and submitting a claim.
+  Synchronous native creation already underway cannot be rolled back; recheck the card before
+  retrying when cancellation races it. `cleanup()` still runs when its caller is cancelled.
+  Public signatures are unchanged; no call-site changes are needed. (MOB-2138)
+
 - `GiftCardRedeemer.redeem(to:memo:recordIn:)` records accepted claims as untrusted, including
   clearing a prior trusted status when the same claim is recorded again. Incoming gifts remain
   visible immediately and use the normal external-receive wait of 10 confirmations by default.

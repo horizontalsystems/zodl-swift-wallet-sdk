@@ -1365,6 +1365,9 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
     ) async throws -> [Data] {
         let proposalBytes = try proposal.serializedData(partial: false).bytes
 
+        // Admission may have waited on another wallet's write. Native creation is synchronous
+        // and cannot be rolled back, so cancellation must be checked here, before it starts.
+        try Task.checkCancellation()
         let txIdsPtr = proposalBytes.withUnsafeBufferPointer { proposalPtr in
             usk.bytes.withUnsafeBufferPointer { uskPtr in
                 zcashlc_create_proposed_transactions(

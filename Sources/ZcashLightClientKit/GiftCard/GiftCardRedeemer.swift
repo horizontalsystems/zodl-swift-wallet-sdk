@@ -168,6 +168,28 @@ public actor GiftCardRedeemer {
         storageDirectory: URL = GiftCardRedeemer.defaultStorageDirectory,
         loggingPolicy: Initializer.LoggingPolicy = .noLogging
     ) throws {
+        try self.init(
+            card: card,
+            network: network,
+            endpoint: endpoint,
+            isTorEnabled: isTorEnabled,
+            storageDirectory: storageDirectory,
+            loggingPolicy: loggingPolicy,
+            container: DIContainer(),
+            makeSynchronizer: { SDKSynchronizer(initializer: $0) }
+        )
+    }
+
+    init(
+        card: GiftCard,
+        network: ZcashNetwork,
+        endpoint: LightWalletEndpoint,
+        isTorEnabled: Bool,
+        storageDirectory: URL,
+        loggingPolicy: Initializer.LoggingPolicy,
+        container: DIContainer,
+        makeSynchronizer: (Initializer) -> SDKSynchronizer
+    ) throws {
         guard card.network == network.networkType else {
             throw ZcashError.giftCardNetworkMismatch
         }
@@ -186,6 +208,7 @@ public actor GiftCardRedeemer {
         let rootDirectory = storageDirectory.appendingPathComponent(alias.description, isDirectory: true)
 
         let initializer = Initializer(
+            container: container,
             cacheDbURL: nil,
             fsBlockDbRoot: rootDirectory.appendingPathComponent("fs_cache", isDirectory: true),
             generalStorageURL: rootDirectory.appendingPathComponent("general_storage", isDirectory: true),
@@ -214,7 +237,7 @@ public actor GiftCardRedeemer {
         self.rootDirectory = rootDirectory
         self.initializer = initializer
         self.checkpointSource = checkpointSource
-        self.synchronizer = SDKSynchronizer(initializer: initializer)
+        self.synchronizer = makeSynchronizer(initializer)
     }
 
     /// Fetches the server's tree state for the block before the card's birthday, so the card
@@ -306,7 +329,8 @@ public actor GiftCardRedeemer {
     ///   ``ZcashError/giftCardNetworkMismatch`` for an address on another network, and the
     ///   proposal and creation errors of `Synchronizer.proposeSendMax(accountUUID:recipient:memo:mode:)`
     ///   and `Synchronizer.createProposedTransactions(proposal:spendingKey:ovkPolicy:)`. The
-    ///   destination's errors are never thrown.
+    ///   destination's errors are never thrown. Cancellation observed before native creation throws
+    ///   `CancellationError`; creation already underway cannot be rolled back.
     public func redeem(to recipient: UnifiedAddress, memo: Memo?, recordIn destination: Synchronizer?) async throws -> Redemption {
         try await serialized { redeemer in
             try await redeemer.performRedeem(to: recipient, memo: memo, recordIn: destination)
@@ -319,29 +343,42 @@ public actor GiftCardRedeemer {
     /// - Throws: the error from deleting the files, if any; the wallet is stopped and the card
     ///   freed regardless.
     public func cleanup() async throws {
-        try await serialized { redeemer in
+        try await serialized(cancellationPolicy: .teardown) { redeemer in
             try await redeemer.performCleanup()
         }
     }
 
     // MARK: - Private
 
+    private enum CancellationPolicy {
+        case cancellable
+        case teardown
+    }
+
     /// Runs `operation` after every operation issued before it has finished. Actor isolation alone
     /// does not serialize these calls: each suspends at its awaits, which would let a redeem start
     /// while a check is still syncing, or a cleanup delete the wallet under a redeem.
-    private func serialized<T>(_ operation: @escaping (GiftCardRedeemer) async throws -> T) async throws -> T {
+    private func serialized<T>(
+        cancellationPolicy: CancellationPolicy = .cancellable,
+        _ operation: @escaping (GiftCardRedeemer) async throws -> T
+    ) async throws -> T {
         let previous = tail
         let task = Task<T, Error> {
             await previous?.value
+            if cancellationPolicy == .cancellable {
+                try Task.checkCancellation()
+            }
             return try await operation(self)
         }
         tail = Task { _ = try? await task.value }
-        // The operation runs in its own task so that the next one can wait for it; forward the
-        // caller's cancellation to it.
+        // Teardown must finish even when its caller is cancelled. Cancellable work forwards
+        // cancellation into its own task, including while waiting behind a predecessor.
         return try await withTaskCancellationHandler {
             try await task.value
         } onCancel: {
-            task.cancel()
+            if cancellationPolicy == .cancellable {
+                task.cancel()
+            }
         }
     }
 
@@ -405,6 +442,8 @@ public actor GiftCardRedeemer {
             try tool.deriveUnifiedSpendingKey(seed: seed, accountIndex: Zip32AccountIndex(0))
         }
 
+        // Preparatory awaits may ignore cancellation. Check before creation can store a claim.
+        try Task.checkCancellation()
         let stream = try await synchronizer.createProposedTransactions(
             proposal: proposal,
             spendingKey: spendingKey,
