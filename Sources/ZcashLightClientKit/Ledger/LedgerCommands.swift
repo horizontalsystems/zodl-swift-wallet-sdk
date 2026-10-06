@@ -64,12 +64,18 @@ enum LedgerCommands {
 /// An actor alone does not serialize them: it is reentrant at every suspension point, so two exchanges
 /// awaiting a device reply would interleave their commands. A caller brackets its operation with
 /// ``acquire()`` and ``release()``, releasing on every path it takes once ``acquire()`` returns. A
-/// caller cancelled while still waiting for ``acquire()`` never holds the gate, so it must not call
-/// ``release()``: a throw from ``acquire()`` means exactly that.
+/// cancelled caller never comes out of ``acquire()`` holding the gate: either it throws before ever
+/// queuing, or it throws after being handed the gate and passes it straight on, so it must call
+/// ``release()`` only when ``acquire()`` itself returned normally.
 actor LedgerSerialGate {
     private var isBusy = false
     private var waiters: [(id: Int, continuation: CheckedContinuation<Void, Error>)] = []
     private var nextWaiterID = 0
+
+    /// How many callers are queued behind the one currently holding the gate. Test-only visibility
+    /// into otherwise-private state, so a test can wait for a caller to actually be queued instead
+    /// of guessing with a sleep.
+    var queuedCount: Int { waiters.count }
 
     /// Waits until no other operation holds the gate, then holds it.
     ///
@@ -89,6 +95,17 @@ actor LedgerSerialGate {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 waiters.append((id, continuation))
+            }
+
+            // The continuation above resumed normally, so `release()` reached this waiter and
+            // handed it the gate -- but `cancelWaiter(id)` runs in a separate `Task` hop off
+            // `onCancel` below, which may not have run yet. A caller cancelled in that narrow
+            // window must not come out of this call holding the gate: pass it on to whoever is
+            // next, instead of returning normally to a cancelled task whose own operation would
+            // fail later and close the transport out from under the caller it was just handed to.
+            if Task.isCancelled {
+                release()
+                throw CancellationError()
             }
         } onCancel: {
             Task { await self.cancelWaiter(id) }
