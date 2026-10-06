@@ -23,6 +23,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disconnect, a malformed reply, or a cancelled task); open a new connection then. A task cancelled
   before its exchange starts, between commands or while queued behind another exchange on the same
   transport, leaves the transport open.
+  Connecting again to a device that already has a live connection replaces it: the displaced
+  connection fails with the non-restartable `ZcashError.ledgerTransportReplaced` instead, since the
+  restartable `ledgerTransportClosed` would invite it to reconnect and displace the new connection
+  in turn.
 - `LedgerAPDUTransport`, the protocol the pairing and signing code depends on
   (`exchange(_:timeout:)`, `close()`), for custom transports and test doubles.
 - `LedgerDevice(transport:networkType:)`: `appVersion()` (a `LedgerAppVersion`),
@@ -60,7 +64,7 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `proposeTransfer`, `proposefulfillingPaymentURI` and `proposeShielding` read it to keep a
   Ledger-tagged account's proposals to at most one change output, matching the Ledger Zcash app's
   one-change-output limit; migration run sizing is unaffected and stays the default.
-- New `ZcashError` cases `ZLEDG0001`–`ZLEDG0023`, one per Ledger failure the wallet handles
+- New `ZcashError` cases `ZLEDG0001`–`ZLEDG0024`, one per Ledger failure the wallet handles
   differently (user rejection, wrong app, app too old, device mismatch, derivation budget spent,
   device refusal with its status word, transaction not signable, and the Bluetooth failures), and
   `ZcashError.ledgerIsRestartable`, which says whether a fresh attempt could succeed. No error

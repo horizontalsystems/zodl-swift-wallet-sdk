@@ -1279,4 +1279,9 @@ enum ZcashErrorDefinition {
     /// A fresh attempt may succeed if the user approves it.
     // sourcery: code="ZLEDG0023"
     case ledgerAppOpenRejected
+    /// A later connection to the same Ledger device replaced this one before it was done being used.
+    /// Not restartable: open a fresh connection instead of reconnecting on this error, since
+    /// reconnecting would only displace whichever connection replaced this one in turn.
+    // sourcery: code="ZLEDG0024"
+    case ledgerTransportReplaced
 }

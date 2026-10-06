@@ -97,7 +97,7 @@ extension ZcashError {
         case .ledgerAppTooOld, .ledgerDeviceMismatch, .ledgerCapsMismatch,
             .ledgerTransactionNotSignable, .ledgerMalformedReply,
             .ledgerInvalidInput, .ledgerInternal, .ledgerBluetoothUnsupported, .ledgerBluetoothUnauthorized,
-            .ledgerBluetoothPairingRefused, .ledgerAppNotInstalled:
+            .ledgerBluetoothPairingRefused, .ledgerAppNotInstalled, .ledgerTransportReplaced:
             return false
         default:
             return nil

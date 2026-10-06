@@ -645,4 +645,6 @@ public enum ZcashErrorCode: String {
     case ledgerAppNotInstalled = "ZLEDG0022"
     /// The user declined opening the Zcash app.
     case ledgerAppOpenRejected = "ZLEDG0023"
+    /// A later connection to the same Ledger device replaced this one before it was done being used.
+    case ledgerTransportReplaced = "ZLEDG0024"
 }

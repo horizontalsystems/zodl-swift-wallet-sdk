@@ -595,6 +595,19 @@ final class LedgerErrorMappingTests: XCTestCase {
             .zcashError
         XCTAssertEqual(budgetExhausted.ledgerIsRestartable, true)
     }
+
+    /// `connect(to:)` displacing a live connection with this error cannot be exercised here: it
+    /// needs a real `CBPeripheral`, which only CoreBluetooth can hand out. This covers the error
+    /// value itself instead.
+    func testADisplacedConnectionsErrorIsNotRestartable() {
+        let error = ZcashError.ledgerTransportReplaced
+        XCTAssertEqual(error.ledgerIsRestartable, false)
+        XCTAssertEqual(error.code, .ledgerTransportReplaced)
+        XCTAssertEqual(
+            error.message,
+            "A later connection to the same Ledger device replaced this one before it was done being used."
+        )
+    }
 }
 
 // MARK: - Values

@@ -46,6 +46,12 @@ public final class LedgerBluetoothScanner: @unchecked Sendable {
 
     /// Connects to a device, subscribes to its replies and negotiates the frame size.
     ///
+    /// Connecting to a device that already has a live connection replaces it: the last caller to
+    /// connect always wins. The displaced connection fails with the non-restartable
+    /// ``ZcashError/ledgerTransportReplaced``, never the restartable
+    /// ``ZcashError/ledgerTransportClosed``, since reconnecting on this error would only displace
+    /// whichever connection replaced it in turn.
+    ///
     /// - Parameters:
     ///   - device: A device from ``devices()``.
     ///   - timeout: How long connecting may take, in seconds, pairing included: the user confirms the
@@ -285,7 +291,11 @@ final class LedgerBluetoothCentral: NSObject, CBCentralManagerDelegate, @uncheck
             }
 
             if let existing = connections[device.id] {
-                existing.fail(with: .ledgerTransportClosed)
+                // Last caller to connect wins. `.ledgerTransportReplaced` rather than the
+                // restartable `.ledgerTransportClosed`: that would invite the displaced owner to
+                // reconnect, which would just displace this new connection in turn.
+                logger?.debug("Ledger BLE: a new connection replaced an existing one")
+                existing.fail(with: .ledgerTransportReplaced)
             }
 
             let connection = LedgerBluetoothConnection(peripheral: peripheral, central: self)

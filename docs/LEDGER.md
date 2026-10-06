@@ -202,7 +202,7 @@ into up to four outputs of at least 0.1 ZEC each, unchanged.
 
 ## Errors
 
-Every Ledger failure is a `ZcashError` from the `ledger` family (`ZLEDG0001`–`ZLEDG0023`), or
+Every Ledger failure is a `ZcashError` from the `ledger` family (`ZLEDG0001`–`ZLEDG0024`), or
 `CancellationError`. `ZcashError.ledgerIsRestartable` says whether a fresh attempt could succeed:
 after the user declined, after the device is not running the Zcash app or has exhausted its
 derivation budget (opening or reopening it lets a fresh attempt succeed), after a device condition

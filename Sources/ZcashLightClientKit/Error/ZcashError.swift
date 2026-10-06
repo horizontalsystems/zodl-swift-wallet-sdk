@@ -1166,6 +1166,11 @@ public enum ZcashError: Equatable, Error {
     /// A fresh attempt may succeed if the user approves it.
     /// ZLEDG0023
     case ledgerAppOpenRejected
+    /// A later connection to the same Ledger device replaced this one before it was done being used.
+    /// Not restartable: open a fresh connection instead of reconnecting on this error, since
+    /// reconnecting would only displace whichever connection replaced this one in turn.
+    /// ZLEDG0024
+    case ledgerTransportReplaced
 
     public var message: String {
         switch self {
@@ -1487,6 +1492,7 @@ public enum ZcashError: Equatable, Error {
         case .ledgerTransportFailed: return "The Ledger transport failed."
         case .ledgerAppNotInstalled: return "The Zcash app is not installed on the Ledger."
         case .ledgerAppOpenRejected: return "The user declined opening the Zcash app."
+        case .ledgerTransportReplaced: return "A later connection to the same Ledger device replaced this one before it was done being used."
         }
     }
 
@@ -1827,6 +1833,7 @@ public enum ZcashError: Equatable, Error {
         case .ledgerTransportFailed: return .ledgerTransportFailed
         case .ledgerAppNotInstalled: return .ledgerAppNotInstalled
         case .ledgerAppOpenRejected: return .ledgerAppOpenRejected
+        case .ledgerTransportReplaced: return .ledgerTransportReplaced
         }
     }
 
