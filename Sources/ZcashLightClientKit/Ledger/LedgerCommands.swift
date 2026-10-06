@@ -63,20 +63,35 @@ enum LedgerCommands {
 ///
 /// An actor alone does not serialize them: it is reentrant at every suspension point, so two exchanges
 /// awaiting a device reply would interleave their commands. A caller brackets its operation with
-/// ``acquire()`` and ``release()``, releasing on every path.
+/// ``acquire()`` and ``release()``, releasing on every path it takes once ``acquire()`` returns. A
+/// caller cancelled while still waiting for ``acquire()`` never holds the gate, so it must not call
+/// ``release()``: a throw from ``acquire()`` means exactly that.
 actor LedgerSerialGate {
     private var isBusy = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var waiters: [(id: Int, continuation: CheckedContinuation<Void, Error>)] = []
+    private var nextWaiterID = 0
 
     /// Waits until no other operation holds the gate, then holds it.
-    func acquire() async {
+    ///
+    /// Throws `CancellationError` instead of holding the gate when the calling task is already
+    /// cancelled, or becomes cancelled while queued. Admission otherwise stays in arrival order.
+    func acquire() async throws {
+        try Task.checkCancellation()
+
         guard isBusy else {
             isBusy = true
             return
         }
 
-        await withCheckedContinuation { continuation in
-            waiters.append(continuation)
+        let id = nextWaiterID
+        nextWaiterID += 1
+
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                waiters.append((id, continuation))
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id) }
         }
     }
 
@@ -87,6 +102,17 @@ actor LedgerSerialGate {
             return
         }
 
-        waiters.removeFirst().resume()
+        waiters.removeFirst().continuation.resume()
+    }
+
+    /// Removes a cancelled waiter and resumes it with `CancellationError`, unless it has already been
+    /// admitted by ``release()``: whichever of the two reaches it first wins, and the other finds it
+    /// already gone.
+    private func cancelWaiter(_ id: Int) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+
+        waiters.remove(at: index).continuation.resume(throwing: CancellationError())
     }
 }

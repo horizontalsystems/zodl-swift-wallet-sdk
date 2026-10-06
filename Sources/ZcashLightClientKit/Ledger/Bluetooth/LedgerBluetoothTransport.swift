@@ -26,7 +26,7 @@ public actor LedgerBluetoothTransport: LedgerAPDUTransport {
     }
 
     public func exchange(_ apdu: Data, timeout: TimeInterval?) async throws -> Data {
-        await gate.acquire()
+        try await gate.acquire()
         do {
             let reply = try await connection.exchange(apdu, timeout: timeout)
             await gate.release()

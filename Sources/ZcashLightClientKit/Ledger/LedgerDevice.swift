@@ -241,7 +241,7 @@ public actor LedgerDevice {
     /// Runs `operation` once no other call on this device is in progress, and converts its failure into
     /// the public error.
     private func serialized<T>(_ operation: () async throws -> T) async throws -> T {
-        await gate.acquire()
+        try await gate.acquire()
         do {
             let result = try await operation()
             await gate.release()
