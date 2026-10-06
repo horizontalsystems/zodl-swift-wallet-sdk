@@ -30,7 +30,8 @@ public final class LedgerBluetoothScanner: @unchecked Sendable {
     /// The stream yields every device found so far each time the list changes, devices the system is
     /// already connected to included. It ends with ``ZcashError/ledgerBluetoothUnsupported``,
     /// ``ZcashError/ledgerBluetoothUnauthorized`` or ``ZcashError/ledgerBluetoothPoweredOff`` when
-    /// Bluetooth is unavailable. Scanning stops when the iteration ends; one scan runs at a time, and a
+    /// Bluetooth is unavailable, or ``ZcashError/ledgerBluetoothDisconnected`` when it resets while
+    /// this is the active scan. Scanning stops when the iteration ends; one scan runs at a time, and a
     /// new one ends the previous stream.
     public func devices() -> AsyncThrowingStream<[LedgerBluetoothDevice], Error> {
         // Each element is the whole list, so a slow consumer only needs the latest one.

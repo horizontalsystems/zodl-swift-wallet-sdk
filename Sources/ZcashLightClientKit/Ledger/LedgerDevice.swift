@@ -11,9 +11,11 @@ import Foundation
 /// which needs the wallet database.
 ///
 /// Every method throws a ``ZcashError`` from the `ledger` family, or `CancellationError` when its task
-/// is cancelled. A method whose exchange fails on the transport, or is cancelled, closes the
-/// transport: open a new connection before trying again. Calls are serialized; a call made while
-/// another is in progress waits for it.
+/// is cancelled. A method whose exchange fails on the transport, or is cancelled once it has started,
+/// closes the transport: open a new connection before trying again. A call cancelled while only
+/// queued, waiting for another call already in progress, throws `CancellationError` without closing
+/// anything: it never reached the transport. Calls are serialized; a call made while another is in
+/// progress waits for it.
 ///
 /// The caller owns every transport: the one passed to `init` and every one a `pairAccount`
 /// `reconnect` function returns. This closes a transport whose exchange failed (closing is idempotent)

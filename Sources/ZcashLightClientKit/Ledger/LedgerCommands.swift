@@ -67,6 +67,10 @@ enum LedgerCommands {
 /// cancelled caller never comes out of ``acquire()`` holding the gate: either it throws before ever
 /// queuing, or it throws after being handed the gate and passes it straight on, so it must call
 /// ``release()`` only when ``acquire()`` itself returned normally.
+///
+/// This depends on `withTaskCancellationHandler` and the continuation it wraps inheriting this
+/// actor's isolation: every read and write of `waiters`, from `acquire()`, `release()` and
+/// `cancelWaiter(_:)` alike, runs on the actor, so none of them race the array directly.
 actor LedgerSerialGate {
     private var isBusy = false
     private var waiters: [(id: Int, continuation: CheckedContinuation<Void, Error>)] = []

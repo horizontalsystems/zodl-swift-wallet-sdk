@@ -117,8 +117,8 @@ Pass `nil` for the seed fingerprint and the ZIP 32 account index: a Ledger never
 fingerprint, and the binding carries the account index the signing session needs.
 `Account.ledgerKeySource` (`"ledger"`) lets the wallet recognize its Ledger accounts, and the SDK
 does read it once a proposal is built for the account: `change_split_policy` in `rust/src/lib.rs`
-compares the account's stored `keySource` against it case-insensitively, and only an exact match
-builds the proposal with at most one change output, the most the Ledger Zcash app can sign. An
+compares the account's stored `keySource` against it case-insensitively, and only a match builds
+the proposal with at most one change output, the most the Ledger Zcash app can sign. An
 account with no tag, a different tag, or one the lookup could not find keeps splitting change into
 up to four outputs of at least 0.1 ZEC each (see "Change outputs" below).
 
