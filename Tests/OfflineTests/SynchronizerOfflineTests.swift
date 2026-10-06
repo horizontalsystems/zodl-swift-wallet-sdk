@@ -467,24 +467,29 @@ class SynchronizerOfflineTests: ZcashTestCase {
     }
 
     /// The rust layer stores nothing for a transaction that does not involve the wallet, and then
-    /// refuses to trust it. That refusal must reach the caller, so a gift card redemption reports
-    /// the claim as not recorded instead of claiming a trust status that was never set.
-    func testRecordTrustedTransactionFailsWhenTheWalletDidNotStoreIt() async throws {
+    /// refuses to set its trust status. That refusal must reach the caller, so a gift card
+    /// redemption reports the claim as not recorded instead of reporting an unstored receive.
+    func testRecordIncomingTransactionFailsWhenTheWalletDidNotStoreIt() async throws {
         let rustBackend = ZcashRustBackendWeldingMock()
         let txIdBytes = [UInt8](repeating: 0x5A, count: 32)
         rustBackend.decryptAndStoreTransactionTxBytesMinedHeightReturnValue = Data(txIdBytes)
-        rustBackend.setTransactionTrustTxIdTrustedThrowableError = ZcashError.rustSetTransactionTrust("not stored")
+        rustBackend.setTransactionTrustTxIdTrustedClosure = { _, _ in
+            throw ZcashError.rustSetTransactionTrust("not stored")
+        }
         let synchronizer = try makeStoppedSynchronizer(rustBackend: rustBackend)
 
         do {
-            try await synchronizer.recordTrustedTransaction(Data([0x05]), txId: TxId(txIdBytes))
-            XCTFail("A transaction the wallet did not store must not be reported as trusted")
+            try await synchronizer.recordIncomingTransaction(Data([0x05]), txId: TxId(txIdBytes))
+            XCTFail("A transaction the wallet did not store must not be reported as recorded")
         } catch ZcashError.rustSetTransactionTrust {
         } catch {
             XCTFail("Unexpected error \(error.localizedDescription)")
         }
 
         XCTAssertEqual(rustBackend.decryptAndStoreTransactionTxBytesMinedHeightCallsCount, 1)
+        XCTAssertEqual(rustBackend.setTransactionTrustTxIdTrustedCallsCount, 1)
+        XCTAssertEqual(rustBackend.setTransactionTrustTxIdTrustedReceivedArguments?.txId, Data(txIdBytes))
+        XCTAssertEqual(rustBackend.setTransactionTrustTxIdTrustedReceivedArguments?.trusted, false)
     }
 
     func testSetTransactionTrustForwardsToTheRustBackend() async throws {

@@ -90,8 +90,11 @@ with a reorg. Ten confirmations is ZIP 315's bar for funds that someone else con
 uses the default ten-confirmation wait. Even after the card's funding has ten confirmations,
 the issuer and anyone holding the link still share its spending key and could construct a
 competing spend of the same inputs. Building and signing the claim on this device therefore does
-not establish exclusive control over those inputs. This is the shared-key risk that motivates
-the ordinary untrusted policy; it is not a claim that an attack has been reproduced.
+not establish exclusive control over those inputs. If a competing spend replaced a claim in a
+reorg after three to nine confirmations, a wallet using the shorter trusted wait could lose a
+gift it had already spent from. The SDK retains the ordinary untrusted wait to avoid that
+shorter-wait risk. This rationale is not a claim that an attack has been reproduced, nor does
+a ten-confirmation wait eliminate every possible reorg.
 
 ## Immediate claim recording
 
@@ -117,6 +120,9 @@ the ordinary untrusted policy; it is not a claim that an attack has been reprodu
 - Recording can never fail the redemption: the funds are already on their way. A failure is logged
   and reported as `Redemption.recordedInDestination == false`; the main wallet then learns about the
   claim from the chain, as an ordinary untrusted receive. Nothing is lost.
+- `recordedInDestination` is `true` only when the claim is stored in the destination and
+  explicitly marked as untrusted. A claim that does not involve the destination wallet
+  (`recordIn:` is not the wallet `recipient` belongs to) is not stored there, so the flag is `false`.
 - Only accepted submissions (`.success`) are recorded. A transaction rejected by every server is
   not stored in the destination.
 - Recording a claim explicitly clears any prior trusted status for that transaction, including

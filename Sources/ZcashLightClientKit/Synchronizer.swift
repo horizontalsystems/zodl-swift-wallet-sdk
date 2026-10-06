@@ -2246,6 +2246,7 @@ protocol IncomingTransactionRecording: AnyObject {
     /// - Throws: `ZcashError.rustDecryptAndStoreTransaction` if the transaction cannot be stored,
     ///   `ZcashError.synchronizerTrustedTransactionIdMismatch` if `txId` is not the id of
     ///   `rawTransaction` (the transaction is stored, but its trust status is unchanged), and
-    ///   `ZcashError.rustSetTransactionTrust` if the trust status cannot be recorded.
+    ///   `ZcashError.rustSetTransactionTrust` if the trust status cannot be recorded, which
+    ///   includes a transaction that does not involve this wallet and so was not stored.
     func recordIncomingTransaction(_ rawTransaction: Data, txId: TxId) async throws
 }

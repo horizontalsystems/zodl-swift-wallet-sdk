@@ -64,10 +64,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GiftCardRedeemer.Redemption` with the submission `results` and `recordedInDestination`, which is
   `false` — never an error — when the destination could not record the claim, including when the
   claim does not involve the destination's wallet and so was not stored there; the funds are on
-  chain regardless, and the destination learns about them when it next syncs. Trusting the claim
-  is a deliberate trade-off: anyone holding the card link, including whoever minted the card, can
-  sign a competing spend of its notes, and a reorg of 3 to 9 blocks could undo a claim the user has
-  already spent from. Wallets that do not accept that risk can pass no destination. `redeem(to:memo:)`
+  chain once mined, and the destination learns about them when it next syncs. Anyone holding the
+  card link, including whoever minted the card, can sign a competing spend of its notes, so the
+  claim keeps the ordinary untrusted confirmation wait. `redeem(to:memo:)`
   is unchanged and records nothing. A failure to record is logged with
   `ZcashError.synchronizerTrustedTransactionIdMismatch` (`ZSYNCO0010`) or
   `ZcashError.rustSetTransactionTrust` (`ZRUST0158`).
@@ -111,6 +110,11 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   releases once those exist. The voting API is unchanged.
 
 ## Fixed
+
+- Setting a transaction's trust status now fails if this wallet has not stored the transaction.
+  Gift claims sent to a recipient outside the `recordIn:` wallet report
+  `recordedInDestination == false`, rather than reporting a receive that was never stored.
+  The accepted submission remains unaffected. (MOB-2138)
 
 - `GiftCardRedeemer.cleanup()` now retains the temporary wallet and card alias until wipe
   actually completes, including when its caller is cancelled or releases its reference. A
