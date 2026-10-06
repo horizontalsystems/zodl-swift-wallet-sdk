@@ -157,9 +157,16 @@ final class LedgerBluetoothCentral: NSObject, CBCentralManagerDelegate, @uncheck
             }
 
             let error = ZcashError.ledgerBluetoothDisconnected
-            connections.values.forEach { $0.fail(with: error) }
+            // `evenWhileConnecting`: a reset is not the stale per-peripheral disconnect
+            // `fail(with:)` otherwise ignores while `.connecting` -- every connection is
+            // genuinely gone, one still opening included.
+            connections.values.forEach { $0.fail(with: error, evenWhileConnecting: true) }
             scanContinuation?.finish(throwing: error)
             scanContinuation = nil
+            // CoreBluetooth invalidates every `CBPeripheral` it handed out below `.poweredOn`, so a
+            // cached one from before the reset must not be reused once it comes back.
+            peripherals = [:]
+            discovered = [:]
         case .failure(let error):
             let waiters = stateWaiters
             stateWaiters = []
@@ -167,6 +174,9 @@ final class LedgerBluetoothCentral: NSObject, CBCentralManagerDelegate, @uncheck
             scanContinuation?.finish(throwing: error)
             scanContinuation = nil
             connections.values.forEach { $0.fail(with: error) }
+            // Same invalidation as the reset above: every state here is below `.poweredOn` too.
+            peripherals = [:]
+            discovered = [:]
         }
     }
 

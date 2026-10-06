@@ -325,14 +325,19 @@ final class LedgerBluetoothConnection: NSObject, @unchecked Sendable {
 
     /// Ends the connection for good: fails whatever is in flight with `reason` (or `CancellationError`
     /// when `nil`), refuses every later exchange, and drops the link. Called on the queue.
-    func fail(with reason: ZcashError?) {
+    /// - Parameter evenWhileConnecting: `fail(with: .ledgerBluetoothDisconnected)` is otherwise a
+    ///   no-op while `.connecting`: that disconnect belongs to an earlier connection to the same
+    ///   peripheral, whose cancellation is still being delivered, not to this one. A Bluetooth
+    ///   reset is not that stale per-peripheral signal -- every connection is genuinely gone,
+    ///   `.connecting` included -- so it passes `true` to reach a connecting connection too.
+    func fail(with reason: ZcashError?, evenWhileConnecting: Bool = false) {
         guard phase != .closed else {
             return
         }
 
         // A disconnect that arrives before this connection's link is up belongs to an earlier
         // connection to the same peripheral, whose cancellation is still being delivered.
-        if phase == .connecting, case .ledgerBluetoothDisconnected = reason {
+        if phase == .connecting, case .ledgerBluetoothDisconnected = reason, !evenWhileConnecting {
             return
         }
 
