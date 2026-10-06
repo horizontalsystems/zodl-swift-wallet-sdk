@@ -150,8 +150,9 @@ hex = "0.4"
 [dev-dependencies]
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
-# Plays the device in the Ledger signing tests (`rust/src/ledger/tests.rs`).
-secp256k1 = "0.29"
+# Plays the device in the Ledger signing tests (`rust/src/ledger/tests.rs`). Matches the engine's
+# own secp256k1 (via zcash_transparent) so the two stay one dependency instance, not two.
+secp256k1 = "0.33"
 tempfile = "3"
 tokio = { version = "1", features = ["io-util", "net", "test-util"] }
 

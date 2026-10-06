@@ -89,8 +89,8 @@ fn frames_of(bytes: &[u8], frame_size: u32) -> Vec<Vec<u8>> {
 
 /// The key the fake device answers `GET_WALLET_PUBLIC_KEY` with.
 fn device_key(byte: u8) -> secp256k1::PublicKey {
-    let sk = secp256k1::SecretKey::from_slice(&[byte; 32]).expect("a valid secret key");
-    secp256k1::PublicKey::from_secret_key(&secp256k1::Secp256k1::signing_only(), &sk)
+    let sk = secp256k1::SecretKey::from_secret_bytes([byte; 32]).expect("a valid secret key");
+    secp256k1::PublicKey::from_secret_key(&sk)
 }
 
 /// A `GET_WALLET_PUBLIC_KEY` reply for `key`: `pk_len ‖ pk ‖ addr_len ‖ addr ‖ chain_code`.
@@ -652,20 +652,17 @@ impl FakeLedger<'_> {
                 let signer = Signer::new(self.shaped.clone()).expect("signer");
                 let sighash = signer.transparent_sighash(index).expect("sighash");
                 let (_, external_index) = self.wallet.external();
-                // `derive_external_secret_key` returns a key of `zcash_transparent`'s own
-                // secp256k1 (a newer major version than this test's `secp256k1` dev-dependency),
-                // so its 32 secret bytes are carried across to this crate's `SecretKey` rather
-                // than the value itself — same key, same signature either way.
-                let sk_bytes = self
+                // `derive_external_secret_key` returns `zcash_transparent`'s own secp256k1
+                // `SecretKey` — this crate's own secp256k1 dev-dependency, pinned to the same
+                // version, so it is usable here directly rather than carried across by its bytes.
+                let sk = self
                     .wallet
                     .usk
                     .transparent()
                     .derive_external_secret_key(external_index)
-                    .expect("secret key")
-                    .to_secret_bytes();
-                let sk = secp256k1::SecretKey::from_slice(&sk_bytes).expect("secret key bytes");
+                    .expect("secret key");
                 let sig = secp256k1::Secp256k1::signing_only()
-                    .sign_ecdsa(&secp256k1::Message::from_digest(sighash), &sk);
+                    .sign_ecdsa(secp256k1::Message::from_digest(sighash), &sk);
                 let mut der = sig.serialize_der().to_vec();
                 der.push(0x01);
                 with_status(der, 0x9000)
