@@ -58,7 +58,8 @@ let redemption = try await redeemer.redeem(
     recordIn: mainSynchronizer                       // the wallet myUnifiedAddress belongs to
 )
 // redemption.results: one TransactionSubmitResult per created transaction (usually one)
-// redemption.recordedInDestination: the main wallet knows the claim and trusts it (ZIP 315)
+// redemption.recordedInDestination: the untrusted claim is visible in main-wallet history
+// Recording alone does not confirm the claim or make its funds spendable (ZIP 315).
 try await mainSynchronizer.start()
 
 try await redeemer.cleanup()                        // stops and deletes the temporary wallet
