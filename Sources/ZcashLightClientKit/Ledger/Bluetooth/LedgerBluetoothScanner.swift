@@ -99,7 +99,7 @@ final class LedgerBluetoothCentral: NSObject, CBCentralManagerDelegate, @uncheck
     func waitUntilPoweredOn() async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             queue.async {
-                switch self.availability() {
+                switch self.availability(for: self.manager?.state ?? .unknown) {
                 case .success(true):
                     continuation.resume()
                 case .success(false):
@@ -111,13 +111,10 @@ final class LedgerBluetoothCentral: NSObject, CBCentralManagerDelegate, @uncheck
         }
     }
 
-    /// `true` when powered on, `false` while the state is not yet known.
-    private func availability() -> Result<Bool, ZcashError> {
-        guard let manager else {
-            return .success(false)
-        }
-
-        switch manager.state {
+    /// `true` when powered on, `false` while `state` is not known yet (before construction finishes,
+    /// this is `.unknown`; see ``waitUntilPoweredOn()``).
+    private func availability(for state: CBManagerState) -> Result<Bool, ZcashError> {
+        switch state {
         case .poweredOn:
             return .success(true)
         case .unknown, .resetting:
@@ -133,17 +130,29 @@ final class LedgerBluetoothCentral: NSObject, CBCentralManagerDelegate, @uncheck
         }
     }
 
-    func centralManagerDidUpdateState(_ central: CBCentralManager) {
-        let availability = availability()
-        logger?.debug("Ledger BLE: central state \(central.state.rawValue)")
+    /// Updates for a new central state, read from the delegate callback by
+    /// ``centralManagerDidUpdateState(_:)``. CoreBluetooth tears down every connection across a
+    /// `.resetting`, so every open connection and the active scan, if any, fail with
+    /// ``ZcashError/ledgerBluetoothDisconnected`` (restartable); state waiters are left queued,
+    /// since a reset normally comes back to `.poweredOn` on its own. `.unknown` keeps the "not known
+    /// yet" behavior from before this state existed: nothing to do.
+    func handleStateChange(_ state: CBManagerState) {
+        logger?.debug("Ledger BLE: central state \(state.rawValue)")
 
-        switch availability {
+        switch availability(for: state) {
         case .success(true):
             let waiters = stateWaiters
             stateWaiters = []
             waiters.forEach { $0.resume() }
         case .success(false):
-            break
+            guard state == .resetting else {
+                return
+            }
+
+            let error = ZcashError.ledgerBluetoothDisconnected
+            connections.values.forEach { $0.fail(with: error) }
+            scanContinuation?.finish(throwing: error)
+            scanContinuation = nil
         case .failure(let error):
             let waiters = stateWaiters
             stateWaiters = []
@@ -152,6 +161,10 @@ final class LedgerBluetoothCentral: NSObject, CBCentralManagerDelegate, @uncheck
             scanContinuation = nil
             connections.values.forEach { $0.fail(with: error) }
         }
+    }
+
+    func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        handleStateChange(central.state)
     }
 
     // MARK: - Scanning
