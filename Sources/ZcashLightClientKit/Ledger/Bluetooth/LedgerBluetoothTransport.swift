@@ -35,21 +35,8 @@ public actor LedgerBluetoothTransport: LedgerAPDUTransport {
     /// normalize that to `CancellationError`; a caller that exchanges on this transport directly
     /// sees ``LedgerExchangeNotStarted`` itself.
     public func exchange(_ apdu: Data, timeout: TimeInterval?) async throws -> Data {
-        do {
-            try await gate.acquire()
-        } catch {
-            // Refused before anything was sent (a cancellation while only queued for this
-            // transport's own gate): not a failure of the exchange, so the caller must not treat
-            // it as one and close the transport out from under whoever is holding the gate now.
-            throw LedgerExchangeNotStarted()
-        }
-        do {
-            let reply = try await connection.exchange(apdu, timeout: timeout)
-            await gate.release()
-            return reply
-        } catch {
-            await gate.release()
-            throw error
+        try await ledgerGatedExchange(on: gate) {
+            try await connection.exchange(apdu, timeout: timeout)
         }
     }
 

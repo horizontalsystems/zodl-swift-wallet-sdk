@@ -158,3 +158,39 @@ actor LedgerSerialGate {
         waiters.remove(at: index).continuation.resume(throwing: CancellationError())
     }
 }
+
+/// Brackets `exchange` with `gate`: acquires it, runs `exchange`, and releases it whether `exchange`
+/// succeeds or fails. A transport with its own internal admission queue -- serializing its own
+/// exchanges the way ``LedgerBluetoothTransport`` does -- calls this from its `exchange(_:timeout:)`
+/// instead of repeating the acquire/release bracket itself.
+///
+/// Refused before anything was sent (a cancellation while only queued for this transport's own
+/// gate): not a failure of the exchange, so a failed `acquire()` throws ``LedgerExchangeNotStarted``
+/// here instead of letting the gate's own `CancellationError` read as one -- the caller must not
+/// close the transport out from under whoever is holding the gate now.
+///
+/// - Parameters:
+///   - gate: The transport's own admission gate.
+///   - isolation: Keeps `exchange` running on the caller's own actor, exactly as if it were inlined
+///     there, rather than on whatever executor this free function would otherwise run on.
+///   - exchange: The transport's own exchange, run once the gate admits it.
+func ledgerGatedExchange(
+    on gate: LedgerSerialGate,
+    isolation: isolated (any Actor)? = #isolation,
+    _ exchange: () async throws -> Data
+) async throws -> Data {
+    do {
+        try await gate.acquire()
+    } catch {
+        throw LedgerExchangeNotStarted()
+    }
+
+    do {
+        let reply = try await exchange()
+        await gate.release()
+        return reply
+    } catch {
+        await gate.release()
+        throw error
+    }
+}

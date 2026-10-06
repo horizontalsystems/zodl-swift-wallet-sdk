@@ -184,11 +184,11 @@ final class LedgerSerialGateTests: XCTestCase {
     }
 }
 
-/// A scripted transport with its own internal admission gate around `exchange(_:timeout:)`,
-/// mirroring `LedgerBluetoothTransport`: one exchange on the wire at a time, and a caller the gate
-/// refuses throws ``LedgerExchangeNotStarted`` rather than letting the gate's own `CancellationError`
-/// read as an exchange failure. `ScriptedLedgerTransport` has no gate of its own, so it cannot stand
-/// in for this.
+/// A scripted transport with its own internal admission gate around `exchange(_:timeout:)`, sharing
+/// `ledgerGatedExchange(on:_:)` with `LedgerBluetoothTransport`: one exchange on the wire at a time,
+/// and a caller the gate refuses throws ``LedgerExchangeNotStarted`` rather than letting the gate's
+/// own `CancellationError` read as an exchange failure. `ScriptedLedgerTransport` has no gate of its
+/// own, so it cannot stand in for this.
 private actor GatedScriptedLedgerTransport: LedgerAPDUTransport {
     private let gate = LedgerSerialGate()
     private let delayNanoseconds: UInt64
@@ -206,23 +206,12 @@ private actor GatedScriptedLedgerTransport: LedgerAPDUTransport {
     }
 
     func exchange(_ apdu: Data, timeout: TimeInterval?) async throws -> Data {
-        do {
-            try await gate.acquire()
-        } catch {
-            throw LedgerExchangeNotStarted()
-        }
-
-        exchangesStarted += 1
-        do {
+        try await ledgerGatedExchange(on: gate) {
+            exchangesStarted += 1
             if delayNanoseconds > 0 {
                 try await Task.sleep(nanoseconds: delayNanoseconds)
             }
-            let reply = try script(apdu)
-            await gate.release()
-            return reply
-        } catch {
-            await gate.release()
-            throw error
+            return try script(apdu)
         }
     }
 
