@@ -57,18 +57,20 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   call it at launch. It never touches a redeemer alive in the process, nor anything that is not a
   card wallet. `GiftCardRedeemer.defaultStorageDirectory` is the directory both use by default.
 - `GiftCardRedeemer.redeem(to:memo:recordIn:)` takes the user's own `Synchronizer` and, after the
-  sweep is accepted, stores the claim transaction in it as an untrusted external receive (ZIP 315):
-  the main wallet shows the incoming gift at once and can spend it after the default 10
+  sweep is accepted, stores the claim transaction in it as a trusted receive (ZIP 315):
+  the main wallet shows the incoming gift at once and can spend it after the default 3
   confirmations. This works while the destination is stopped, and only with the
   SDK's own synchronizers (`SDKSynchronizer`, `SlipstreamSynchronizer`). It returns a
   `GiftCardRedeemer.Redemption` with the submission `results` and `recordedInDestination`, which is
   `false` — never an error — when the destination could not record the claim, including when the
   claim does not involve the destination's wallet and so was not stored there; the funds are on
-  chain once mined. When the claim pays the destination wallet, normal sync can discover it;
-  an unrelated `recordIn:` wallet does not receive the claim. Anyone holding the card link,
-  including whoever minted the card, can sign a competing spend of its notes, so the
-  claim keeps the ordinary untrusted confirmation wait. `redeem(to:memo:)`
-  is unchanged and records nothing. A failure to record is logged with
+  chain once mined. When trust was never recorded and the claim pays the destination wallet, normal
+  sync can discover it as an ordinary untrusted receive; an unrelated `recordIn:` wallet does not receive the claim. Anyone holding the card link,
+  including whoever minted the card, can sign a competing spend of its notes. A reorg after three
+  to nine claim confirmations could replace a claim already spent from; the shorter wait accepts
+  this residual risk for faster spendability. Externally funded card notes still need ten confirmations.
+  Recording again sets the claim trusted, without migrating historical claims or changing general
+  transfer policy. `redeem(to:memo:)` is unchanged and records nothing. A failure to record is logged with
   `ZcashError.synchronizerTrustedTransactionIdMismatch` (`ZSYNCO0010`) or
   `ZcashError.rustSetTransactionTrust` (`ZRUST0158`).
 - `OvkPolicy` (`.sender`, `.discard`) and
@@ -129,13 +131,6 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Synchronous native creation already underway cannot be rolled back; recheck the card before
   retrying when cancellation races it. `cleanup()` still runs when its caller is cancelled.
   Public signatures are unchanged; no call-site changes are needed. (MOB-2138)
-
-- `GiftCardRedeemer.redeem(to:memo:recordIn:)` records accepted claims as untrusted, including
-  clearing a prior trusted status when the same claim is recorded again. Incoming gifts remain
-  visible immediately and use the normal external-receive wait of 10 confirmations by default.
-  The issuer and anyone holding the link share the card's spending key, so creating the claim on
-  this device does not justify the shorter trusted wait. The redeem overloads and `Redemption`
-  fields are unchanged; no call-site changes are needed.
 
 - Cleaning up a gift-card redeemer and later releasing it no longer frees the card's replacement
   redeemer. The replacement remains protected from duplicate redeemers and leftover-wallet cleanup.

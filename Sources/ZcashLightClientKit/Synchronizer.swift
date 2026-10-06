@@ -2229,16 +2229,15 @@ extension UUID {
 
 // MARK: - Immediate incoming transactions
 
-/// A wallet that can store an incoming transaction before its next sync while retaining the
-/// ordinary untrusted confirmation policy. `SDKSynchronizer` and `SlipstreamSynchronizer` conform.
-/// Gift-card claims use this internal contract: the card's spending key is shared with its issuer
-/// and anyone else holding the link, so constructing a claim on this device does not establish
-/// exclusive control over its inputs.
-protocol IncomingTransactionRecording: AnyObject {
+/// A wallet that can store a trusted transaction before its next sync. `SDKSynchronizer` and
+/// `SlipstreamSynchronizer` conform. Gift-card claims use this internal contract to apply the
+/// three-confirmation trusted policy. The card's shared spending key still permits competing
+/// spends during a reorg, even though this device constructed the claim.
+protocol TrustedTransactionRecording: AnyObject {
     /// Stores `rawTransaction` at once (the receive shows before any sync, unmined) and explicitly
-    /// marks it as untrusted, including if it was previously trusted. The default transfer policy
-    /// requires ten confirmations before its funds become spendable. This goes straight to the
-    /// wallet database and works while the synchronizer is stopped.
+    /// marks it as trusted, including when recorded again. The default transfer policy requires
+    /// three confirmations before its funds become spendable. This goes straight to the wallet
+    /// database and works while the synchronizer is stopped.
     ///
     /// - Parameters:
     ///   - rawTransaction: the complete serialized transaction, as broadcast.
@@ -2248,5 +2247,5 @@ protocol IncomingTransactionRecording: AnyObject {
     ///   `rawTransaction` (the transaction is stored, but its trust status is unchanged), and
     ///   `ZcashError.rustSetTransactionTrust` if the trust status cannot be recorded, which
     ///   includes a transaction that does not involve this wallet and so was not stored.
-    func recordIncomingTransaction(_ rawTransaction: Data, txId: TxId) async throws
+    func recordTrustedTransaction(_ rawTransaction: Data, txId: TxId) async throws
 }

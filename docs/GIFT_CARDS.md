@@ -58,7 +58,7 @@ let redemption = try await redeemer.redeem(
     recordIn: mainSynchronizer                       // the wallet myUnifiedAddress belongs to
 )
 // redemption.results: one TransactionSubmitResult per created transaction (usually one)
-// redemption.recordedInDestination: the untrusted claim is visible in main-wallet history
+// redemption.recordedInDestination: the trusted claim is visible in main-wallet history
 // Recording alone does not confirm the claim or make its funds spendable (ZIP 315).
 try await mainSynchronizer.start()
 
@@ -86,26 +86,28 @@ untrusted, and `check()` reports `.pending` until it has 10 confirmations. This 
 matters: the issuer can rederive the card's key, and could in principle try to undo the funding
 with a reorg. Ten confirmations is ZIP 315's bar for funds that someone else controlled.
 
-**The claim side: 10.** The destination records the claim as an untrusted external receive and
-uses the default ten-confirmation wait. Even after the card's funding has ten confirmations,
-the issuer and anyone holding the link still share its spending key and could construct a
-competing spend of the same inputs. Building and signing the claim on this device therefore does
-not establish exclusive control over those inputs. If a competing spend replaced a claim in a
-reorg after three to nine confirmations, a wallet using the shorter trusted wait could lose a
-gift it had already spent from. The SDK retains the ordinary untrusted wait to avoid that
-shorter-wait risk. This rationale is not a claim that an attack has been reproduced, nor does
-a ten-confirmation wait eliminate every possible reorg.
+**The claim side: 3 when recorded as trusted.** After an accepted submission, the destination
+stores the claim and explicitly marks it trusted. Its outputs use the default three-confirmation
+wait. This is a policy choice for faster spendability, with an accepted residual risk: even after
+card funding has ten confirmations, the issuer and anyone holding the link share its spending
+key and can sign a competing spend of the same inputs. Constructing the claim on this device
+does not establish exclusive control over them. A competing spend could replace the claim in a
+reorg after three to nine confirmations, and the destination could lose a gift it had already
+spent from. This is not a claim that an attack has been reproduced, nor does a ten-confirmation
+wait eliminate every possible reorg. When trust was never recorded, normal receiving-wallet sync
+discovers the claim as an ordinary untrusted receive with the ten-confirmation wait.
 
 ## Immediate claim recording
 
 - Pass the main wallet's synchronizer as `recordIn:`. Once a server has accepted the claim,
   `GiftCardRedeemer` reads the raw transaction back from the card wallet and stores it in the
-  destination (the receive shows at once, unmined, with its memo), explicitly marked as untrusted.
-  The main wallet follows its normal external-receive policy: ten confirmations by default before
+  destination (the receive shows at once, unmined, with its memo), explicitly marked as trusted.
+  The main wallet uses the trusted transfer policy: three confirmations by default before
   the gift becomes spendable. The next sync mines the stored transaction as usual.
 - Only the SDK's own synchronizers (`SDKSynchronizer`, `SlipstreamSynchronizer`) can record the
   claim. Recording is internal to the SDK. With any other conformer, `recordedInDestination` is
-  `false` and the claim arrives through sync.
+  `false`. Normal sync can discover the claim when it pays that wallet; an unrelated wallet
+  does not receive it.
 - The call goes straight to the wallet database, so it works while the main synchronizer is
   stopped — which is how an app typically runs a claim, so the two wallets do not compete for the
   shared database executor. The example uses a main synchronizer typed as
@@ -119,16 +121,16 @@ a ten-confirmation wait eliminate every possible reorg.
   while the claim is running, then restart it afterwards.
 - Recording can never fail the redemption: the funds are already on their way. A failure is logged
   and reported as `Redemption.recordedInDestination == false`. When the claim pays the specified
-  wallet, normal sync can discover it from the chain as an ordinary untrusted receive. An unrelated
-  `recordIn:` wallet does not receive the claim.
+  wallet, normal sync can discover it from the chain as an ordinary untrusted receive if trust was
+  never recorded. An unrelated `recordIn:` wallet does not receive the claim.
 - `recordedInDestination` is `true` only when the claim is stored in the destination and
-  explicitly marked as untrusted. A claim that does not involve the destination wallet
+  explicitly marked as trusted. A claim that does not involve the destination wallet
   (`recordIn:` is not the wallet `recipient` belongs to) is not stored there, so the flag is `false`.
 - Only accepted submissions (`.success`) are recorded. A transaction rejected by every server is
   not stored in the destination.
-- Recording a claim explicitly clears any prior trusted status for that transaction, including
-  when repeated. It does not migrate other stored trust records or change the SDK's general
-  support for marking transactions as trusted or untrusted.
+- Recording a claim explicitly sets its trusted status, including when repeated after an untrusted
+  status. It does not migrate historical claims or other stored trust records, or change the SDK's
+  general support for marking transactions as trusted or untrusted.
 - Immediate history visibility does not make an unmined output spendable.
 
 ## Lifecycle and concurrency

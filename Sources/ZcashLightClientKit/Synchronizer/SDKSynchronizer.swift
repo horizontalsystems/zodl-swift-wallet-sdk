@@ -1401,7 +1401,7 @@ public class SDKSynchronizer: AwaitableStopSynchronizer {
     // synchronizer is stopped so that the two wallets do not compete for the database executor.
     // They need neither a sync session nor the `.synced` state.
 
-    func recordIncomingTransaction(_ rawTransaction: Data, txId: TxId) async throws {
+    func recordTrustedTransaction(_ rawTransaction: Data, txId: TxId) async throws {
         let storedTxId = try await initializer.rustBackend.decryptAndStoreTransaction(
             txBytes: rawTransaction.bytes,
             minedHeight: nil
@@ -1409,7 +1409,7 @@ public class SDKSynchronizer: AwaitableStopSynchronizer {
         guard storedTxId == Data(txId.id) else {
             throw ZcashError.synchronizerTrustedTransactionIdMismatch
         }
-        try await initializer.rustBackend.setTransactionTrust(txId: storedTxId, trusted: false)
+        try await initializer.rustBackend.setTransactionTrust(txId: storedTxId, trusted: true)
     }
 
     /// Marks a stored transaction as trusted or untrusted (ZIP 315). Internal to the SDK.
@@ -1890,4 +1890,4 @@ extension SessionTicker {
     }
 }
 
-extension SDKSynchronizer: IncomingTransactionRecording {}
+extension SDKSynchronizer: TrustedTransactionRecording {}

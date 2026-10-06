@@ -793,33 +793,6 @@ class CompactBlockRepositoryMock: CompactBlockRepository {
     }
 
 }
-class IncomingTransactionRecordingMock: IncomingTransactionRecording {
-
-
-    init(
-    ) {
-    }
-
-    // MARK: - recordIncomingTransaction
-
-    var recordIncomingTransactionTxIdThrowableError: Error?
-    var recordIncomingTransactionTxIdCallsCount = 0
-    var recordIncomingTransactionTxIdCalled: Bool {
-        return recordIncomingTransactionTxIdCallsCount > 0
-    }
-    var recordIncomingTransactionTxIdReceivedArguments: (rawTransaction: Data, txId: TxId)?
-    var recordIncomingTransactionTxIdClosure: ((Data, TxId) async throws -> Void)?
-
-    func recordIncomingTransaction(_ rawTransaction: Data, txId: TxId) async throws {
-        if let error = recordIncomingTransactionTxIdThrowableError {
-            throw error
-        }
-        recordIncomingTransactionTxIdCallsCount += 1
-        recordIncomingTransactionTxIdReceivedArguments = (rawTransaction: rawTransaction, txId: txId)
-        try await recordIncomingTransactionTxIdClosure!(rawTransaction, txId)
-    }
-
-}
 class LatestBlocksDataProviderMock: LatestBlocksDataProvider {
 
 
@@ -4242,6 +4215,33 @@ class TransactionRepositoryMock: TransactionRepository {
         } else {
             return unreconciledTxidsReturnValue
         }
+    }
+
+}
+class TrustedTransactionRecordingMock: TrustedTransactionRecording {
+
+
+    init(
+    ) {
+    }
+
+    // MARK: - recordTrustedTransaction
+
+    var recordTrustedTransactionTxIdThrowableError: Error?
+    var recordTrustedTransactionTxIdCallsCount = 0
+    var recordTrustedTransactionTxIdCalled: Bool {
+        return recordTrustedTransactionTxIdCallsCount > 0
+    }
+    var recordTrustedTransactionTxIdReceivedArguments: (rawTransaction: Data, txId: TxId)?
+    var recordTrustedTransactionTxIdClosure: ((Data, TxId) async throws -> Void)?
+
+    func recordTrustedTransaction(_ rawTransaction: Data, txId: TxId) async throws {
+        if let error = recordTrustedTransactionTxIdThrowableError {
+            throw error
+        }
+        recordTrustedTransactionTxIdCallsCount += 1
+        recordTrustedTransactionTxIdReceivedArguments = (rawTransaction: rawTransaction, txId: txId)
+        try await recordTrustedTransactionTxIdClosure!(rawTransaction, txId)
     }
 
 }

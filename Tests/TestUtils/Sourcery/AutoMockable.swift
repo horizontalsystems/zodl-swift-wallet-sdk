@@ -26,7 +26,7 @@ extension SaplingParametersHandler { }
 extension Broadcaster { }
 extension Synchronizer { }
 extension TransactionRepository { }
-extension IncomingTransactionRecording { }
+extension TrustedTransactionRecording { }
 extension UTXOFetcher { }
 extension ZcashFileManager { }
 extension ZcashRustBackendWelding { }
