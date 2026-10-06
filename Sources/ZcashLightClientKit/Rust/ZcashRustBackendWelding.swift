@@ -441,12 +441,13 @@ protocol ZcashRustBackendWelding {
     /// other external receive.
     ///
     /// The transaction must already be stored, for instance through
-    /// `decryptAndStoreTransaction(txBytes:minedHeight:)`; the trust status of an unknown
-    /// transaction is not recorded.
+    /// `decryptAndStoreTransaction(txBytes:minedHeight:)`, which stores nothing for a transaction
+    /// that does not involve this wallet. An unknown transaction throws rather than succeeding
+    /// with nothing recorded.
     /// - Parameters:
     ///   - txId: the 32-byte transaction id.
     ///   - trusted: `true` to trust the transaction, `false` to treat it as an ordinary external one.
-    /// - Throws: `rustSetTransactionTrust`.
+    /// - Throws: `rustSetTransactionTrust`, including when the transaction is not stored.
     func setTransactionTrust(txId: Data, trusted: Bool) async throws
 
     /// Fix witnesses - addressing note commitment tree bug.

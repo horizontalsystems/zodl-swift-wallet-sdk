@@ -111,6 +111,9 @@ change.
 - Recording can never fail the redemption: the funds are already on their way. A failure is logged
   and reported as `Redemption.recordedInDestination == false`; the main wallet then learns about the
   claim from the chain, as an ordinary (untrusted, 10-confirmation) receive. Nothing is lost.
+- `recordedInDestination` is `true` only when the claim is actually stored in the destination and
+  marked as trusted. A claim that does not involve the destination's wallet (`recordIn:` is not the
+  wallet `recipient` belongs to) is not stored there, so nothing is trusted and the flag is `false`.
 - Only accepted submissions (`.success`) are recorded. A transaction rejected by every server is
   not stored in the destination.
 - Trust shortens the wait; it does not weaken safety against reorgs beyond what ZIP 315 accepts

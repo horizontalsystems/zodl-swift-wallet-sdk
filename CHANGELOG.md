@@ -55,7 +55,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the 10 of an external receive. This works while the destination is stopped, and only with the
   SDK's own synchronizers (`SDKSynchronizer`, `SlipstreamSynchronizer`). It returns a
   `GiftCardRedeemer.Redemption` with the submission `results` and `recordedInDestination`, which is
-  `false` — never an error — when the destination could not record the claim; the funds are on
+  `false` — never an error — when the destination could not record the claim, including when the
+  claim does not involve the destination's wallet and so was not stored there; the funds are on
   chain regardless, and the destination learns about them when it next syncs. `redeem(to:memo:)`
   is unchanged and records nothing. A failure to record is logged with
   `ZcashError.synchronizerTrustedTransactionIdMismatch` (`ZSYNCO0010`) or

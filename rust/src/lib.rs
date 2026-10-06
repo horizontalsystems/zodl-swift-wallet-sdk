@@ -3546,8 +3546,9 @@ pub unsafe extern "C" fn zcashlc_set_transaction_status(
 /// they were not produced by this wallet.
 ///
 /// The transaction must already be stored in `db_data` (for instance through
-/// [`zcashlc_decrypt_and_store_transaction`]); the trust status of an unknown transaction is not
-/// recorded. Returns `true` on success and `false` with the last error set otherwise.
+/// [`zcashlc_decrypt_and_store_transaction`], which stores nothing for a transaction that does not
+/// involve the wallet). Returns `true` on success and `false` with the last error set otherwise,
+/// including when the transaction is not stored, so `true` always means the status was recorded.
 ///
 /// [ZIP 315]: https://zips.z.cash/zip-0315
 ///
@@ -3582,14 +3583,43 @@ pub unsafe extern "C" fn zcashlc_set_transaction_trust(
         let txid_bytes = unsafe { slice::from_raw_parts(txid_bytes, txid_bytes_len) };
         let txid = TxId::read(txid_bytes)?;
 
-        db_data
-            .set_tx_trust(txid, trusted)
-            .map_err(|e| anyhow!("Error setting the trust status of txid {}: {}", txid, e))?;
+        set_trust_of_stored_transaction(&mut db_data, txid, trusted)?;
 
         Ok(true)
     });
 
     unwrap_exc_or(res, false)
+}
+
+/// Sets the trust status of a transaction this wallet has stored, failing when it has not.
+///
+/// `WalletWrite::set_tx_trust` is an update that succeeds without touching a row when the
+/// transaction is unknown, and `decrypt_and_store_transaction` stores nothing for a transaction
+/// that does not involve the wallet. Checking first is what lets a caller tell "trusted" apart from
+/// "there was nothing to trust".
+fn set_trust_of_stored_transaction<W>(
+    db_data: &mut W,
+    txid: TxId,
+    trusted: bool,
+) -> anyhow::Result<()>
+where
+    W: WalletRead + WalletWrite,
+    <W as WalletRead>::Error: std::fmt::Display,
+{
+    let stored = db_data
+        .get_transaction(txid)
+        .map_err(|e| anyhow!("Error looking up txid {}: {}", txid, e))?
+        .is_some();
+    if !stored {
+        return Err(anyhow!(
+            "Transaction {} is not stored in this wallet; its trust status was not set",
+            txid
+        ));
+    }
+
+    db_data
+        .set_tx_trust(txid, trusted)
+        .map_err(|e| anyhow!("Error setting the trust status of txid {}: {}", txid, e))
 }
 
 /// Returns a list of transaction data requests that the network client should satisfy.
@@ -5285,6 +5315,31 @@ mod tests {
             !fresh_tip_decision(false, false, 1, 1),
             "a completed range without a refresh this run proves nothing"
         );
+    }
+
+    /// A transaction the wallet never stored, such as one `decrypt_and_store_transaction` skipped
+    /// because it does not involve the wallet, must not report its trust as set: the update
+    /// underneath would succeed on zero rows.
+    #[test]
+    fn trusting_a_transaction_the_wallet_did_not_store_fails() {
+        use zcash_client_sqlite::wallet::init::init_wallet_db;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("wallet.sqlite");
+        let mut db = WalletDb::for_path(
+            &path,
+            NetworkParams::Standard(TestNetwork),
+            SystemClock,
+            OsRng,
+        )
+        .expect("opens a fresh wallet db");
+        init_wallet_db(&mut db, None).expect("initializes the wallet schema");
+
+        let txid = TxId::from_bytes([0x5a; 32]);
+        let error = set_trust_of_stored_transaction(&mut db, txid, true)
+            .expect_err("an unknown transaction cannot be trusted");
+        assert!(error.to_string().contains("not stored in this wallet"));
+        assert!(db.get_transaction(txid).unwrap().is_none());
     }
 }
 

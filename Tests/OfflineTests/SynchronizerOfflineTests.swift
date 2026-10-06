@@ -466,6 +466,27 @@ class SynchronizerOfflineTests: ZcashTestCase {
         XCTAssertEqual(rustBackend.setTransactionTrustTxIdTrustedCallsCount, 0)
     }
 
+    /// The rust layer stores nothing for a transaction that does not involve the wallet, and then
+    /// refuses to trust it. That refusal must reach the caller, so a gift card redemption reports
+    /// the claim as not recorded instead of claiming a trust status that was never set.
+    func testRecordTrustedTransactionFailsWhenTheWalletDidNotStoreIt() async throws {
+        let rustBackend = ZcashRustBackendWeldingMock()
+        let txIdBytes = [UInt8](repeating: 0x5A, count: 32)
+        rustBackend.decryptAndStoreTransactionTxBytesMinedHeightReturnValue = Data(txIdBytes)
+        rustBackend.setTransactionTrustTxIdTrustedThrowableError = ZcashError.rustSetTransactionTrust("not stored")
+        let synchronizer = try makeStoppedSynchronizer(rustBackend: rustBackend)
+
+        do {
+            try await synchronizer.recordTrustedTransaction(Data([0x05]), txId: TxId(txIdBytes))
+            XCTFail("A transaction the wallet did not store must not be reported as trusted")
+        } catch ZcashError.rustSetTransactionTrust {
+        } catch {
+            XCTFail("Unexpected error \(error.localizedDescription)")
+        }
+
+        XCTAssertEqual(rustBackend.decryptAndStoreTransactionTxBytesMinedHeightCallsCount, 1)
+    }
+
     func testSetTransactionTrustForwardsToTheRustBackend() async throws {
         let rustBackend = ZcashRustBackendWeldingMock()
         rustBackend.setTransactionTrustTxIdTrustedClosure = { _, _ in }
