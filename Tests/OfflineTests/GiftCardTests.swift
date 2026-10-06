@@ -604,6 +604,45 @@ final class GiftCardTests: ZcashTestCase {
         XCTAssertEqual(source.birthday(for: birthday - 100).height, bundled.birthday(for: birthday - 100).height)
     }
 
+    func testCheckpointSourceFallbacksStartStrictlyBeforeGiftCardBirthdays() {
+        let cases: [(NetworkType, BlockHeight)] = [
+            (.mainnet, 3_500_000),
+            (.testnet, 3_000_000),
+            (.mainnet, 1_687_104),
+            (.testnet, 1_842_420)
+        ]
+
+        for (network, birthday) in cases {
+            let bundled = CheckpointSourceFactory.fromBundle(for: network)
+            let source = GiftCardCheckpointSource(bundled: bundled)
+
+            let fallback = source.birthday(for: birthday)
+
+            XCTAssertLessThan(fallback.height, birthday, "network: \(network), birthday: \(birthday)")
+            XCTAssertLessThanOrEqual(fallback.height + 1, birthday, "network: \(network), birthday: \(birthday)")
+            XCTAssertEqual(
+                fallback.height,
+                bundled.birthday(for: birthday - 1).height,
+                "network: \(network), birthday: \(birthday)"
+            )
+        }
+    }
+
+    func testCheckpointSourceDoesNotServeCachedStateAtItsExactHeight() {
+        let bundled = CheckpointSourceFactory.fromBundle(for: .testnet)
+        let source = GiftCardCheckpointSource(bundled: bundled)
+        let birthday = BlockHeight(4_453_870)
+        let cachedHeight = birthday - 1
+        let bundledFallback = bundled.birthday(for: cachedHeight - 1)
+
+        XCTAssertTrue(source.use(Self.treeState(height: cachedHeight), forBirthday: birthday))
+
+        let checkpoint = source.birthday(for: cachedHeight)
+
+        XCTAssertEqual(checkpoint.height, bundledFallback.height)
+        XCTAssertNotEqual(checkpoint.height, cachedHeight)
+    }
+
     /// A server that answers with the state of another height must not move the start of the
     /// scan: later would skip the card's funds, earlier would scan for nothing.
     func testCheckpointSourceIgnoresATreeStateForAnotherHeight() {

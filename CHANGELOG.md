@@ -107,11 +107,13 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Cleaning up a gift-card redeemer and later releasing it no longer frees the card's replacement
   redeemer. The replacement remains protected from duplicate redeemers and leftover-wallet cleanup.
-- `GiftCardRedeemer` starts the card wallet at the exact height in the link: it fetches the
-  server's tree state for the block before the birthday instead of rounding down to the nearest
-  bundled checkpoint (up to 2,500 blocks on mainnet, 10,000 on testnet), so `check()` scans only
-  the blocks since the card was funded. Without a server, or when the server answers with the
-  state of another height, the bundled checkpoint is used.
+- `GiftCardRedeemer` starts the card wallet from a checkpoint strictly before the birthday in the
+  link. It fetches the server's tree state for the preceding block; without a server, or when the
+  server answers with the state of another height, it selects the bundled checkpoint for the
+  preceding height. This avoids starting at the birthday block itself, which could omit a gift
+  received there. The server checkpoint still avoids rounding down to the bundled grid (up to
+  2,500 blocks on mainnet, 10,000 on testnet), so `check()` scans only blocks since the card was
+  funded.
 - `GiftCardRedeemer` never reuses a card wallet left behind by an earlier redeemer (a crash or a
   killed app): the leftover directory is deleted before the wallet is created, so a stale birthday
   or a half-finished claim cannot carry over. Rebuilding one costs seconds.

@@ -25,7 +25,7 @@ final class GiftCardCheckpointSource: CheckpointSource {
     var saplingActivation: Checkpoint { bundled.saplingActivation }
 
     /// Remembers the server's tree state for the block before the card's birthday, which
-    /// `birthday(for:)` then serves for any birthday above it.
+    /// `birthday(for:)` can serve as prior-chain state for a later birthday.
     ///
     /// The state is only used when its height is exactly `birthday - 1`, the height it was
     /// requested for. A server that answers with another height, by mistake or on purpose, would
@@ -52,10 +52,15 @@ final class GiftCardCheckpointSource: CheckpointSource {
         lock.lock()
         let exact = self.exact
         lock.unlock()
-        if let exact, exact.height <= height {
+        if let exact, exact.height < height {
             return exact
         }
-        return bundled.birthday(for: height)
+
+        // A wallet birthday is the first block that may contain funds. Its checkpoint must
+        // describe an earlier block so scanning includes that birthday. Preserve the minimum
+        // representable height without subtracting past the integer boundary.
+        let priorHeight = height > Int.min ? height - 1 : height
+        return bundled.birthday(for: priorHeight)
     }
 
     func estimateBirthdayHeight(for date: Date) -> BlockHeight {
