@@ -34,6 +34,14 @@ public protocol LedgerAPDUTransport: Sendable {
     ///   - timeout: How long to wait for the reply, in seconds. `nil` waits indefinitely: the reply
     ///     arrives only once the user has acted on the device.
     /// - Returns: The response data followed by the two-byte status word.
+    /// - Throws: Any error from this method is treated as an exchange that may have reached the
+    ///   device. ``LedgerDevice``'s commands and signing close the transport before the error
+    ///   reaches their caller. `LedgerZcashApp.ensureZcashAppOpen` closes the caller's transport
+    ///   only when its link fails, and closes a transport its `reconnect` opened whenever the call
+    ///   fails; `LedgerZcashApp.currentApp` never closes the transport it is given. The one
+    ///   exception is ``LedgerExchangeNotStarted``, which an implementation throws instead to report
+    ///   that it refused this exchange before sending anything: ``LedgerDevice``'s commands and
+    ///   signing leave the transport open for it.
     func exchange(_ apdu: Data, timeout: TimeInterval?) async throws -> Data
 
     /// Closes the connection. Every later exchange fails. Closing twice has no effect.

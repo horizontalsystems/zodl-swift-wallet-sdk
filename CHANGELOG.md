@@ -18,17 +18,27 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LedgerBluetoothTransport` with `connect(to:timeout:)`. The app must declare
   `NSBluetoothAlwaysUsageDescription`, and a sandboxed macOS app the
   `com.apple.security.device.bluetooth` entitlement. The first connection to a device brings up
-  Bluetooth pairing. A transport closes, and every later call throws
-  `ZcashError.ledgerTransportClosed`, once an exchange fails after it has started (a timeout, a
-  disconnect, a malformed reply, or a cancelled task); open a new connection then. A task cancelled
-  before its exchange starts, between commands or while queued behind another exchange on the same
-  transport, leaves the transport open.
+  Bluetooth pairing. A `LedgerBluetoothTransport` closes itself once an exchange fails after its
+  first frame went out (a timeout, a disconnect, a reply that does not reassemble, or a cancelled
+  task), whoever the caller is; every later call then throws the error that closed it, or
+  `ZcashError.ledgerTransportClosed` after a cancellation or `close()`. Open a new connection then.
+  `LedgerDevice`'s commands and signing also close the transport on any exchange that fails. During
+  those commands and signing, a task cancelled before its exchange starts, between commands or while
+  queued behind another exchange on the same transport, leaves the transport open, except during the
+  pause before resending a command the device refused with `0x6901`, where a cancellation closes it.
+  `LedgerZcashApp.ensureZcashAppOpen` closes the caller's transport only when its link fails, and
+  closes a transport its `reconnect` opened whenever the call fails; `LedgerZcashApp.currentApp`
+  never closes the transport it is given.
   Connecting again to a device that already has a live connection replaces it: the displaced
   connection fails with the non-restartable `ZcashError.ledgerTransportReplaced` instead, since the
   restartable `ledgerTransportClosed` would invite it to reconnect and displace the new connection
   in turn.
 - `LedgerAPDUTransport`, the protocol the pairing and signing code depends on
   (`exchange(_:timeout:)`, `close()`), for custom transports and test doubles.
+- `LedgerExchangeNotStarted`, the error a transport's `exchange(_:timeout:)` throws to report that
+  this exchange never sent anything, such as a caller cancelled while queued behind another exchange
+  on the same transport; the SDK's own commands normalize it to `CancellationError` without closing
+  the transport.
 - `LedgerDevice(transport:networkType:)`: `appVersion()` (a `LedgerAppVersion`),
   `deviceIdentity()` (a `LedgerDeviceIdentity`),
   `pairAccount(zip32AccountIndex:readTimeout:reconnect:)` (a `LedgerAccountPairing` carrying the

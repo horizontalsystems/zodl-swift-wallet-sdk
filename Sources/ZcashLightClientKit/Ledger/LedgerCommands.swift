@@ -5,13 +5,19 @@
 
 import Foundation
 
-/// Thrown by a transport's `exchange(_:timeout:)` when its own internal admission gate (such as
-/// ``LedgerSerialGate``) refuses a caller before anything was sent, rather than letting that
-/// cancellation propagate as an ordinary exchange failure. A caller sees a plain `CancellationError`
-/// for it (``ledgerZcashError(_:)`` maps it there, and ``LedgerCommands/exchange`` rethrows it
-/// directly), and the transport that reports it is never closed: nothing reached the wire, so every
-/// other user of that transport is unaffected.
-struct LedgerExchangeNotStarted: Error {}
+/// Thrown by a transport's `exchange(_:timeout:)` to report that this one exchange never sent
+/// anything: nothing reached the device, so no reply on the wire can be mistaken for its answer, and
+/// the transport does not need to be closed over it.
+///
+/// A transport throws this, instead of letting the failure read as an ordinary exchange failure,
+/// when its own admission logic refuses a caller before its turn -- ``LedgerBluetoothTransport``
+/// does this for a caller cancelled while still queued behind another exchange on the same
+/// transport. The SDK's own commands catch it and rethrow a plain `CancellationError` instead,
+/// without closing the transport; a caller that exchanges with a transport directly, outside those
+/// commands, sees this type itself.
+public struct LedgerExchangeNotStarted: Error {
+    public init() {}
+}
 
 /// The exchange rules the pairing commands and the signing ceremony share.
 enum LedgerCommands {

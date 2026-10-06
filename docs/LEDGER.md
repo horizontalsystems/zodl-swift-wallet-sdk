@@ -39,12 +39,20 @@ let transport = try await scanner.connect(to: pickedDevice)
 `LedgerBluetoothTransport` conforms to `LedgerAPDUTransport`, the only thing the pairing and signing
 code needs; a test double conforms to it too.
 
-A transport closes when an exchange fails after it has started -- a timeout, a disconnect, a
-malformed reply, or a cancelled task -- since the device's reply to that command could otherwise be
-read as the reply to the next one. Every later call then throws `ZcashError.ledgerTransportClosed`,
-and the recovery is a new connection. A task cancelled before its exchange starts (between commands,
-or while queued behind another exchange on the same transport) leaves the transport open, and so
-does a refusal from the device (the user declining, a locked device, another app open).
+A `LedgerBluetoothTransport` closes itself when an exchange fails after its first frame went out --
+a timeout, a disconnect, a reply that does not reassemble, or a cancelled task -- whoever the caller
+is, since the device's reply to that command could otherwise be read as the reply to the next one.
+`LedgerDevice`'s commands and signing also close the transport on any exchange that fails. Every
+later call then throws the error that closed the transport, or `ZcashError.ledgerTransportClosed`
+after a cancellation or `close()`, and the recovery is a new connection. During `LedgerDevice`'s
+commands and signing, a task cancelled before its exchange starts (between commands, or while queued
+behind another exchange on the same transport) leaves the transport open, except during the pause
+before resending a command the device refused with `0x6901`: a cancellation there closes it. A
+refusal from the device (the user declining, a locked device, another app open) leaves the
+transport open too.
+`LedgerZcashApp.ensureZcashAppOpen` closes the caller's transport only when its link fails, and
+closes a transport its `reconnect` opened whenever the call fails; `LedgerZcashApp.currentApp`
+never closes the transport it is given.
 
 After a first pairing the device is on its dashboard rather than the Zcash app, and any command then
 fails with `ledgerWrongApp`. Before creating a `LedgerDevice` or signing, call

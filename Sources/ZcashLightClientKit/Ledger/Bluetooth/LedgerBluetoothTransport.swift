@@ -11,8 +11,9 @@ import Foundation
 ///
 /// Exchanges are serialized: one command is on the wire at a time. When an exchange fails once its
 /// first frame has been written (a timeout, a disconnect, a reply that does not reassemble, a cancelled
-/// task), the connection is closed and every later exchange throws ``ZcashError/ledgerTransportClosed``:
-/// the device's reply to that command could otherwise be taken for the reply to the next one.
+/// task), the connection is closed: the device's reply to that command could otherwise be taken for the
+/// reply to the next one. Every later exchange then throws the error that closed it, or
+/// ``ZcashError/ledgerTransportClosed`` after a cancellation or ``close()``.
 public actor LedgerBluetoothTransport: LedgerAPDUTransport {
     /// The device this transport is connected to.
     public nonisolated let device: LedgerBluetoothDevice
@@ -25,6 +26,14 @@ public actor LedgerBluetoothTransport: LedgerAPDUTransport {
         self.connection = connection
     }
 
+    /// Sends one command and returns the device's reply; see
+    /// ``LedgerAPDUTransport/exchange(_:timeout:)`` for what a thrown error means to the caller.
+    ///
+    /// Exchanges on this transport are serialized, one at a time. A caller cancelled while still
+    /// queued behind another exchange on this same transport throws ``LedgerExchangeNotStarted``
+    /// instead of `CancellationError`, and the transport stays open. The SDK's own commands
+    /// normalize that to `CancellationError`; a caller that exchanges on this transport directly
+    /// sees ``LedgerExchangeNotStarted`` itself.
     public func exchange(_ apdu: Data, timeout: TimeInterval?) async throws -> Data {
         do {
             try await gate.acquire()
