@@ -150,4 +150,83 @@ final class LedgerSerialGateTests: XCTestCase {
         let closeCount = await transport.closeCount
         XCTAssertEqual(closeCount, 0, "a caller cancelled while only queued for the gate must not close the transport")
     }
+
+    /// `LedgerCommands.exchange` must not close a transport over a cancellation that never reached
+    /// the wire: two callers share one transport that gates its own `exchange(_:timeout:)`, the
+    /// second is cancelled while queued for that internal gate, and the holder's own exchange must
+    /// still complete, with the transport left open for it.
+    func testLedgerCommandsExchangeDoesNotCloseATransportForAnExchangeThatNeverStarted() async throws {
+        let transport = GatedScriptedLedgerTransport(delayNanoseconds: 500_000_000) { _ in
+            LedgerReplies.firmwareVersion(3, 9, 3)
+        }
+
+        let first = Task { try await LedgerCommands.exchange(Data([0xC4]), on: transport, timeout: nil) }
+        // Waits for `first` to have actually started its (stalled) exchange, so it provably holds
+        // the transport's own gate once `second` is created.
+        await waitUntil { await transport.exchangesStarted == 1 }
+
+        let second = Task { try await LedgerCommands.exchange(Data([0xC4]), on: transport, timeout: nil) }
+        await waitUntil { await transport.queuedCount == 1 }
+        second.cancel()
+
+        do {
+            _ = try await second.value
+            XCTFail("a cancelled waiter must throw")
+        } catch is CancellationError {
+            // expected
+        }
+
+        let reply = try await first.value
+        XCTAssertEqual(reply, LedgerReplies.firmwareVersion(3, 9, 3), "the holder's own exchange must still complete normally")
+
+        let closeCount = await transport.closeCount
+        XCTAssertEqual(closeCount, 0, "a cancellation that never reached the wire must not close the transport")
+    }
+}
+
+/// A scripted transport with its own internal admission gate around `exchange(_:timeout:)`,
+/// mirroring `LedgerBluetoothTransport`: one exchange on the wire at a time, and a caller the gate
+/// refuses throws ``LedgerExchangeNotStarted`` rather than letting the gate's own `CancellationError`
+/// read as an exchange failure. `ScriptedLedgerTransport` has no gate of its own, so it cannot stand
+/// in for this.
+private actor GatedScriptedLedgerTransport: LedgerAPDUTransport {
+    private let gate = LedgerSerialGate()
+    private let delayNanoseconds: UInt64
+    private let script: @Sendable (Data) throws -> Data
+    private(set) var exchangesStarted = 0
+    private(set) var closeCount = 0
+
+    var queuedCount: Int {
+        get async { await gate.queuedCount }
+    }
+
+    init(delayNanoseconds: UInt64, script: @escaping @Sendable (Data) throws -> Data) {
+        self.delayNanoseconds = delayNanoseconds
+        self.script = script
+    }
+
+    func exchange(_ apdu: Data, timeout: TimeInterval?) async throws -> Data {
+        do {
+            try await gate.acquire()
+        } catch {
+            throw LedgerExchangeNotStarted()
+        }
+
+        exchangesStarted += 1
+        do {
+            if delayNanoseconds > 0 {
+                try await Task.sleep(nanoseconds: delayNanoseconds)
+            }
+            let reply = try script(apdu)
+            await gate.release()
+            return reply
+        } catch {
+            await gate.release()
+            throw error
+        }
+    }
+
+    func close() async {
+        closeCount += 1
+    }
 }

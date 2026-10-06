@@ -57,11 +57,16 @@ extension LedgerFFIError {
 }
 
 /// Converts a failure inside the Ledger integration into the error the public API throws: a
-/// ``ZcashError`` for every Ledger failure, and a `CancellationError` passed through unchanged.
+/// ``ZcashError`` for every Ledger failure, a `CancellationError` passed through unchanged, and a
+/// transport's ``LedgerExchangeNotStarted`` normalized to that same `CancellationError` -- it is
+/// every caller's signal that nothing was sent, not a transport failure, whichever of them reaches
+/// this function with it.
 func ledgerZcashError(_ error: Error) -> Error {
     switch error {
     case let ffiError as LedgerFFIError:
         return ffiError.zcashError
+    case is LedgerExchangeNotStarted:
+        return CancellationError()
     case is ZcashError, is CancellationError:
         return error
     default:

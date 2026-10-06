@@ -5,17 +5,32 @@
 
 import Foundation
 
+/// Thrown by a transport's `exchange(_:timeout:)` when its own internal admission gate (such as
+/// ``LedgerSerialGate``) refuses a caller before anything was sent, rather than letting that
+/// cancellation propagate as an ordinary exchange failure. A caller sees a plain `CancellationError`
+/// for it (``ledgerZcashError(_:)`` maps it there, and ``LedgerCommands/exchange`` rethrows it
+/// directly), and the transport that reports it is never closed: nothing reached the wire, so every
+/// other user of that transport is unaffected.
+struct LedgerExchangeNotStarted: Error {}
+
 /// The exchange rules the pairing commands and the signing ceremony share.
 enum LedgerCommands {
     /// Exchanges one command, closing the transport when the exchange fails.
     ///
     /// A failed exchange may have put its command on the wire and left the reply uncollected, so the
     /// transport cannot be trusted with another command: it is closed, whatever the failure, before
-    /// the error is rethrown. A cancelled task counts as a failed exchange.
+    /// the error is rethrown. A cancelled task counts as a failed exchange -- unless it is cancelled
+    /// before this call even reaches the transport (checked up front, not inside the `do` below), or
+    /// the transport itself reports, via ``LedgerExchangeNotStarted``, that its own admission gate
+    /// refused the caller before anything was sent: neither one put anything on the wire, so neither
+    /// is a failure of the transport, and the transport is left open.
     static func exchange(_ apdu: Data, on transport: LedgerAPDUTransport, timeout: TimeInterval?) async throws -> Data {
+        try Task.checkCancellation()
+
         do {
-            try Task.checkCancellation()
             return try await transport.exchange(apdu, timeout: timeout)
+        } catch is LedgerExchangeNotStarted {
+            throw CancellationError()
         } catch {
             await transport.close()
             throw ledgerZcashError(error)
