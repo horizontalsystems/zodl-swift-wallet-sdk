@@ -21,7 +21,7 @@ final class GiftCardCancellationTests: ZcashTestCase {
         fixture.encoder.propose = {
             predecessorEntered.fulfill()
             await gate.wait()
-            return FfiProposalFixtures.makeProposal(steps: [])
+            return FfiProposalFixtures.makeProposal(steps: [FfiProposalFixtures.Step(inputValues: [50_000], changeValues: [], fee: 10_000)])
         }
         let predecessor = Task { try await fixture.redeemer.check() }
         await fulfillment(of: [predecessorEntered], timeout: 5)
@@ -39,7 +39,7 @@ final class GiftCardCancellationTests: ZcashTestCase {
         redemption.cancel()
         fixture.encoder.propose = {
             XCTFail("Cancelled queued redemption must not prepare a proposal")
-            return FfiProposalFixtures.makeProposal(steps: [])
+            return FfiProposalFixtures.makeProposal(steps: [FfiProposalFixtures.Step(inputValues: [50_000], changeValues: [], fee: 10_000)])
         }
         await gate.open()
         _ = try await predecessor.value
@@ -62,7 +62,7 @@ final class GiftCardCancellationTests: ZcashTestCase {
         fixture.encoder.propose = {
             proposalEntered.fulfill()
             await gate.wait()
-            return FfiProposalFixtures.makeProposal(steps: [])
+            return FfiProposalFixtures.makeProposal(steps: [FfiProposalFixtures.Step(inputValues: [50_000], changeValues: [], fee: 10_000)])
         }
         let finished = XCTestExpectation(description: "cancelled preparation finished")
         let redemption = Task {
@@ -94,7 +94,7 @@ final class GiftCardCancellationTests: ZcashTestCase {
         fixture.encoder.propose = {
             predecessorEntered.fulfill()
             await gate.wait()
-            return FfiProposalFixtures.makeProposal(steps: [])
+            return FfiProposalFixtures.makeProposal(steps: [FfiProposalFixtures.Step(inputValues: [50_000], changeValues: [], fee: 10_000)])
         }
         let predecessor = Task { try await fixture.redeemer.check() }
         await fulfillment(of: [predecessorEntered], timeout: 5)
@@ -267,7 +267,7 @@ final class GiftCardCancellationEncoder: TransactionEncoder {
 
     func proposeSendMax(accountUUID: AccountUUID, recipient: String, memoBytes: MemoBytes?, mode: MaxSpendMode) async throws -> Proposal {
         if let propose { return try await propose() }
-        return FfiProposalFixtures.makeProposal(steps: [])
+        return FfiProposalFixtures.makeProposal(steps: [FfiProposalFixtures.Step(inputValues: [50_000], changeValues: [], fee: 10_000)])
     }
 
     func requiresSaplingParameters(for proposal: Proposal) throws -> Bool { false }

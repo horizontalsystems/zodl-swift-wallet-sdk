@@ -38,7 +38,11 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `init(card:network:endpoint:isTorEnabled:storageDirectory:loggingPolicy:)`, then `check()` (syncs
   the card wallet from its birthday and returns a `GiftCardStatus`: `.ready`, `.pending` while the
   card's funds wait for their 10 confirmations, `.dust` when the fee would take all of its
-  spendable funds, or `.empty`, with `total`, `spendable` and `pending` amounts),
+  spendable funds, or `.empty`, with `total`, `spendable` and `pending` amounts; a `.ready` status
+  also carries `fee`, the ZIP 317 fee a redemption pays for the card's actual notes, and
+  `redeemable`, what it sends to the recipient after that fee, both from the same send-max
+  proposal the redemption makes, so show `redeemable` rather than `spendable` minus a guessed fee;
+  `fee` is `nil` and `redeemable` is `.zero` in every other state),
   `redeem(to:memo:)` (sends the whole spendable balance, with an optional memo, minus the ZIP 317
   fee to a `UnifiedAddress` and returns the `TransactionSubmitResult`s), and `cleanup()` (stops the
   temporary wallet and deletes all of its files). `isTorEnabled` routes the card wallet's birthday
@@ -61,7 +65,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the main wallet shows the incoming gift at once and can spend it after the default 3
   confirmations. This works while the destination is stopped, and only with the
   SDK's own synchronizers (`SDKSynchronizer`, `SlipstreamSynchronizer`). It returns a
-  `GiftCardRedeemer.Redemption` with the submission `results` and `recordedInDestination`, which is
+  `GiftCardRedeemer.Redemption` with the submission `results`, the `fee` paid, the `amount` sent to
+  the recipient, and `recordedInDestination`, which is
   `false` — never an error — when the destination could not record the claim, including when the
   claim does not involve the destination's wallet and so was not stored there; the funds are on
   chain once mined. When trust was never recorded and the claim pays the destination wallet, normal

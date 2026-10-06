@@ -11,7 +11,8 @@ public struct GiftCardStatus: Equatable {
     /// What the card can do right now.
     public enum State: Equatable {
         /// The card has funds that can be redeemed now: ``GiftCardStatus/spendable`` is more than
-        /// the fee of the transaction that sweeps it.
+        /// the fee of the transaction that sweeps it. ``GiftCardStatus/fee`` and
+        /// ``GiftCardStatus/redeemable`` say what a redemption pays and sends.
         case ready
         /// The card has funds, but not enough of them are spendable yet: they are waiting for
         /// confirmations.
@@ -30,6 +31,24 @@ public struct GiftCardStatus: Equatable {
         case empty
     }
 
+    /// What sweeping the card's spendable funds would pay and send, as librustzcash proposes it.
+    struct Sweep: Equatable {
+        /// The fee of the transaction (or transactions) that sweep the card.
+        let fee: Zatoshi
+        /// What the recipient receives: the value the sweep spends, minus `fee`.
+        let amount: Zatoshi
+
+        /// The fee and the amount of a send-max `proposal`.
+        init(proposal: Proposal) {
+            self.init(fee: proposal.totalFeeRequired(), amount: proposal.totalSpendValue() - proposal.totalFeeRequired())
+        }
+
+        init(fee: Zatoshi, amount: Zatoshi) {
+            self.fee = fee
+            self.amount = amount
+        }
+    }
+
     /// What the card can do right now.
     public let state: State
     /// Every shielded value the card wallet holds, spendable or not.
@@ -38,25 +57,39 @@ public struct GiftCardStatus: Equatable {
     public let spendable: Zatoshi
     /// The value still waiting for confirmations: `total - spendable`.
     public let pending: Zatoshi
+    /// The fee a redemption pays now, as librustzcash proposes it for the card's actual spendable
+    /// notes (ZIP 317: more than the 10,000 zatoshi minimum for a card holding several notes).
+    /// Set only when ``state`` is ``State/ready``; `nil` otherwise.
+    public let fee: Zatoshi?
+    /// What a redemption sends to the recipient now: the value it spends minus ``fee``, as the same
+    /// proposal computes it. This is the amount to show the user before they redeem. Non-zero only
+    /// when ``state`` is ``State/ready``; `.zero` otherwise.
+    public let redeemable: Zatoshi
 
     /// - Parameters:
     ///   - balance: the card account's balance, if the account has one.
-    ///   - spendableCoversFee: whether the spendable value exceeds the fee of the transaction
-    ///     that sweeps it; only meaningful when it is non-zero.
-    init(balance: AccountBalance?, spendableCoversFee: Bool) {
+    ///   - sweep: what sweeping the spendable funds would pay and send, or `nil` when nothing is
+    ///     spendable or the fee would take all of it.
+    init(balance: AccountBalance?, sweep: Sweep?) {
         let total = balance?.shieldedTotal() ?? .zero
         let spendable = balance?.shieldedSpendableValue ?? .zero
         self.total = total
         self.spendable = spendable
         self.pending = total - spendable
-        if spendable > .zero && spendableCoversFee {
+        if spendable > .zero, let sweep, sweep.amount > .zero {
             state = .ready
-        } else if pending > .zero {
-            state = .pending
-        } else if spendable > .zero {
-            state = .dust
+            fee = sweep.fee
+            redeemable = sweep.amount
         } else {
-            state = .empty
+            fee = nil
+            redeemable = .zero
+            if pending > .zero {
+                state = .pending
+            } else if spendable > .zero {
+                state = .dust
+            } else {
+                state = .empty
+            }
         }
     }
 }
@@ -67,7 +100,8 @@ public struct GiftCardStatus: Equatable {
 ///
 /// 1. ``check()`` creates the card wallet from the card's seed and birthday, syncs it, and reports
 ///    what it holds (``GiftCardStatus``): ready, pending confirmations, dust (less than the fee),
-///    or empty.
+///    or empty. A ready card comes with the fee its redemption pays and the amount it sends
+///    (``GiftCardStatus/fee``, ``GiftCardStatus/redeemable``).
 /// 2. ``redeem(to:memo:recordIn:)`` sends the card's entire spendable balance, minus the fee, to
 ///    the given address. The transaction discards the outgoing viewing key (``OvkPolicy/discard``):
 ///    the card's key — which its issuer can rederive — cannot reveal where the funds went. It only
@@ -128,6 +162,11 @@ public actor GiftCardRedeemer {
         /// When the claim pays this wallet and trust was never recorded, normal sync can discover
         /// it as an ordinary untrusted receive. An unrelated destination does not receive the claim.
         public let recordedInDestination: Bool
+        /// The fee the redemption paid, deducted from the card's balance.
+        public let fee: Zatoshi
+        /// What the redemption sends to the recipient: the value of the notes it spends, minus
+        /// ``fee``, as its proposal computes it.
+        public let amount: Zatoshi
     }
 
     /// The card being redeemed.
@@ -287,9 +326,11 @@ public actor GiftCardRedeemer {
     /// The first call restores the card wallet from the card's birthday, which downloads and scans
     /// the blocks since then. It returns once the wallet is up to date.
     ///
-    /// When the card has spendable funds, this also works out, without creating anything, whether
-    /// they cover the fee of the transaction that would sweep them; when they do not, the state is
-    /// ``GiftCardStatus/State/dust`` rather than ``GiftCardStatus/State/ready``.
+    /// When the card has spendable funds, this also proposes, without creating anything, the
+    /// transaction that would sweep them, so that the fee their notes require decides: when it
+    /// takes everything, the state is ``GiftCardStatus/State/dust`` rather than
+    /// ``GiftCardStatus/State/ready``; otherwise the status reports that fee and the amount the
+    /// sweep sends (``GiftCardStatus/fee``, ``GiftCardStatus/redeemable``).
     ///
     /// - Returns: the card's balance and whether it can be redeemed now.
     /// - Throws: the sync error if the card wallet cannot sync (for instance, the server is
@@ -422,11 +463,11 @@ public actor GiftCardRedeemer {
         try await waitUntilUpToDate(ignoringStaleError: restarting)
 
         let balance = try await synchronizer.getAccountsBalances()[accountUUID]
-        var coversFee = true
+        var sweep: GiftCardStatus.Sweep?
         if let spendable = balance?.shieldedSpendableValue, spendable > .zero {
-            coversFee = try await spendableCoversFee(accountUUID: accountUUID)
+            sweep = try await proposedSweep(accountUUID: accountUUID)
         }
-        return GiftCardStatus(balance: balance, spendableCoversFee: coversFee)
+        return GiftCardStatus(balance: balance, sweep: sweep)
     }
 
     private func performRedeem(to recipient: UnifiedAddress, memo: Memo?, recordIn destination: Synchronizer?) async throws -> Redemption {
@@ -491,7 +532,8 @@ public actor GiftCardRedeemer {
                 )
             }
         }
-        return Redemption(results: results, recordedInDestination: recorded)
+        let sweep = GiftCardStatus.Sweep(proposal: proposal)
+        return Redemption(results: results, recordedInDestination: recorded, fee: sweep.fee, amount: sweep.amount)
     }
 
     private func performCleanup() async throws {
@@ -637,22 +679,24 @@ extension GiftCardRedeemer {
         (initializer.rustBackend as? ZcashRustBackend)?.confirmationsPolicy
     }
 
-    /// Whether sweeping the card's spendable funds would leave anything for the recipient.
+    /// What sweeping the card's spendable funds would pay and send, or `nil` when the fee would
+    /// take everything.
     ///
-    /// librustzcash computes the fee: a send-max proposal (never turned into a transaction) to
-    /// the card's own address, which has the same Orchard receiver as any wallet's, fails with
-    /// insufficient funds exactly when the fee takes everything.
-    private func spendableCoversFee(accountUUID: AccountUUID) async throws -> Bool {
+    /// librustzcash computes both: a send-max proposal (never turned into a transaction) to the
+    /// card's own address, which has the same Orchard receiver as any wallet's, so it spends the
+    /// same notes and pays the same fee as the redemption. It fails with insufficient funds exactly
+    /// when the fee takes everything.
+    private func proposedSweep(accountUUID: AccountUUID) async throws -> GiftCardStatus.Sweep? {
         do {
-            _ = try await synchronizer.proposeSendMax(
+            let proposal = try await synchronizer.proposeSendMax(
                 accountUUID: accountUUID,
                 recipient: .unified(card.fundingAddress),
                 memo: nil,
                 mode: .maxSpendable
             )
-            return true
+            return GiftCardStatus.Sweep(proposal: proposal)
         } catch ZcashError.rustProposalInsufficientFunds {
-            return false
+            return nil
         }
     }
 

@@ -222,30 +222,71 @@ final class GiftCardTests: ZcashTestCase {
             )
         }
 
-        let ready = GiftCardStatus(balance: balance(spendable: 1_010_000, pending: 0), spendableCoversFee: true)
+        let sweep = GiftCardStatus.Sweep(fee: Zatoshi(10_000), amount: Zatoshi(1_000_000))
+        let ready = GiftCardStatus(balance: balance(spendable: 1_010_000, pending: 0), sweep: sweep)
         XCTAssertEqual(ready.state, .ready)
         XCTAssertEqual(ready.spendable, Zatoshi(1_010_000))
         XCTAssertEqual(ready.pending, .zero)
+        XCTAssertEqual(ready.fee, Zatoshi(10_000))
+        XCTAssertEqual(ready.redeemable, Zatoshi(1_000_000))
 
-        let partly = GiftCardStatus(balance: balance(spendable: 20_000, pending: 500), spendableCoversFee: true)
+        let partly = GiftCardStatus(balance: balance(spendable: 20_000, pending: 500), sweep: GiftCardStatus.Sweep(fee: Zatoshi(10_000), amount: Zatoshi(10_000)))
         XCTAssertEqual(partly.state, .ready)
         XCTAssertEqual(partly.total, Zatoshi(20_500))
         XCTAssertEqual(partly.pending, Zatoshi(500))
+        XCTAssertEqual(partly.redeemable, Zatoshi(10_000))
 
-        let pending = GiftCardStatus(balance: balance(spendable: 0, pending: 1_010_000), spendableCoversFee: true)
+        let pending = GiftCardStatus(balance: balance(spendable: 0, pending: 1_010_000), sweep: nil)
         XCTAssertEqual(pending.state, .pending)
         XCTAssertEqual(pending.spendable, .zero)
         XCTAssertEqual(pending.pending, Zatoshi(1_010_000))
+        XCTAssertNil(pending.fee)
+        XCTAssertEqual(pending.redeemable, .zero)
 
         // Spendable funds the fee would take entirely: dust, unless more is on its way.
-        let dust = GiftCardStatus(balance: balance(spendable: 10_000, pending: 0), spendableCoversFee: false)
+        let dust = GiftCardStatus(balance: balance(spendable: 10_000, pending: 0), sweep: nil)
         XCTAssertEqual(dust.state, .dust)
         XCTAssertEqual(dust.spendable, Zatoshi(10_000))
-        let dustAndPending = GiftCardStatus(balance: balance(spendable: 10_000, pending: 500_000), spendableCoversFee: false)
+        XCTAssertNil(dust.fee)
+        XCTAssertEqual(dust.redeemable, .zero)
+        let dustAndPending = GiftCardStatus(balance: balance(spendable: 10_000, pending: 500_000), sweep: nil)
         XCTAssertEqual(dustAndPending.state, .pending)
+        // A sweep that would send nothing is no sweep at all.
+        let zeroSweep = GiftCardStatus(balance: balance(spendable: 10_000, pending: 0), sweep: GiftCardStatus.Sweep(fee: Zatoshi(10_000), amount: .zero))
+        XCTAssertEqual(zeroSweep.state, .dust)
+        XCTAssertNil(zeroSweep.fee)
 
-        XCTAssertEqual(GiftCardStatus(balance: balance(spendable: 0, pending: 0), spendableCoversFee: true).state, .empty)
-        XCTAssertEqual(GiftCardStatus(balance: nil, spendableCoversFee: true).state, .empty)
+        XCTAssertEqual(GiftCardStatus(balance: balance(spendable: 0, pending: 0), sweep: nil).state, .empty)
+        XCTAssertEqual(GiftCardStatus(balance: nil, sweep: nil).state, .empty)
+    }
+
+    /// The fee and the amount a card reports come from the send-max proposal the redemption makes:
+    /// a card holding several notes pays more than the 10,000 zatoshi minimum, and receives less.
+    func testSweepIsReadFromTheProposal() {
+        let singleNote = FfiProposalFixtures.makeProposal(
+            steps: [FfiProposalFixtures.Step(inputValues: [10_010_000], changeValues: [], fee: 10_000)]
+        )
+        XCTAssertEqual(GiftCardStatus.Sweep(proposal: singleNote), GiftCardStatus.Sweep(fee: Zatoshi(10_000), amount: Zatoshi(10_000_000)))
+
+        let threeNotes = FfiProposalFixtures.makeProposal(
+            steps: [FfiProposalFixtures.Step(inputValues: [5_000_000, 3_000_000, 2_010_000], changeValues: [], fee: 15_000)]
+        )
+        let sweep = GiftCardStatus.Sweep(proposal: threeNotes)
+        XCTAssertEqual(sweep.fee, Zatoshi(15_000))
+        XCTAssertEqual(sweep.amount, Zatoshi(9_995_000))
+
+        let status = GiftCardStatus(
+            balance: AccountBalance(
+                saplingBalance: .zero,
+                orchardBalance: .zero,
+                ironwoodBalance: PoolBalance(spendableValue: Zatoshi(10_010_000), changePendingConfirmation: .zero, valuePendingSpendability: .zero),
+                unshielded: .zero
+            ),
+            sweep: sweep
+        )
+        XCTAssertEqual(status.state, .ready)
+        XCTAssertEqual(status.fee, Zatoshi(15_000))
+        XCTAssertEqual(status.redeemable, Zatoshi(9_995_000))
     }
 
     // MARK: - Confirmation policy (ZIP 315)
@@ -587,7 +628,7 @@ final class GiftCardTests: ZcashTestCase {
         XCTAssertTrue(message.contains("Gift card"), message)
         XCTAssertFalse(message.contains("destination is busy"), "the error's associated value must stay out of the logs")
 
-        let redemption = GiftCardRedeemer.Redemption(results: [.success(txId: Self.claimTxId)], recordedInDestination: recorded)
+        let redemption = GiftCardRedeemer.Redemption(results: [.success(txId: Self.claimTxId)], recordedInDestination: recorded, fee: Zatoshi(10_000), amount: Zatoshi(10_000_000))
         XCTAssertEqual(redemption.results, [.success(txId: Self.claimTxId)])
         XCTAssertFalse(redemption.recordedInDestination)
     }
@@ -614,7 +655,7 @@ final class GiftCardTests: ZcashTestCase {
         XCTAssertTrue(message.contains("Gift card"), message)
         XCTAssertFalse(message.contains("not stored in destination"), "the error's associated value must stay out of the logs")
 
-        let redemption = GiftCardRedeemer.Redemption(results: [.success(txId: Self.claimTxId)], recordedInDestination: recorded)
+        let redemption = GiftCardRedeemer.Redemption(results: [.success(txId: Self.claimTxId)], recordedInDestination: recorded, fee: Zatoshi(10_000), amount: Zatoshi(10_000_000))
         XCTAssertEqual(redemption.results, [.success(txId: Self.claimTxId)])
         XCTAssertFalse(redemption.recordedInDestination)
     }

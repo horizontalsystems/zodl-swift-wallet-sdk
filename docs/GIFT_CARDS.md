@@ -45,7 +45,7 @@ let redeemer = try GiftCardRedeemer(
 
 let status = try await redeemer.check()             // syncs the card wallet from its birthday
 switch status.state {
-case .ready:   break                                // status.spendable can be swept now
+case .ready:   break                                // show status.redeemable: what redeem() sends, after status.fee
 case .pending: break                                // waiting for 10 confirmations; check() again later
 case .dust:    break                                // the fee would take everything; nothing to redeem
 case .empty:   break                                // already redeemed, or never funded
@@ -58,6 +58,7 @@ let redemption = try await redeemer.redeem(
     recordIn: mainSynchronizer                       // the wallet myUnifiedAddress belongs to
 )
 // redemption.results: one TransactionSubmitResult per created transaction (usually one)
+// redemption.amount: what the recipient receives; redemption.fee: the fee paid from the card
 // redemption.recordedInDestination: the trusted claim is visible in main-wallet history
 // Recording alone does not confirm the claim or make its funds spendable (ZIP 315).
 try await mainSynchronizer.start()
