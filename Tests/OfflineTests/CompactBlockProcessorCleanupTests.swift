@@ -604,6 +604,8 @@ final class CompactBlockProcessorCleanupTests: ZcashTestCase {
             }))
         }
         await fulfillment(of: [entered], timeout: 5)
+        let reservedRewind = await processor.rewindTask
+        let rewindOwner = try XCTUnwrap(reservedRewind)
         // Cancelling the public waiter must not remove the independently owned
         // rewind writer from the subsequent drain's ownership.
         rewind.cancel()
@@ -631,6 +633,9 @@ final class CompactBlockProcessorCleanupTests: ZcashTestCase {
         try await rewind.value
         await stop.value
         try await cleanup.value
+        await rewindOwner.value
+        let timerAfterCleanup = await processor.rewindPollingTimerValidity()
+        XCTAssertNil(timerAfterCleanup)
         XCTAssertEqual(events.events.filter { $0 == "rewind:done" }.count, 1)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
     }

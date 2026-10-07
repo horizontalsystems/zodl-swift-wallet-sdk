@@ -114,6 +114,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Fixed
 
+- `SDKSynchronizer.rewind(_:)` keeps stopped and never-started wallets stopped after success or failure.
+  A stop requested during rewind also prevents automatic polling from restarting. Call `start()` explicitly to resume syncing.
+
 - Block download shutdown now waits for in-flight storage writes even when its caller is
   cancelled. Cancellation during the final write no longer starts an extended download range.
   No call-site changes are required. (MOB-2138)

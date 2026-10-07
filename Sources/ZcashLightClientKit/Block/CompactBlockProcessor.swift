@@ -22,7 +22,7 @@ actor CompactBlockProcessor {
     private(set) var syncTask: Task<Void, Error>?
     private var mempoolDetectionTask: Task<Void, Error>?
     private var pollTask: Task<Void, Never>?
-    private var rewindTask: Task<Void, Never>?
+    private(set) var rewindTask: Task<Void, Never>?
     private var drainTask: Task<Void, Never>?
     private var wipeTask: Task<Void, Never>?
     private var wipeContexts: [AfterSyncHooksManager.WipeContext] = []
@@ -414,25 +414,35 @@ extension CompactBlockProcessor {
 
     private func reserveIdleRewinds() -> Task<Void, Never> {
         if let rewindTask { return rewindTask }
+        let retryTimerAllowed = backoffTimer?.isValid == true
         admissionGeneration &+= 1
+        let generation = admissionGeneration
         backoffTimer?.invalidate()
         backoffTimer = nil
         let task = Task {
             while drainTask == nil, wipeTask == nil, !afterSyncHooksManager.isEmpty {
                 let hooks = afterSyncHooksManager
                 afterSyncHooksManager = AfterSyncHooksManager()
-                for rewind in hooks.rewindContexts() { try? await doRewind(context: rewind) }
+                for rewind in hooks.rewindContexts() {
+                    try? await doRewind(context: rewind, retryTimerAllowed: retryTimerAllowed, expectedGeneration: generation)
+                }
             }
             // Any pending contexts after teardown admission belong to its owner.
             // Retain this task through timer restoration and all terminal callbacks.
-            if drainTask == nil, wipeTask == nil { await setTimer() }
+            if retryTimerAllowed, generation == admissionGeneration, drainTask == nil, wipeTask == nil, hasRetryAttempt() {
+                await setTimer()
+            }
             rewindTask = nil
         }
         rewindTask = task
         return task
     }
 
-    private func doRewind(context: AfterSyncHooksManager.RewindContext) async throws {
+    private func doRewind(
+        context: AfterSyncHooksManager.RewindContext,
+        retryTimerAllowed: Bool = true,
+        expectedGeneration: UInt64? = nil
+    ) async throws {
         logger.debug("Executing rewind.")
         let lastDownloaded = await latestBlocksDataProvider.maxScannedHeight
         var rewindHeight = BlockHeight(Int32(context.height ?? lastDownloaded) - 10)
@@ -452,7 +462,7 @@ extension CompactBlockProcessor {
             }
             try await rewindDownloadBlockAction(to: rewindHeight)
         } catch {
-            await failure(error)
+            await failure(error, retryTimerAllowed: retryTimerAllowed, expectedGeneration: expectedGeneration)
             return await context.completion(.failure(error))
         }
 
@@ -962,7 +972,7 @@ extension CompactBlockProcessor {
         }
     }
 
-    private func failure(_ error: Error) async {
+    private func failure(_ error: Error, retryTimerAllowed: Bool = true, expectedGeneration: UInt64? = nil) async {
         await context.update(state: .failed)
 
         logger.error("Fail with error: \(error)")
@@ -971,7 +981,7 @@ extension CompactBlockProcessor {
         await send(event: .failed(error))
 
         // don't set a new timer if there are no more attempts.
-        if hasRetryAttempt() {
+        if retryTimerAllowed, expectedGeneration == nil || expectedGeneration == admissionGeneration, hasRetryAttempt() {
             await self.setTimer()
         }
     }
