@@ -3578,7 +3578,7 @@ pub unsafe extern "C" fn zcashlc_set_transaction_trust(
 ) -> bool {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        let mut db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
 
         let txid_bytes = unsafe { slice::from_raw_parts(txid_bytes, txid_bytes_len) };
         let txid = TxId::read(txid_bytes)?;
@@ -5330,7 +5330,7 @@ mod tests {
             &path,
             NetworkParams::Standard(TestNetwork),
             SystemClock,
-            OsRng,
+            system_rng(),
         )
         .expect("opens a fresh wallet db");
         init_wallet_db(&mut db, None).expect("initializes the wallet schema");

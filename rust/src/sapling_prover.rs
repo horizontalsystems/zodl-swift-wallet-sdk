@@ -15,7 +15,7 @@ use std::slice;
 
 use ffi_helpers::panic::catch_panic;
 use prost::Message;
-use rand::RngCore;
+use rand::rand_core::Rng;
 use sapling::{
     Diversifier, MerklePath, PaymentAddress, ProofGenerationKey, Rseed,
     bundle::GrothProofBytes,
@@ -150,7 +150,7 @@ impl SpendProver for SaplingProver {
         )
     }
 
-    fn create_proof<R: RngCore>(&self, circuit: circuit::Spend, rng: &mut R) -> Self::Proof {
+    fn create_proof<R: Rng>(&self, circuit: circuit::Spend, rng: &mut R) -> Self::Proof {
         SpendProver::create_proof(self.local(), circuit, rng)
     }
 
@@ -172,7 +172,7 @@ impl OutputProver for SaplingProver {
         <LocalTxProver as OutputProver>::prepare_circuit(esk, payment_address, rcm, value, rcv)
     }
 
-    fn create_proof<R: RngCore>(&self, circuit: circuit::Output, rng: &mut R) -> Self::Proof {
+    fn create_proof<R: Rng>(&self, circuit: circuit::Output, rng: &mut R) -> Self::Proof {
         OutputProver::create_proof(self.local(), circuit, rng)
     }
 
