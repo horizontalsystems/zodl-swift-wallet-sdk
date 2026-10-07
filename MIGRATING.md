@@ -35,7 +35,8 @@ state until cleanup succeeds; do not force-delete the root or assume a replaceme
 
 Wipe/storage failures keep ownership and are retried automatically with capped exponential delay.
 Dropping a used redeemer also transfers cleanup to retained process ownership; leftover sweeping
-skips these wallets. These changes add no redemption or submission retries.
+skips these wallets. Once cleanup is requested, ownership also survives dropping a redeemer that
+was never checked. These changes add no redemption or submission retries.
 
 
 ## `TxId` validates its length — `init(_: [UInt8])` throws

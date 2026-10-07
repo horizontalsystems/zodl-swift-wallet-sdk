@@ -143,7 +143,8 @@ public struct GiftCardStatus: Equatable {
 ///   stops the wait (the wallet keeps syncing) and throws `CancellationError`.
 /// - ``cleanup()`` is always safe for the funds: the card's key is in the link, not in the
 ///   temporary wallet. Unredeemed funds stay on the card and a new redeemer can sweep them.
-/// - Releasing a used redeemer transfers cleanup to retained process ownership. A crash or the
+/// - Releasing a used redeemer, or one with cleanup requested, retains process ownership until
+///   teardown succeeds. A crash or the
 ///   app being killed can leave files behind. They hold the
 ///   card's keys and the claim's recipient, so call ``removeLeftoverWallets(in:)`` at launch.
 ///   During asynchronous teardown after release, leftover cleanup leaves that wallet protected.
@@ -339,7 +340,7 @@ public actor GiftCardRedeemer {
     }
 
     deinit {
-        if hasUsedWallet {
+        if hasUsedWallet || isCleanedUp {
             if GiftCardRedeemerRegistry.retainCleanup(alias: alias, owner: owner, coordinator: cleanupCoordinator) {
                 cleanupCoordinator.requestCleanup(after: tail)
             }

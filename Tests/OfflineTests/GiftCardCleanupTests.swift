@@ -71,6 +71,49 @@ final class GiftCardCleanupTests: ZcashTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
     }
 
+    func testUnusedCancelledCleanupRetainsOwnershipAfterRedeemerIsDropped() async throws {
+        let clock = GiftCardCleanupTestClock()
+        defer { clock.dispose() }
+        var fixture: GiftCardCancellationFixture? = try await GiftCardCancellationFixture.make(
+            storageDirectory: testTempDirectory,
+            cleanupTiming: clock.timing
+        )
+        let card = try XCTUnwrap(fixture).card
+        let engine = try XCTUnwrap(fixture).engine
+        let root = testTempDirectory.appendingPathComponent(card.synchronizerAlias.description)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let marker = root.appendingPathComponent("unused-wallet-marker")
+        try Data([1]).write(to: marker)
+        engine.stopGate.close()
+        let entered = XCTestExpectation(description: "unused wallet wipe reached stop")
+        await engine.onCall("stop") { entered.fulfill() }
+        let cleanup = startCleanup(try XCTUnwrap(fixture).redeemer)
+        await fulfillment(of: [entered], timeout: 5)
+        cleanup.cancel()
+        do {
+            try await cleanup.value
+            XCTFail("Cancellation must detach the unused redeemer's waiter")
+        } catch is CancellationError {
+        }
+        weak let old = fixture?.redeemer
+        fixture = nil
+        XCTAssertNil(old)
+        assertAlreadyActive(card: card)
+        XCTAssertEqual(try GiftCardRedeemer.removeLeftoverWallets(in: testTempDirectory), 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+        engine.stopGate.open()
+        try await waitForRelease(card: card)
+        let replacement = try makeReplacement(card: card)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let replacementMarker = root.appendingPathComponent("replacement-marker")
+        try Data([2]).write(to: replacementMarker)
+        let calls = await engine.calls
+        XCTAssertEqual(calls.filter { $0 == "close" }.count, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: replacementMarker.path))
+        assertAlreadyActive(card: card)
+        withExtendedLifetime(replacement) {}
+    }
+
     func testCleanupTimeoutIncludesQueuedWorkAndLateSuccessReleasesOwnership() async throws {
         let clock = GiftCardCleanupTestClock()
         defer { clock.dispose() }

@@ -177,7 +177,8 @@ discovers the claim as an ordinary untrusted receive with the ten-confirmation w
   root deletion retries removal alone. These are teardown retries, never claim/submission retries.
 - Dropping a used redeemer transfers teardown to retained process ownership. Cleanup continues
   without any external redeemer reference, and `removeLeftoverWallets(in:)` skips it until teardown
-  succeeds. An unused redeemer releases its claim immediately when dropped.
+  succeeds. An unused redeemer releases its claim immediately when dropped only if cleanup has
+  never been requested; once requested, teardown keeps ownership until it succeeds.
 - `cleanup()` never loses funds: the key is in the link. If a submission failed, clean up and use
   a new redeemer to retry, because the old one treats the notes as spent until its transaction
   expires.
