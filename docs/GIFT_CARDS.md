@@ -51,14 +51,15 @@ case .dust:    break                                // the fee would take everyt
 case .empty:   break                                // already redeemed, or never funded
 }
 
-mainSynchronizer.stop()                             // optional: lets the claim have the database
+await mainSynchronizer.stopAndWait()                // optional: await the main wallet's stop operation
 let redemption = try await redeemer.redeem(
     to: myUnifiedAddress,
     memo: try Memo(string: "Gift card"),
     recordIn: mainSynchronizer                       // the wallet myUnifiedAddress belongs to
 )
 // redemption.results: one TransactionSubmitResult per created transaction (usually one)
-// redemption.recordedInDestination: the main wallet knows the claim and trusts it (ZIP 315)
+// redemption.recordedInDestination: the trusted claim is visible in main-wallet history
+// Recording alone does not confirm the claim or make its funds spendable (ZIP 315).
 try await mainSynchronizer.start()
 
 try await redeemer.cleanup()                        // stops and deletes the temporary wallet
@@ -85,45 +86,52 @@ untrusted, and `check()` reports `.pending` until it has 10 confirmations. This 
 matters: the issuer can rederive the card's key, and could in principle try to undo the funding
 with a reorg. Ten confirmations is ZIP 315's bar for funds that someone else controlled.
 
-**The claim side: 3.** The claim spends only notes that already had 10 confirmations, and this
-device chose its recipient, built it and signed it. To the main wallet it looks like an external
-receive, which would wait 10 confirmations more; ZIP 315 lets a wallet "enable specific external
-transactions as trusted", and the SDK records the claim as trusted, so the main wallet can spend
-the gift after 3 confirmations — the same wait as its own change.
+**The claim side: 3 when recorded as trusted.** After an accepted submission, the destination
+stores the claim and explicitly marks it trusted. Its outputs use the default three-confirmation
+wait. This is a policy choice for faster spendability, with an accepted residual risk: even after
+card funding has ten confirmations, the issuer and anyone holding the link share its spending
+key and can sign a competing spend of the same inputs. Constructing the claim on this device
+does not establish exclusive control over them. A competing spend could replace the claim in a
+reorg after three to nine confirmations, and the destination could lose a gift it had already
+spent from. This is not a claim that an attack has been reproduced, nor does a ten-confirmation
+wait eliminate every possible reorg. When trust was never recorded, normal receiving-wallet sync
+discovers the claim as an ordinary untrusted receive with the ten-confirmation wait.
 
-That is a product decision, and it carries a residual risk that the 10-confirmation rule would have
-covered. The card's spending key is in the link, so anyone holding the link — including whoever
-minted the card — can sign a competing spend of the same notes. If such a spend wins a reorg of 3
-to 9 blocks, the claim is undone, and anything the user already spent from the gift after its
-third confirmation is undone with it. The SDK accepts that risk for gift cards in exchange for the
-shorter wait; it does not apply to the card side, which keeps the full 10.
-
-## Trust of the claim transaction
+## Immediate claim recording
 
 - Pass the main wallet's synchronizer as `recordIn:`. Once a server has accepted the claim,
   `GiftCardRedeemer` reads the raw transaction back from the card wallet and stores it in the
-  destination (the receive shows at once, unmined, with its memo), marked as trusted. The main
-  wallet can then spend the gift after 3 confirmations instead of 10. The next sync mines the
-  stored transaction as usual.
+  destination (the receive shows at once, unmined, with its memo), explicitly marked as trusted.
+  The main wallet uses the trusted transfer policy: three confirmations by default before
+  the gift becomes spendable. The next sync mines the stored transaction as usual.
 - Only the SDK's own synchronizers (`SDKSynchronizer`, `SlipstreamSynchronizer`) can record the
-  claim. The trust calls are internal to the SDK: which transaction to trust is decided by the
-  redeemer, never by a caller with an arbitrary transaction or id. With any other conformer,
-  `recordedInDestination` is `false` and the claim arrives through sync.
+  claim. Recording is internal to the SDK. With any other conformer, `recordedInDestination` is
+  `false`. Normal sync can discover the claim when it pays that wallet; an unrelated wallet
+  does not receive it.
 - The call goes straight to the wallet database, so it works while the main synchronizer is
   stopped — which is how an app typically runs a claim, so the two wallets do not compete for the
-  shared database executor. Restart the main synchronizer afterwards.
+  shared database executor. The example uses a main synchronizer typed as
+  `AwaitableStopSynchronizer`, the optional capability both SDK implementations support. Await
+  `stopAndWait()` before starting work that needs the stop operation to finish; synchronous
+  `stop()` only requests it. The classic synchronizer joins processor-owned sync, mempool,
+  rewind, polling and action work before returning; queued automatic restarts are superseded by this stop.
+  Slipstream completes its queued teardown and earlier lifecycle work, but its engine can return a
+  non-quiescent stop. Both complete even when no new stopped state is emitted, including idle or
+  unprepared paths. Keep ownership of the pause so other app lifecycle paths do not start the main wallet
+  while the claim is running, then restart it afterwards.
 - Recording can never fail the redemption: the funds are already on their way. A failure is logged
-  and reported as `Redemption.recordedInDestination == false`; the main wallet then learns about the
-  claim from the chain, as an ordinary (untrusted, 10-confirmation) receive. Nothing is lost.
-- `recordedInDestination` is `true` only when the claim is actually stored in the destination and
-  marked as trusted. A claim that does not involve the destination's wallet (`recordIn:` is not the
-  wallet `recipient` belongs to) is not stored there, so nothing is trusted and the flag is `false`.
+  and reported as `Redemption.recordedInDestination == false`. When the claim pays the specified
+  wallet, normal sync can discover it from the chain as an ordinary untrusted receive if trust was
+  never recorded. An unrelated `recordIn:` wallet does not receive the claim.
+- `recordedInDestination` is `true` only when the claim is stored in the destination and
+  explicitly marked as trusted. A claim that does not involve the destination wallet
+  (`recordIn:` is not the wallet `recipient` belongs to) is not stored there, so the flag is `false`.
 - Only accepted submissions (`.success`) are recorded. A transaction rejected by every server is
   not stored in the destination.
-- Trust shortens the wait, and so weakens safety against reorgs for the claim: a reorg of 3 to 9
-  blocks that replaces it with a competing spend by another holder of the card link undoes a gift
-  the user may already have spent from (see [Confirmations](#confirmations-zip-315)). This is an
-  accepted product decision. Trust never makes an unmined output spendable.
+- Recording a claim explicitly sets its trusted status, including when repeated after an untrusted
+  status. It does not migrate historical claims or other stored trust records, or change the SDK's
+  general support for marking transactions as trusted or untrusted.
+- Immediate history visibility does not make an unmined output spendable.
 
 ## Lifecycle and concurrency
 
@@ -138,6 +146,21 @@ shorter wait; it does not apply to the card side, which keeps the full 10.
   `giftCardRedeemerAlreadyActive` until the first is cleaned up or released.
 - Calls on a redeemer run one at a time, in order. Cancelling the task awaiting `check()` stops
   the wait (throws `CancellationError`); the card wallet keeps syncing until `cleanup()`.
+- A cancelled queued `check()` or `redeem(to:memo:recordIn:)` throws `CancellationError`
+  when its turn arrives. Cancellation is checked again after redemption preparation and on the
+  database executor immediately before native claim creation. Cancellation observed at these
+  checkpoints prevents storing or submitting a claim. Once synchronous native creation starts,
+  it cannot be cancelled or rolled back; cancellation does not establish whether the claim was
+  created or submitted, so recheck the card before retrying.
+- `cleanup()` runs to completion even when the calling task is cancelled, including when it was
+  queued behind another operation. It first joins the card wallet's processor writers, then waits
+  for `wipe()` terminal completion and releases its Tor connection caches and isolated clients
+  before closing its root Tor runtime and removing the directory. The redeemer and card alias stay
+  owned throughout. A terminal wipe failure permits directory fallback only after those same writer
+  and resource boundaries; directory deletion errors reach the caller. Stalled writers, wipe or
+  native shutdown can keep cleanup and same-card reuse pending indefinitely. Cancellation or dropping the
+  caller's reference does not authorize early deletion or release, and leftover-wallet cleanup
+  continues to skip this wallet. This does not promise universal engine quiescence.
 - `cleanup()` never loses funds: the key is in the link. If a submission failed, clean up and use
   a new redeemer to retry, because the old one treats the notes as spent until its transaction
   expires.

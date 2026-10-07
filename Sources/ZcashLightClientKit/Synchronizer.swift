@@ -2227,28 +2227,24 @@ extension UUID {
     }
 }
 
-// MARK: - Trusted external transactions (ZIP 315)
+// MARK: - Immediate incoming transactions
 
-/// A wallet that can store a transaction another wallet on this device authored and treat it as
-/// trusted in the sense of [ZIP 315](https://zips.z.cash/zip-0315).
-///
-/// The outputs of a trusted transaction become spendable after the trusted confirmation count (3
-/// by default) instead of the untrusted one (10) that applies to every other receive from outside
-/// the wallet. That is only sound for a transaction whose construction this device controlled,
-/// such as a gift card claim swept by ``GiftCardRedeemer``, so this is not public API: the SDK
-/// decides what to trust, never a caller with an arbitrary transaction or id. `SDKSynchronizer`
-/// and `SlipstreamSynchronizer` conform.
+/// A wallet that can store a trusted transaction before its next sync. `SDKSynchronizer` and
+/// `SlipstreamSynchronizer` conform. Gift-card claims use this internal contract to apply the
+/// three-confirmation trusted policy. The card's shared spending key still permits competing
+/// spends during a reorg, even though this device constructed the claim.
 protocol TrustedTransactionRecording: AnyObject {
-    /// Stores `rawTransaction` at once (the receive shows before any sync, unmined) and marks it
-    /// as trusted. It goes straight to the wallet database and works while the synchronizer is
-    /// stopped.
+    /// Stores `rawTransaction` at once (the receive shows before any sync, unmined) and explicitly
+    /// marks it as trusted, including when recorded again. The default transfer policy requires
+    /// three confirmations before its funds become spendable. This goes straight to the wallet
+    /// database and works while the synchronizer is stopped.
     ///
     /// - Parameters:
     ///   - rawTransaction: the complete serialized transaction, as broadcast.
     ///   - txId: the transaction's id. It must be the id of `rawTransaction`.
     /// - Throws: `ZcashError.rustDecryptAndStoreTransaction` if the transaction cannot be stored,
     ///   `ZcashError.synchronizerTrustedTransactionIdMismatch` if `txId` is not the id of
-    ///   `rawTransaction` (the transaction is stored, but nothing is trusted), and
+    ///   `rawTransaction` (the transaction is stored, but its trust status is unchanged), and
     ///   `ZcashError.rustSetTransactionTrust` if the trust status cannot be recorded, which
     ///   includes a transaction that does not involve this wallet and so was not stored.
     func recordTrustedTransaction(_ rawTransaction: Data, txId: TxId) async throws

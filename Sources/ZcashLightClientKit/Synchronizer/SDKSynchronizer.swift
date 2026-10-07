@@ -11,7 +11,7 @@ import Combine
 
 /// Synchronizer implementation for UIKit and iOS 13+
 // swiftlint:disable type_body_length file_length
-public class SDKSynchronizer: Synchronizer {
+public class SDKSynchronizer: AwaitableStopSynchronizer {
     public var alias: ZcashSynchronizerAlias { initializer.alias }
 
     private lazy var streamsUpdateQueue = { DispatchQueue(label: "streamsUpdateQueue_\(initializer.alias.description)") }()
@@ -267,24 +267,43 @@ public class SDKSynchronizer: Synchronizer {
         }
     }
 
-    /// Stops the synchronizer
+    /// Stops the synchronizer and joins its processor-owned sync, mempool, rewind, poll and action work.
+    /// Caller cancellation does not interrupt the owned drain.
+    public func stopAndWait() async {
+        await stopTask().value
+    }
+
+    /// Requests a stop and returns immediately while the stop body runs in its own task.
     public func stop() {
-        // Calling `await blockProcessor.stop()` make take some time. If the downloading of blocks is in progress then this method inside waits until
-        // downloading is really done. Which could block execution of the code on the client side. So it's better strategy to spin up new task and
-        // exit fast on client side.
+        _ = stopTask()
+    }
+
+    /// Both entry points own exactly one stop task. Caller cancellation cannot skip its teardown.
+    private func stopTask() -> Task<Void, Never> {
         Task(priority: .high) {
-            await sdkFlags.sdkStopped()
-
-            let status = await self.status
-            guard status != .stopped, status != .disconnected else {
-                logger.info("attempted to stop when status was: \(status)")
-                return
-            }
-
-            await blockProcessor.stop()
-            await exchangeRateTor?.sleep()
-            await httpTor?.sleep()
+            await self.stopImpl()
         }
+    }
+
+    private func stopImpl() async {
+        await sdkFlags.sdkStopped()
+
+        await blockProcessor.stopAndWait()
+        await exchangeRateTor?.sleep()
+        await httpTor?.sleep()
+    }
+
+    /// Card-only final resource release. The redeemer has serialized and drained
+    /// every card operation before calling this helper.
+    func closeGiftCardResources() async throws {
+        // Tor's service cache drops native connection owners synchronously. The
+        // direct gRPC service's detached NIO shutdown is not an awaited drain.
+        await initializer.lightWalletService.closeConnections()
+        try await exchangeRateTor?.close()
+        exchangeRateTor = nil
+        try await httpTor?.close()
+        httpTor = nil
+        try await initializer.container.resolve(TorClient.self).close()
     }
 
     // MARK: Witnesses Fix
@@ -1382,7 +1401,7 @@ public class SDKSynchronizer: Synchronizer {
         try await initializer.rustBackend.deleteAccount(accountUUID)
     }
 
-    // MARK: Trusted external transactions (ZIP 315)
+    // MARK: Immediate incoming transactions
     //
     // Both go straight to the wallet database: they are meant to be called about a transaction
     // another wallet on this device just broadcast (a gift card claim), typically while this
@@ -1400,8 +1419,7 @@ public class SDKSynchronizer: Synchronizer {
         try await initializer.rustBackend.setTransactionTrust(txId: storedTxId, trusted: true)
     }
 
-    /// Marks a stored transaction as trusted or untrusted (ZIP 315). Internal: see
-    /// `TrustedTransactionRecording`.
+    /// Marks a stored transaction as trusted or untrusted (ZIP 315). Internal to the SDK.
     func setTransactionTrust(txId: TxId, trusted: Bool) async throws {
         try await initializer.rustBackend.setTransactionTrust(txId: Data(txId.id), trusted: trusted)
     }

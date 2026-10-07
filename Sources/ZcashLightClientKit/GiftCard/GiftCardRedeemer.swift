@@ -74,9 +74,9 @@ public struct GiftCardStatus: Equatable {
 ///    spends Orchard and Ironwood notes to an Orchard receiver, so it never downloads the Sapling
 ///    parameters. Given the user's own synchronizer as the destination, the claim is recorded
 ///    there at once as a trusted transaction (ZIP 315), so the main wallet shows it immediately
-///    and can spend it after 3 confirmations instead of the 10 of an ordinary external receive.
-///    That is sound because the claim spends notes that already had 10 confirmations in the card
-///    wallet, and this device built and signed it; see `docs/GIFT_CARDS.md`.
+///    and can spend it after the default three confirmations. The issuer and anyone holding the
+///    link share the card's spending key, so a competing spend during a reorg remains a risk;
+///    see `docs/GIFT_CARDS.md`.
 /// 3. ``cleanup()`` stops the card wallet and deletes every file it created.
 ///
 /// ### Isolation and lifecycle
@@ -94,7 +94,8 @@ public struct GiftCardStatus: Equatable {
 ///
 /// - The SDK does not stop two synchronizers from sharing an alias, so this type does: only one
 ///   redeemer per card may be alive in the process at a time. Creating a second one throws
-///   ``ZcashError/giftCardRedeemerAlreadyActive`` until the first is cleaned up or released.
+///   ``ZcashError/giftCardRedeemerAlreadyActive`` until the first is cleaned up, or its asynchronous
+///   teardown after release finishes. Teardown retains the alias while writers and native resources drain.
 /// - Calls on one redeemer are serialized in the order they are made; a ``redeem(to:)`` issued
 ///   while ``check()`` is syncing runs after it.
 /// - Both wallets share the SDK's global database executor, so every wallet-database call of
@@ -109,6 +110,7 @@ public struct GiftCardStatus: Equatable {
 /// - Releasing a redeemer without ``cleanup()`` (or a crash, or the app being killed) leaves its
 ///   files behind until a redeemer for the same card is created and cleaned up. They hold the
 ///   card's keys and the claim's recipient, so call ``removeLeftoverWallets(in:)`` at launch.
+///   During asynchronous teardown after release, leftover cleanup leaves that wallet protected.
 /// - After a redeem whose submission failed, the card wallet considers the notes spent until the
 ///   transaction expires, so a second ``redeem(to:)`` on the same redeemer finds nothing to
 ///   spend. Clean up and create a new redeemer to retry; the notes are spent at most once on
@@ -119,12 +121,12 @@ public actor GiftCardRedeemer {
         /// The submission result of each created transaction (usually one). A `.success` means a
         /// server accepted it; the funds arrive once it is mined.
         public let results: [TransactionSubmitResult]
-        /// Whether every accepted claim transaction was handed to the destination synchronizer as a
-        /// trusted transaction. `false` when no destination was given, when no transaction was
-        /// accepted, or when the destination failed to record one (including when the claim does
-        /// not involve the destination's wallet, so it stored nothing); the redemption itself is
-        /// unaffected, and the destination learns about the claim when it next syncs, as an
-        /// ordinary external receive.
+        /// Whether every accepted claim transaction was stored in the destination wallet and marked
+        /// as trusted. `false` when no destination was given, when no transaction was accepted,
+        /// or when the destination failed to record one (including when the claim does
+        /// not involve its wallet, so it stored nothing). The redemption itself is unaffected.
+        /// When the claim pays this wallet and trust was never recorded, normal sync can discover
+        /// it as an ordinary untrusted receive. An unrelated destination does not receive the claim.
         public let recordedInDestination: Bool
     }
 
@@ -135,6 +137,7 @@ public actor GiftCardRedeemer {
     /// to log.
     public nonisolated let alias: ZcashSynchronizerAlias
 
+    private let owner: UUID
     private let network: ZcashNetwork
     private let rootDirectory: URL
     private let initializer: Initializer
@@ -169,12 +172,35 @@ public actor GiftCardRedeemer {
         storageDirectory: URL = GiftCardRedeemer.defaultStorageDirectory,
         loggingPolicy: Initializer.LoggingPolicy = .noLogging
     ) throws {
+        try self.init(
+            card: card,
+            network: network,
+            endpoint: endpoint,
+            isTorEnabled: isTorEnabled,
+            storageDirectory: storageDirectory,
+            loggingPolicy: loggingPolicy,
+            container: DIContainer(),
+            makeSynchronizer: { SDKSynchronizer(initializer: $0) }
+        )
+    }
+
+    init(
+        card: GiftCard,
+        network: ZcashNetwork,
+        endpoint: LightWalletEndpoint,
+        isTorEnabled: Bool,
+        storageDirectory: URL,
+        loggingPolicy: Initializer.LoggingPolicy,
+        container: DIContainer,
+        makeSynchronizer: (Initializer) -> SDKSynchronizer
+    ) throws {
         guard card.network == network.networkType else {
             throw ZcashError.giftCardNetworkMismatch
         }
 
         let alias = card.synchronizerAlias
-        guard GiftCardRedeemerRegistry.claim(alias) else {
+        let owner = UUID()
+        guard GiftCardRedeemerRegistry.claim(alias, owner: owner) else {
             throw ZcashError.giftCardRedeemerAlreadyActive
         }
 
@@ -186,6 +212,7 @@ public actor GiftCardRedeemer {
         let rootDirectory = storageDirectory.appendingPathComponent(alias.description, isDirectory: true)
 
         let initializer = Initializer(
+            container: container,
             cacheDbURL: nil,
             fsBlockDbRoot: rootDirectory.appendingPathComponent("fs_cache", isDirectory: true),
             generalStorageURL: rootDirectory.appendingPathComponent("general_storage", isDirectory: true),
@@ -209,11 +236,12 @@ public actor GiftCardRedeemer {
 
         self.card = card
         self.alias = alias
+        self.owner = owner
         self.network = network
         self.rootDirectory = rootDirectory
         self.initializer = initializer
         self.checkpointSource = checkpointSource
-        self.synchronizer = SDKSynchronizer(initializer: initializer)
+        self.synchronizer = makeSynchronizer(initializer)
     }
 
     /// Fetches the server's tree state for the block before the card's birthday, so the card
@@ -238,10 +266,20 @@ public actor GiftCardRedeemer {
     }
 
     deinit {
-        // A redeemer released without `cleanup()` must not leave its wallet syncing, nor keep the
-        // card from being redeemed again. Its files stay behind; see the type's documentation.
-        synchronizer.stop()
-        GiftCardRedeemerRegistry.release(alias)
+        guard !isCleanedUp else { return }
+        // Transfer the resource and alias owners without retaining deinitializing self.
+        // Files stay behind, protected from replacement and leftover cleanup until
+        // processor writers and card-owned native resources have finished.
+        Task { [synchronizer, alias, owner] in
+            await synchronizer.stopAndWait()
+            do {
+                try await synchronizer.closeGiftCardResources()
+            } catch {
+                // Keep the alias reserved if resource teardown could not finish.
+                return
+            }
+            GiftCardRedeemerRegistry.release(alias, owner: owner)
+        }
     }
 
     /// Creates (on first use) and syncs the card wallet, then reports what the card holds.
@@ -281,14 +319,18 @@ public actor GiftCardRedeemer {
     /// swept; value still waiting for confirmations stays on the card.
     ///
     /// When `destination` is given, every accepted claim transaction is stored in it once the
-    /// submission is over, and marked as trusted: the wallet
-    /// shows the receive at once, and treats it as trusted in the sense of
-    /// [ZIP 315](https://zips.z.cash/zip-0315) — this device authored the transaction — so the funds
-    /// are spendable after 3 confirmations rather than the 10 of an external receive. This works
-    /// while `destination` is stopped. A failure to record never fails the redemption, since the
-    /// funds are already on their way on chain: it is logged, and reported through
-    /// ``Redemption/recordedInDestination``; the destination then learns about the claim when it
-    /// next syncs, as an ordinary external receive.
+    /// submission is over, and marked as trusted under [ZIP 315](https://zips.z.cash/zip-0315):
+    /// the wallet shows the receive at once, and its funds become spendable after the default
+    /// three confirmations. The card's externally funded notes still need ten confirmations.
+    /// Its issuer and anyone holding the link share the spending key, so constructing the claim
+    /// here does not establish exclusive control over its inputs. A competing spend could replace
+    /// the claim during a reorg after three to nine confirmations, including after the gift was
+    /// spent from. This is the accepted tradeoff for faster spendability.
+    ///
+    /// Recording works while `destination` is stopped. A failure to record never fails the
+    /// redemption: it is logged and reported through ``Redemption/recordedInDestination``.
+    /// When the claim pays this wallet, normal sync can discover it as an ordinary untrusted
+    /// receive if trust was never recorded. An unrelated destination does not receive the claim.
     ///
     /// - Parameters:
     ///   - recipient: the user's own address, on the card's network.
@@ -304,7 +346,8 @@ public actor GiftCardRedeemer {
     ///   ``ZcashError/giftCardNetworkMismatch`` for an address on another network, and the
     ///   proposal and creation errors of `Synchronizer.proposeSendMax(accountUUID:recipient:memo:mode:)`
     ///   and `Synchronizer.createProposedTransactions(proposal:spendingKey:ovkPolicy:)`. The
-    ///   destination's errors are never thrown.
+    ///   destination's errors are never thrown. Cancellation observed before native creation throws
+    ///   `CancellationError`; creation already underway cannot be rolled back.
     public func redeem(to recipient: UnifiedAddress, memo: Memo?, recordIn destination: Synchronizer?) async throws -> Redemption {
         try await serialized { redeemer in
             try await redeemer.performRedeem(to: recipient, memo: memo, recordIn: destination)
@@ -313,33 +356,49 @@ public actor GiftCardRedeemer {
 
     /// Stops the card wallet and deletes every file it created, then frees the card for another
     /// redeemer. The redeemer cannot be used afterwards. Calling it again does nothing.
+    /// Cancellation does not interrupt cleanup. The redeemer and its alias stay owned until
+    /// its writers drain, wipe terminates and its Tor resources close. Stalled work can keep
+    /// this call pending indefinitely.
     ///
     /// - Throws: the error from deleting the files, if any; the wallet is stopped and the card
     ///   freed regardless.
     public func cleanup() async throws {
-        try await serialized { redeemer in
+        try await serialized(cancellationPolicy: .teardown) { redeemer in
             try await redeemer.performCleanup()
         }
     }
 
     // MARK: - Private
 
+    private enum CancellationPolicy {
+        case cancellable
+        case teardown
+    }
+
     /// Runs `operation` after every operation issued before it has finished. Actor isolation alone
     /// does not serialize these calls: each suspends at its awaits, which would let a redeem start
     /// while a check is still syncing, or a cleanup delete the wallet under a redeem.
-    private func serialized<T>(_ operation: @escaping (GiftCardRedeemer) async throws -> T) async throws -> T {
+    private func serialized<T>(
+        cancellationPolicy: CancellationPolicy = .cancellable,
+        _ operation: @escaping (GiftCardRedeemer) async throws -> T
+    ) async throws -> T {
         let previous = tail
         let task = Task<T, Error> {
             await previous?.value
+            if cancellationPolicy == .cancellable {
+                try Task.checkCancellation()
+            }
             return try await operation(self)
         }
         tail = Task { _ = try? await task.value }
-        // The operation runs in its own task so that the next one can wait for it; forward the
-        // caller's cancellation to it.
+        // Teardown must finish even when its caller is cancelled. Cancellable work forwards
+        // cancellation into its own task, including while waiting behind a predecessor.
         return try await withTaskCancellationHandler {
             try await task.value
         } onCancel: {
-            task.cancel()
+            if cancellationPolicy == .cancellable {
+                task.cancel()
+            }
         }
     }
 
@@ -403,6 +462,8 @@ public actor GiftCardRedeemer {
             try tool.deriveUnifiedSpendingKey(seed: seed, accountIndex: Zip32AccountIndex(0))
         }
 
+        // Preparatory awaits may ignore cancellation. Check before creation can store a claim.
+        try Task.checkCancellation()
         let stream = try await synchronizer.createProposedTransactions(
             proposal: proposal,
             spendingKey: spendingKey,
@@ -425,7 +486,9 @@ public actor GiftCardRedeemer {
                     logger: initializer.logger
                 )
             } else {
-                initializer.logger.warn("Gift card: the destination cannot record trusted transactions; it will learn about the claim from the chain")
+                initializer.logger.warn(
+                    "Gift card: the destination cannot record incoming transactions; it will learn about the claim from the chain"
+                )
             }
         }
         return Redemption(results: results, recordedInDestination: recorded)
@@ -437,13 +500,13 @@ public actor GiftCardRedeemer {
         }
         isCleanedUp = true
         accountUUID = nil
-        defer { GiftCardRedeemerRegistry.release(alias) }
+        defer { GiftCardRedeemerRegistry.release(alias, owner: owner) }
 
-        synchronizer.stop()
-        // `wipe()` waits for a running sync to stop and closes the wallet's database connections
-        // before deleting its files. A failure here is not fatal: the directory removal below
-        // deletes the same files.
+        // Wipe can fail validation before it reaches the processor. Always pass
+        // the explicit writer boundary before permitting directory fallback.
+        await synchronizer.stopAndWait()
         try? await Self.awaitCompletion(of: synchronizer.wipe())
+        try await synchronizer.closeGiftCardResources()
 
         if FileManager.default.fileExists(atPath: rootDirectory.path) {
             try FileManager.default.removeItem(at: rootDirectory)
@@ -593,7 +656,7 @@ extension GiftCardRedeemer {
         }
     }
 
-    /// Hands every accepted transaction in `results` to `destination` as a trusted transaction.
+    /// Hands every accepted transaction in `results` to `destination` as a trusted receive.
     ///
     /// Nothing here can fail the redemption: the transactions are already with the servers. A
     /// missing raw transaction or a destination error is logged — without the error's associated
@@ -629,19 +692,14 @@ extension GiftCardRedeemer {
         return recordedAny
     }
 
-    /// Waits for `publisher` to complete, or for `timeout` to pass, whichever comes first.
-    ///
-    /// `wipe()` reports through a `PassthroughSubject` that a task completes, so a wipe that
-    /// finishes before this subscribes would never be observed; the timeout bounds that case.
-    private static func awaitCompletion(
-        of publisher: AnyPublisher<Void, Error>,
-        timeout: TimeInterval = 30
-    ) async throws {
+    /// Waits for terminal completion, even when the caller is cancelled. A pending wipe must
+    /// keep its wallet and alias owned; elapsed time is not evidence that deletion is safe.
+    static func awaitCompletion(of publisher: AnyPublisher<Void, Error>) async throws {
         let waiter = PublisherCompletionWaiter()
         // The waiter owns the subscription; keep it alive until the continuation resumes.
         defer { withExtendedLifetime(waiter) {} }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            waiter.begin(continuation: continuation, publisher: publisher, timeout: timeout)
+            waiter.begin(continuation: continuation, publisher: publisher)
         }
     }
 }
@@ -653,25 +711,32 @@ extension GiftCardRedeemer {
 /// what keeps two redeemers of the same card apart.
 enum GiftCardRedeemerRegistry {
     private static let lock = NSLock()
-    private static var active: Set<ZcashSynchronizerAlias> = []
+    private static var active: [ZcashSynchronizerAlias: UUID] = [:]
 
-    static func claim(_ alias: ZcashSynchronizerAlias) -> Bool {
+    static func claim(_ alias: ZcashSynchronizerAlias, owner: UUID) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return active.insert(alias).inserted
+        guard active[alias] == nil else {
+            return false
+        }
+        active[alias] = owner
+        return true
     }
 
-    static func release(_ alias: ZcashSynchronizerAlias) {
+    static func release(_ alias: ZcashSynchronizerAlias, owner: UUID) {
         lock.lock()
         defer { lock.unlock() }
-        active.remove(alias)
+        guard active[alias] == owner else {
+            return
+        }
+        active.removeValue(forKey: alias)
     }
 
     /// Runs `body` with the active aliases, holding off every claim and release until it returns.
     static func withActiveAliases<T>(_ body: (Set<ZcashSynchronizerAlias>) throws -> T) rethrows -> T {
         lock.lock()
         defer { lock.unlock() }
-        return try body(active)
+        return try body(Set(active.keys))
     }
 }
 
@@ -734,17 +799,13 @@ private final class SyncWaiter {
     }
 }
 
-/// Resumes a continuation once, when a `Void` publisher completes or a timeout passes.
+/// Resumes a continuation once, only when a `Void` publisher completes.
 private final class PublisherCompletionWaiter {
     private let lock = NSLock()
     private var cancellable: AnyCancellable?
 
-    func begin(continuation: CheckedContinuation<Void, Error>, publisher: AnyPublisher<Void, Error>, timeout: TimeInterval) {
+    func begin(continuation: CheckedContinuation<Void, Error>, publisher: AnyPublisher<Void, Error>) {
         let resumed = OneShot()
-        DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
-            guard resumed.fire() else { return }
-            continuation.resume()
-        }
         let cancellable = publisher.sink(
             receiveCompletion: { completion in
                 guard resumed.fire() else { return }

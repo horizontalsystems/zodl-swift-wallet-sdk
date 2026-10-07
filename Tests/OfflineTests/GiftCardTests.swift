@@ -251,8 +251,8 @@ final class GiftCardTests: ZcashTestCase {
     // MARK: - Confirmation policy (ZIP 315)
 
     /// Card notes come from another wallet, so they are untrusted and need 10 confirmations; the
-    /// claim recorded as trusted in the main wallet needs 3. Both come from the transfer policy,
-    /// which this pins so that a change to the default cannot loosen the card side unnoticed.
+    /// successfully recorded claim is trusted in the main wallet and needs 3. Both use the transfer policy,
+    /// which this pins so that a change to the default cannot loosen either wait unnoticed.
     func testConfirmationPoliciesArePinned() async throws {
         let card = try GiftCard(link: Self.zodlTestnetLink)
         let redeemer = try GiftCardRedeemer(
@@ -270,10 +270,10 @@ final class GiftCardTests: ZcashTestCase {
         XCTAssertEqual(cardPolicy.toBackend().untrusted, 10)
         XCTAssertEqual(cardPolicy.toBackend().trusted, 3)
 
-        // The destination wallet spends a recorded (trusted) claim under the same transfer policy.
+        // The destination wallet spends a recorded trusted claim under the same transfer policy.
         let walletPolicy = ConfirmationsPolicy.defaultTransferPolicy()
-        XCTAssertEqual(walletPolicy.trusted, 3, "a recorded claim is trusted: 3 confirmations")
-        XCTAssertEqual(walletPolicy.untrusted, 10)
+        XCTAssertEqual(walletPolicy.trusted, 3)
+        XCTAssertEqual(walletPolicy.untrusted, 10, "external card funding requires 10 confirmations")
 
         try await redeemer.cleanup()
     }
@@ -365,21 +365,35 @@ final class GiftCardTests: ZcashTestCase {
         try await next.cleanup()
     }
 
-    func testReleasingARedeemerFreesTheCard() throws {
+    func testOldRedeemerDeinitCannotReleaseItsReplacement() async throws {
         let card = try GiftCard(link: Self.zodlTestnetLink)
         let network = ZcashNetworkBuilder.network(for: .testnet)
-
-        var redeemer: GiftCardRedeemer? = try GiftCardRedeemer(
+        var old: GiftCardRedeemer? = try GiftCardRedeemer(
             card: card,
             network: network,
             endpoint: LightWalletEndpointBuilder.default,
             isTorEnabled: false,
             storageDirectory: testTempDirectory
         )
-        XCTAssertNotNil(redeemer)
-        redeemer = nil
+        weak var oldReference = old
+        try await old?.cleanup()
 
-        XCTAssertNoThrow(
+        let replacement = try GiftCardRedeemer(
+            card: card,
+            network: network,
+            endpoint: LightWalletEndpointBuilder.default,
+            isTorEnabled: false,
+            storageDirectory: testTempDirectory
+        )
+        old = nil
+        // The completed cleanup task may briefly retain the old actor until its tail finishes.
+        // Wait for its actual release so this tests deinit rather than that temporary retention.
+        while oldReference != nil {
+            await Task.yield()
+        }
+        XCTAssertNil(oldReference)
+
+        XCTAssertThrowsError(
             try GiftCardRedeemer(
                 card: card,
                 network: network,
@@ -387,7 +401,71 @@ final class GiftCardTests: ZcashTestCase {
                 isTorEnabled: false,
                 storageDirectory: testTempDirectory
             )
+        ) { error in
+            guard case ZcashError.giftCardRedeemerAlreadyActive = error else {
+                return XCTFail("Unexpected error \(error.localizedDescription)")
+            }
+        }
+
+        let directory = testTempDirectory.appendingPathComponent(replacement.alias.description, isDirectory: true)
+        let marker = directory.appendingPathComponent("live-wallet-marker")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data([1]).write(to: marker)
+        XCTAssertEqual(try GiftCardRedeemer.removeLeftoverWallets(in: testTempDirectory), 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path), "the replacement still owns its wallet")
+
+        try await replacement.cleanup()
+        let next = try GiftCardRedeemer(
+            card: card,
+            network: network,
+            endpoint: LightWalletEndpointBuilder.default,
+            isTorEnabled: false,
+            storageDirectory: testTempDirectory
         )
+        try await next.cleanup()
+    }
+
+    func testReleasingARedeemerFreesTheCardAfterTeardown() async throws {
+        let card = try GiftCard(link: Self.zodlTestnetLink)
+        let network = ZcashNetworkBuilder.network(for: .testnet)
+        let storageDirectory = try XCTUnwrap(testTempDirectory)
+        var redeemer: GiftCardRedeemer? = try GiftCardRedeemer(
+            card: card,
+            network: network,
+            endpoint: LightWalletEndpointBuilder.default,
+            isTorEnabled: false,
+            storageDirectory: storageDirectory
+        )
+        XCTAssertNotNil(redeemer)
+        redeemer = nil
+
+        let admitted = XCTestExpectation(description: "card becomes available after deinit teardown")
+        let replacement = Task { () throws -> GiftCardRedeemer in
+            while true {
+                try Task.checkCancellation()
+                do {
+                    let next = try GiftCardRedeemer(
+                        card: card,
+                        network: network,
+                        endpoint: LightWalletEndpointBuilder.default,
+                        isTorEnabled: false,
+                        storageDirectory: storageDirectory
+                    )
+                    admitted.fulfill()
+                    return next
+                } catch ZcashError.giftCardRedeemerAlreadyActive {
+                    await Task.yield()
+                }
+            }
+        }
+        let result = await XCTWaiter.fulfillment(of: [admitted], timeout: 5)
+        XCTAssertEqual(result, .completed)
+        guard result == .completed else {
+            replacement.cancel()
+            return
+        }
+        let next = try await replacement.value
+        try await next.cleanup()
     }
 
     // MARK: - Recording the claim in the destination wallet (ZIP 315)
@@ -407,7 +485,7 @@ final class GiftCardTests: ZcashTestCase {
         return logger
     }
 
-    func testAnAcceptedClaimIsRecordedInTheDestinationAsTrusted() async {
+    func testAnAcceptedClaimIsRecordedInTheDestination() async {
         let destination = makeDestination()
         let logger = makeLogger()
         var lookedUp: [Data] = []
@@ -450,7 +528,10 @@ final class GiftCardTests: ZcashTestCase {
         let rejectedOnly = await GiftCardRedeemer.record(
             [.grpcFailure(txId: other, error: .timeOut)],
             in: destination,
-            rawTransaction: { _ in XCTFail("no lookup for a rejected transaction"); return nil },
+            rawTransaction: { _ in
+                XCTFail("no lookup for a rejected transaction")
+                return nil
+            },
             logger: logger
         )
         XCTAssertFalse(rejectedOnly)
@@ -511,6 +592,33 @@ final class GiftCardTests: ZcashTestCase {
         XCTAssertFalse(redemption.recordedInDestination)
     }
 
+    func testAnUnstoredDestinationClaimIsReportedNotRecorded() async {
+        let destination = makeDestination()
+        destination.recordTrustedTransactionTxIdClosure = { _, _ in
+            throw ZcashError.rustSetTransactionTrust("not stored in destination")
+        }
+        let logger = makeLogger()
+
+        let recorded = await GiftCardRedeemer.record(
+            [.success(txId: Self.claimTxId)],
+            in: destination,
+            rawTransaction: { _ in Self.claimRaw },
+            logger: logger
+        )
+
+        XCTAssertEqual(destination.recordTrustedTransactionTxIdCallsCount, 1)
+        XCTAssertEqual(destination.recordTrustedTransactionTxIdReceivedArguments?.txId, try TxId([UInt8](Self.claimTxId)))
+        XCTAssertFalse(recorded, "the funds are on chain either way; only the flag reports the failure")
+        XCTAssertEqual(logger.warnFileFunctionLineCallsCount, 1)
+        let message = logger.warnFileFunctionLineReceivedArguments?.message ?? ""
+        XCTAssertTrue(message.contains("Gift card"), message)
+        XCTAssertFalse(message.contains("not stored in destination"), "the error's associated value must stay out of the logs")
+
+        let redemption = GiftCardRedeemer.Redemption(results: [.success(txId: Self.claimTxId)], recordedInDestination: recorded)
+        XCTAssertEqual(redemption.results, [.success(txId: Self.claimTxId)])
+        XCTAssertFalse(redemption.recordedInDestination)
+    }
+
     func testAClaimMissingFromTheCardWalletIsLoggedAndNotRecorded() async {
         let destination = makeDestination()
         let logger = makeLogger()
@@ -542,6 +650,45 @@ final class GiftCardTests: ZcashTestCase {
         XCTAssertNil(source.birthday(for: birthday).ironwoodTree)
         // A birthday below the fetched state falls back to the bundled grid.
         XCTAssertEqual(source.birthday(for: birthday - 100).height, bundled.birthday(for: birthday - 100).height)
+    }
+
+    func testCheckpointSourceFallbacksStartStrictlyBeforeGiftCardBirthdays() {
+        let cases: [(NetworkType, BlockHeight)] = [
+            (.mainnet, 3_500_000),
+            (.testnet, 3_000_000),
+            (.mainnet, 1_687_104),
+            (.testnet, 1_842_420)
+        ]
+
+        for (network, birthday) in cases {
+            let bundled = CheckpointSourceFactory.fromBundle(for: network)
+            let source = GiftCardCheckpointSource(bundled: bundled)
+
+            let fallback = source.birthday(for: birthday)
+
+            XCTAssertLessThan(fallback.height, birthday, "network: \(network), birthday: \(birthday)")
+            XCTAssertLessThanOrEqual(fallback.height + 1, birthday, "network: \(network), birthday: \(birthday)")
+            XCTAssertEqual(
+                fallback.height,
+                bundled.birthday(for: birthday - 1).height,
+                "network: \(network), birthday: \(birthday)"
+            )
+        }
+    }
+
+    func testCheckpointSourceDoesNotServeCachedStateAtItsExactHeight() {
+        let bundled = CheckpointSourceFactory.fromBundle(for: .testnet)
+        let source = GiftCardCheckpointSource(bundled: bundled)
+        let birthday = BlockHeight(4_453_870)
+        let cachedHeight = birthday - 1
+        let bundledFallback = bundled.birthday(for: cachedHeight - 1)
+
+        XCTAssertTrue(source.use(Self.treeState(height: cachedHeight), forBirthday: birthday))
+
+        let checkpoint = source.birthday(for: cachedHeight)
+
+        XCTAssertEqual(checkpoint.height, bundledFallback.height)
+        XCTAssertNotEqual(checkpoint.height, cachedHeight)
     }
 
     /// A server that answers with the state of another height must not move the start of the

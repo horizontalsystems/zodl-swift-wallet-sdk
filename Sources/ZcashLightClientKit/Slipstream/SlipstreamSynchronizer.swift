@@ -36,7 +36,7 @@ import Foundation
 /// `nonisolated` and touch only immutable lets (the thread-safe Combine subjects, the DI
 /// handles) — except `stop()`, which registers its teardown in a lock-guarded slot so an
 /// immediately-following `start()` can still await it (the SDK-1 ordering contract).
-public actor SlipstreamSynchronizer: Synchronizer {
+public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
     // ── Alias ──────────────────────────────────────────────────────────────────
     public nonisolated var alias: ZcashSynchronizerAlias { initializer.alias }
 
@@ -606,6 +606,12 @@ public actor SlipstreamSynchronizer: Synchronizer {
     }
 
     // ── stop ───────────────────────────────────────────────────────────────────
+
+    /// Waits for earlier lifecycle operations and this stop's teardown to finish.
+    /// A returned engine stop may still report non-quiescence, as for `stop()`.
+    public nonisolated func stopAndWait() async {
+        await lifecycle.enqueue { await self.stopImpl() }.value
+    }
 
     /// Stops the in-flight sync.
     ///
@@ -1928,7 +1934,7 @@ public actor SlipstreamSynchronizer: Synchronizer {
         }
     }
 
-    // Trusted external transactions (ZIP 315): straight to the wallet database, like
+    // Immediate incoming transactions: straight to the wallet database, like
     // `SDKSynchronizer`; see `TrustedTransactionRecording`.
 
     func recordTrustedTransaction(_ rawTransaction: Data, txId: TxId) async throws {
@@ -1942,8 +1948,7 @@ public actor SlipstreamSynchronizer: Synchronizer {
         try await initializer.rustBackend.setTransactionTrust(txId: storedTxId, trusted: true)
     }
 
-    /// Marks a stored transaction as trusted or untrusted (ZIP 315). Internal: see
-    /// `TrustedTransactionRecording`.
+    /// Marks a stored transaction as trusted or untrusted (ZIP 315). Internal to the SDK.
     func setTransactionTrust(txId: TxId, trusted: Bool) async throws {
         try await initializer.rustBackend.setTransactionTrust(txId: Data(txId.id), trusted: trusted)
     }

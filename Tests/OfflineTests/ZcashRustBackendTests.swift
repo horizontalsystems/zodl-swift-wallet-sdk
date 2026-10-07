@@ -41,6 +41,60 @@ class ZcashRustBackendTests: XCTestCase {
         rustBackend = nil
     }
 
+    func testCancelledQueuedCreationStopsBeforeNativeBoundary() async throws {
+        let initialized = try await rustBackend.initDataDb(seed: nil)
+        XCTAssertEqual(initialized, .success)
+        let accountsBefore = try await rustBackend.listAccounts()
+        let summaryBefore = try await rustBackend.getWalletSummary()
+        let proposal = FfiProposalFixtures.makeFfiProposal(feeRequired: 5_000)
+        let key = TestsData(networkType: .testnet).spendingKey
+
+        // Control: this semantic fixture reaches native creation and is rejected there.
+        do {
+            _ = try await rustBackend.createProposedTransactions(proposal: proposal, usk: key, ovkPolicy: .discard)
+            XCTFail("The unfunded wallet cannot create this fixture proposal")
+        } catch is CancellationError {
+            XCTFail("The uncancelled control must reach the native boundary")
+        } catch let error as ZcashError {
+            guard case .rustCreateToAddress = error else {
+                XCTFail("Expected native creation error, got \(error.localizedDescription)")
+                return
+            }
+        }
+
+        let actorHeld = XCTestExpectation(description: "DBActor held")
+        let releaseActor = DispatchSemaphore(value: 0)
+        let holder = Task { @DBActor in
+            actorHeld.fulfill()
+            XCTAssertEqual(releaseActor.wait(timeout: .now() + 10), .success, "bounded DBActor gate expired")
+        }
+        await fulfillment(of: [actorHeld], timeout: 5)
+        let creationStarted = XCTestExpectation(description: "creation caller entered")
+        let creationFinished = XCTestExpectation(description: "queued creation finished")
+        let backend = rustBackend!
+        let creation = Task {
+            defer { creationFinished.fulfill() }
+            creationStarted.fulfill()
+            return try await backend.createProposedTransactions(proposal: proposal, usk: key, ovkPolicy: .discard)
+        }
+        await fulfillment(of: [creationStarted], timeout: 5)
+        creation.cancel()
+        releaseActor.signal()
+        await holder.value
+        await fulfillment(of: [creationFinished], timeout: 5)
+        do {
+            _ = try await creation.value
+            XCTFail("Cancelled queued creation must throw before native creation")
+        } catch is CancellationError {
+        } catch {
+            XCTFail("Expected CancellationError before native creation, got \(error.localizedDescription)")
+        }
+        let accountsAfter = try await rustBackend.listAccounts()
+        let summaryAfter = try await rustBackend.getWalletSummary()
+        XCTAssertEqual(accountsAfter, accountsBefore)
+        XCTAssertEqual(summaryAfter, summaryBefore)
+    }
+
     func testInitWithShortSeedAndFail() async throws {
         let seed = "testreferencealice"
         var treeState = TreeState()
