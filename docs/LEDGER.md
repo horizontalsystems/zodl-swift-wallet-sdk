@@ -103,8 +103,11 @@ For ZIP 32 account 0, the identity is the hash of the account's first external t
 the pairing with `ZcashError.ledgerDeviceMismatch` when its hash is not the identity the device
 gave (or with `ledgerMalformedReply` when the key has no transparent item; the Zcash app always
 exports one). That ties the key's transparent item, and so the stored binding, to the device's seed.
-It says nothing about the key's Orchard item, which the identity does not derive. The key of any other
-account does not derive the identity at all, so `pairAccount` does not check it against the identity.
+It says nothing about the key's Orchard item, which the identity does not derive: check that one on
+the device as "Verifying a receiving address on the device" describes, which refuses an address the
+key's Orchard item does not derive. The key of any other account does not derive the identity at
+all, so `pairAccount` does not check it against the identity; the on-device address check is the
+check for those accounts too.
 
 The app-version and identity reads before the export answer at once on a healthy link, so each gets
 `readTimeout` (`LedgerDevice.defaultReadTimeout`, the engine's normal timeout, by default; pass
@@ -148,17 +151,26 @@ log it; its `description` prints a placeholder, and `stringEncoded` returns the 
 ## Verifying a receiving address on the device
 
 ```swift
-let displayed = try await device.displayUnifiedAddress(
-    zip32AccountIndex: Zip32AccountIndex(0),
+let expected = try LedgerDevice.expectedUnifiedAddress(ufvk: ufvk, networkType: .mainnet)
+// Show `expected.stringEncoded`, and ask the user to compare it with the device screen.
+_ = try await device.displayUnifiedAddress(
+    ufvk: ufvk,
+    zip32AccountIndex: binding.zip32AccountIndex,
     transparentAddressIndex: 0
 )
 ```
 
-The device shows the address and waits for the user. The address it shows and returns holds only the
-account's Orchard receiver at diversifier index 0, whatever `transparentAddressIndex` is: the index
-selects the transparent address the device shows alongside it. Compare the result with a unified
-address holding that single Orchard receiver. The account's default unified address carries a
-transparent receiver too, and never matches.
+`expectedUnifiedAddress` derives the address from the account's viewing key, with no device. The
+device shows the account's Orchard receiver at diversifier index 0, alone, whatever
+`transparentAddressIndex` is: the index selects the transparent address the device shows next to it.
+The account's default unified address carries a transparent receiver too, so it never matches the
+device screen.
+
+`displayUnifiedAddress` shows the address on the device and waits for the user. When the device
+replies with an address that `ufvk` does not derive, it throws `ZcashError.ledgerDeviceMismatch`:
+the device does not hold the keys of that viewing key, so do not use the key to receive funds for the
+account. Show the user the address `expectedUnifiedAddress` returns, never an address the device
+sends back; `displayUnifiedAddress` returns the derived address, not the device's reply.
 
 ## Sending
 
@@ -231,7 +243,7 @@ that clears (a locked device), and after a transport failure on a new connection
 | `ledgerAppOpenRejected` | The user declined opening the Zcash app on the device; restartable. |
 | `ledgerAppTooOld` | Update the Zcash app. |
 | `ledgerDerivationBudgetExhausted` | The Zcash app ran out of key derivations for this run: close and reopen it on the device. Restartable. |
-| `ledgerDeviceMismatch` | During signing: connect the paired device. During pairing of account 0: the exported key does not belong to the identified device; do not import it. |
+| `ledgerDeviceMismatch` | During signing: connect the paired device. During pairing of account 0: the exported key does not belong to the identified device; do not import it. During `displayUnifiedAddress`: the device's address is not the one the viewing key derives; do not use the key to receive funds. |
 | `ledgerCapsMismatch` | The app version changed during the ceremony: try again. |
 | `ledgerDeviceRefused(statusWord, isTransient)` | Any other refusal; `isTransient` for a condition that clears, such as a locked device. |
 | `ledgerTransactionNotSignable` | A device rule or limit refuses the transaction; nothing was sent. |

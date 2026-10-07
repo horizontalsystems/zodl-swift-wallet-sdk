@@ -7,7 +7,8 @@
 //! - one-shot commands: the app version (`GET_FIRMWARE_VERSION`), the device identity (a silent
 //!   `GET_WALLET_PUBLIC_KEY`), and the unified-address display (`GET_SHIELD_ADDR`);
 //! - the unified full viewing key export (`GET_VK`), as an opaque [`FfiLedgerUfvkExport`] handle;
-//! - the pairing check: [`zcashlc_ledger_check_account_zero_identity`];
+//! - the pairing checks: [`zcashlc_ledger_check_account_zero_identity`] and
+//!   [`zcashlc_ledger_device_unified_address`];
 //! - BLE framing: the MTU handshake, [`zcashlc_ledger_ble_frames`], and an opaque
 //!   [`FfiLedgerBleDeframer`] handle;
 //! - the PCZT signing ceremony, as an opaque [`FfiLedgerSignSession`] handle built from the wallet
@@ -802,8 +803,9 @@ pub extern "C" fn zcashlc_ledger_unified_address_apdu(
 /// Parses a `GET_SHIELD_ADDR` unified-address reply into the encoded address.
 ///
 /// The address holds the account's Orchard receiver at diversifier index 0 and nothing else. A
-/// wallet verifying it compares it with a unified address built from that one receiver; the
-/// account's default unified address also carries a transparent receiver and never matches.
+/// wallet verifying it compares it with the string [`zcashlc_ledger_device_unified_address`]
+/// returns for the account's viewing key; the account's default unified address also carries a
+/// transparent receiver and never matches.
 ///
 /// Returns null with the last error set on failure; a declined display is
 /// [`LedgerErrorKind::UserRejected`].
@@ -925,6 +927,58 @@ pub unsafe extern "C" fn zcashlc_ledger_check_account_zero_identity(
         }
     });
     crate::unwrap_exc_or(res, false)
+}
+
+/// The unified address the device displays for the account whose viewing key is `ufvk`: the
+/// external Orchard receiver at diversifier index 0, alone, in the revision the device encodes.
+fn device_unified_address(
+    ufvk: &UnifiedFullViewingKey,
+    network: pczt_ledger::Network,
+) -> Result<String, LedgerError> {
+    let fvk = ufvk.orchard().ok_or_else(|| {
+        LedgerError::invalid_input("the unified full viewing key has no Orchard item")
+    })?;
+    let receiver = fvk
+        .address_at(0u32, orchard::keys::Scope::External)
+        .to_raw_address_bytes();
+    let address = unified::Address::try_from_items(
+        pairing::DEVICE_UNIFIED_REVISION,
+        vec![unified::Uitem::Data(unified::Receiver::Orchard(receiver))],
+    )
+    .map_err(|_| LedgerError::internal("the Orchard receiver does not form a unified address"))?;
+    Ok(address.encode(&network.network_type()))
+}
+
+/// Returns the unified address a Ledger device displays for the account whose unified full viewing
+/// key is `ufvk`, on `network_id`.
+///
+/// The address holds only the external Orchard receiver at diversifier index 0. It is encoded
+/// exactly as [`zcashlc_ledger_parse_unified_address`] encodes the device's reply, so the two
+/// strings are equal when the device shows the address of this key. Show this address to the user
+/// to compare with the device screen.
+///
+/// Returns null with the last error set ([`LedgerErrorKind::InvalidInput`]) when `ufvk` does not
+/// parse, is for another network, or has no Orchard item.
+///
+/// # Safety
+///
+/// - `ufvk` must be a non-null pointer to a null-terminated string.
+/// - Call [`zcashlc_string_free`] to free the returned string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zcashlc_ledger_device_unified_address(
+    network_id: u32,
+    ufvk: *const c_char,
+) -> *mut c_char {
+    let res = catch_panic(|| {
+        let network = ledger_network(network_id)?;
+        let ufvk = parse_ufvk(ufvk, network)?;
+        let encoded = device_unified_address(&ufvk, network)?;
+        let encoded = CString::new(encoded).map_err(|_| {
+            LedgerError::internal("the encoded unified address contains a NUL byte")
+        })?;
+        Ok(encoded.into_raw())
+    });
+    crate::unwrap_exc_or_null(res)
 }
 
 // ---------------------------------------------------------------------------

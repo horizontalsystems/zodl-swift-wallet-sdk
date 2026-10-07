@@ -1098,6 +1098,8 @@ public enum ZcashError: Equatable, Error {
     ///   Connect the paired device, or pair this one.
     /// - During `LedgerDevice.pairAccount` for ZIP 32 account 0: the exported viewing key does not derive the device identity.
     ///   Do not import the key. For other accounts, pairing does not do this check.
+    /// - During `LedgerDevice.displayUnifiedAddress`: the device shows an address that the account's viewing key does not derive.
+    ///   Do not use the key to receive funds for this account.
     /// ZLEDG0004
     case ledgerDeviceMismatch
     /// The connected Ledger device runs a different Zcash app version than the one the signing session was built for.

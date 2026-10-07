@@ -109,6 +109,7 @@ enum LedgerReplies {
     static let getFirmwareVersion: UInt8 = 0xC4
     static let getWalletPublicKey: UInt8 = 0x40
     static let getVK: UInt8 = 0x50
+    static let getShieldAddress: UInt8 = 0x51
 
     static func status(_ statusWord: UInt16) -> Data {
         Data([UInt8(statusWord >> 8), UInt8(statusWord & 0xFF)])
@@ -158,6 +159,14 @@ enum LedgerReplies {
         reply.append(UInt8(address.count))
         reply.append(address)
         reply.append(Data(repeating: 0x11, count: 32))
+        return ok(reply)
+    }
+
+    /// A `GET_SHIELD_ADDR` unified-address reply: a two-byte length, then the address.
+    static func unifiedAddress(_ address: String) -> Data {
+        let bytes = Data(address.utf8)
+        var reply = Data([UInt8(bytes.count >> 8), UInt8(bytes.count & 0xFF)])
+        reply.append(bytes)
         return ok(reply)
     }
 
@@ -390,6 +399,62 @@ final class LedgerDeviceTests: XCTestCase {
 
         let closeCount = await transport.closeCount
         XCTAssertEqual(closeCount, 1)
+    }
+
+    // MARK: Verifying the address on the device
+
+    func testTheExpectedAddressIsTheOrchardReceiverAtIndexZeroAlone() throws {
+        let ufvk = try testnetUFVK()
+
+        let expected = try LedgerDevice.expectedUnifiedAddress(ufvk: ufvk, networkType: .testnet)
+
+        // The vector the Rust layer pins for `Environment.seedBytes`: a revision 0 address holding only
+        // the external Orchard receiver at diversifier index 0.
+        XCTAssertEqual(
+            expected.stringEncoded,
+            "utest14hlatm89d0lufqkqnyp8v52gwsy2420nyc54zgm4w4zjnufvlfcz92a3j66sse425nwpusqvjvguq7rrh28v8vq45n5l4sdhju6qqx4x"
+        )
+    }
+
+    func testDisplayUnifiedAddressReturnsTheDerivedAddressWhenTheDeviceShowsIt() async throws {
+        let ufvk = try testnetUFVK()
+        let expected = try LedgerDevice.expectedUnifiedAddress(ufvk: ufvk, networkType: .testnet)
+        let transport = ScriptedLedgerTransport { _, _ in LedgerReplies.unifiedAddress(expected.stringEncoded) }
+        let ledger = LedgerDevice(transport: transport, networkType: .testnet)
+
+        let confirmed = try await ledger.displayUnifiedAddress(
+            ufvk: ufvk,
+            zip32AccountIndex: Zip32AccountIndex(0),
+            transparentAddressIndex: 7
+        )
+
+        XCTAssertEqual(confirmed, expected)
+        let instructions = await transport.instructions
+        XCTAssertEqual(instructions, [LedgerReplies.getShieldAddress])
+        let timeouts = await transport.timeouts
+        XCTAssertEqual(timeouts, [nil], "the display waits on the user")
+    }
+
+    func testDisplayUnifiedAddressRefusesAnAddressTheKeyDoesNotDerive() async throws {
+        let ufvk = try testnetUFVK()
+        // The device shows the address of another account: it does not hold the keys of `ufvk`.
+        let other = try LedgerDevice.expectedUnifiedAddress(ufvk: try testnetUFVK(accountIndex: 1), networkType: .testnet)
+        let transport = ScriptedLedgerTransport { _, _ in LedgerReplies.unifiedAddress(other.stringEncoded) }
+        let ledger = LedgerDevice(transport: transport, networkType: .testnet)
+
+        do {
+            _ = try await ledger.displayUnifiedAddress(
+                ufvk: ufvk,
+                zip32AccountIndex: Zip32AccountIndex(0),
+                transparentAddressIndex: 0
+            )
+            XCTFail("An address the key does not derive must be refused")
+        } catch let error as ZcashError {
+            XCTAssertEqual(error, .ledgerDeviceMismatch)
+        }
+
+        let closeCount = await transport.closeCount
+        XCTAssertEqual(closeCount, 0, "the exchange succeeded, so the connection stays open")
     }
 
     // MARK: Reconnecting before the export

@@ -88,7 +88,8 @@ public actor LedgerDevice {
     /// which refuses a device address that the key's Orchard item does not derive.
     ///
     /// For any other account, the viewing key does not derive the identity, and this method does not
-    /// check the key against it at all.
+    /// check the key against it at all; ``displayUnifiedAddress(ufvk:zip32AccountIndex:transparentAddressIndex:)``
+    /// is the check for such an account too.
     ///
     /// The app-version and identity reads before the export each have `readTimeout`; nothing waits on
     /// the user there, so a device that does not answer within it is stalled. When one of them fails
@@ -153,23 +154,64 @@ public actor LedgerDevice {
         }
     }
 
-    /// Shows the account's unified address on the device for the user to compare, and returns the
-    /// address the device displayed.
+    /// The unified address a Ledger device displays for the account whose viewing key is `ufvk`.
     ///
-    /// The device's address holds only the account's Orchard receiver at diversifier index 0, whatever
-    /// `transparentAddressIndex` is: the index selects the transparent address the device shows next to
-    /// it. Compare the result with a unified address built from that single Orchard receiver; the
-    /// account's default unified address also carries a transparent receiver and never matches.
+    /// The address holds only the account's Orchard receiver at diversifier index 0, external scope.
+    /// The SDK derives it from `ufvk`, with no device. Show it to the user while
+    /// ``displayUnifiedAddress(ufvk:zip32AccountIndex:transparentAddressIndex:)`` shows the device's
+    /// address, and tell the user to compare the two. The account's default unified address also
+    /// carries a transparent receiver, so it never matches the device screen.
     ///
     /// - Parameters:
+    ///   - ufvk: The account's unified full viewing key, such as ``LedgerAccountPairing/ufvk``.
+    ///   - networkType: The network of `ufvk`.
+    /// - Throws: ``ZcashError/ledgerInvalidInput(_:)`` when `ufvk` has no Orchard item or is for another
+    ///   network.
+    public static func expectedUnifiedAddress(ufvk: UnifiedFullViewingKey, networkType: NetworkType) throws -> UnifiedAddress {
+        let encoded: String
+        do {
+            encoded = try ZcashLedgerBackend.deviceUnifiedAddress(ufvk: ufvk, networkType: networkType)
+        } catch {
+            throw ledgerZcashError(error)
+        }
+
+        do {
+            return try UnifiedAddress(encoding: encoded, network: networkType)
+        } catch {
+            throw ZcashError.ledgerInternal("the derived device address is not a unified address for this network")
+        }
+    }
+
+    /// Shows the account's unified address on the device, and checks it against the address that
+    /// `ufvk` derives.
+    ///
+    /// Before you call this method, show the user ``expectedUnifiedAddress(ufvk:networkType:)``, and
+    /// tell the user to compare it with the device screen. Do not show the address the device sends
+    /// back: this method never returns it.
+    ///
+    /// The device shows the account's Orchard receiver at diversifier index 0, whatever
+    /// `transparentAddressIndex` is: the index selects the transparent address the device shows next to
+    /// it. The device waits for the user to confirm; no timeout applies while it waits. When the device
+    /// replies with an address that `ufvk` does not derive, this method throws
+    /// ``ZcashError/ledgerDeviceMismatch``: the device does not hold the keys of `ufvk` for this
+    /// account, so do not use `ufvk` to receive funds for it.
+    ///
+    /// - Parameters:
+    ///   - ufvk: The account's unified full viewing key, such as ``LedgerAccountPairing/ufvk``.
     ///   - zip32AccountIndex: The account, at most 100 for this command.
     ///   - transparentAddressIndex: The external transparent address to show, at most 50000.
-    /// - Throws: ``ZcashError/ledgerUserRejected`` when the user rejects the address on the device.
+    /// - Returns: The address that `ufvk` derives, equal to ``expectedUnifiedAddress(ufvk:networkType:)``.
+    /// - Throws: ``ZcashError/ledgerUserRejected`` when the user rejects the address on the device,
+    ///   ``ZcashError/ledgerDeviceMismatch`` when the device's address is not the one `ufvk` derives,
+    ///   ``ZcashError/ledgerInvalidInput(_:)`` before anything is sent when `ufvk` has no Orchard item or
+    ///   is for another network.
     public func displayUnifiedAddress(
+        ufvk: UnifiedFullViewingKey,
         zip32AccountIndex: Zip32AccountIndex,
         transparentAddressIndex: UInt32
     ) async throws -> UnifiedAddress {
         let networkType = self.networkType
+        let expected = try Self.expectedUnifiedAddress(ufvk: ufvk, networkType: networkType)
         return try await serialized {
             let apdu = try ZcashLedgerBackend.unifiedAddressAPDU(
                 networkType: networkType,
@@ -178,15 +220,16 @@ public actor LedgerDevice {
                 display: true
             )
             // The display waits on the user, so no timeout applies.
-            let encoded = try await LedgerCommands.query(apdu, on: self.transport, timeout: nil) { reply in
+            let displayed = try await LedgerCommands.query(apdu, on: self.transport, timeout: nil) { reply in
                 try ZcashLedgerBackend.parseUnifiedAddress(reply, networkType: networkType)
             }
 
-            do {
-                return try UnifiedAddress(encoding: encoded, network: networkType)
-            } catch {
-                throw ZcashError.ledgerMalformedReply("the displayed address is not a unified address for this network")
+            // Both strings come from the same encoder, so equal receivers give equal strings.
+            guard displayed == expected.stringEncoded else {
+                throw ZcashError.ledgerDeviceMismatch
             }
+
+            return expected
         }
     }
 

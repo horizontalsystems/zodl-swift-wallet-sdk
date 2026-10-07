@@ -175,6 +175,25 @@ enum ZcashLedgerBackend {
         return String(cString: addressPtr)
     }
 
+    /// The address the device displays for the account whose viewing key is `ufvk`, encoded as
+    /// `parseUnifiedAddress(_:networkType:)` encodes the device's reply.
+    ///
+    /// - Throws: An `.invalidInput` failure when `ufvk` has no Orchard item.
+    static func deviceUnifiedAddress(ufvk: UnifiedFullViewingKey, networkType: NetworkType) throws -> String {
+        let addressPtr = zcashlc_ledger_device_unified_address(
+            networkType.networkId,
+            [CChar](ufvk.stringEncoded.utf8CString)
+        )
+
+        guard let addressPtr else {
+            throw LedgerFFIError.takeLast(fallback: "`deviceUnifiedAddress` failed with unknown error")
+        }
+
+        defer { zcashlc_string_free(addressPtr) }
+
+        return String(cString: addressPtr)
+    }
+
     // MARK: - BLE framing
 
     static func bleMTURequest() throws -> Data {

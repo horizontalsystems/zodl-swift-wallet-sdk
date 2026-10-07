@@ -519,6 +519,129 @@ fn the_identity_check_refuses_inputs_that_do_not_parse() {
     assert_eq!(take_error().kind, LedgerErrorKind::InvalidInput as u32);
 }
 
+fn device_address(network_id: u32, ufvk: &str) -> Option<String> {
+    let ufvk = CString::new(ufvk).expect("no NUL");
+    let address = unsafe { zcashlc_ledger_device_unified_address(network_id, ufvk.as_ptr()) };
+    (!address.is_null()).then(|| {
+        unsafe { CString::from_raw(address) }
+            .into_string()
+            .expect("UTF-8")
+    })
+}
+
+/// A `GET_SHIELD_ADDR` reply carrying `address`: a two-byte length, then the string.
+fn unified_address_reply(address: &str) -> Vec<u8> {
+    let mut reply = (address.len() as u16).to_be_bytes().to_vec();
+    reply.extend_from_slice(address.as_bytes());
+    with_status(reply, 0x9000)
+}
+
+fn parse_displayed(reply: &[u8]) -> String {
+    let parsed = unsafe {
+        zcashlc_ledger_parse_unified_address(reply.as_ptr(), reply.len(), crate::NETWORK_ID_TESTNET)
+    };
+    assert!(!parsed.is_null());
+    unsafe { CString::from_raw(parsed) }
+        .into_string()
+        .expect("UTF-8")
+}
+
+#[test]
+fn the_device_address_is_the_orchard_receiver_at_index_zero_alone() {
+    let expected = device_address(crate::NETWORK_ID_TESTNET, &testnet_ufvk()).expect("an address");
+    // A pinned vector, so a change to the derivation or the encoding cannot pass unnoticed.
+    assert_eq!(
+        expected,
+        "utest1qzf74qz7g56frxcxlttm475jdqd3wrtzy042kc33myjnhhhzr0mxty70tkzcqfzsfqz0cva4czqy6jz2xvj4y2xjsrwekpg8r5d6xqua"
+    );
+
+    // What the device answers: the Orchard receiver at diversifier index 0 of the account's
+    // spending key, external scope, alone in a revision 0 container.
+    let usk = UnifiedSpendingKey::from_seed(
+        &zcash_protocol::consensus::TEST_NETWORK,
+        &PAIRING_SEED,
+        AccountId::ZERO,
+    )
+    .expect("a spending key derives");
+    let receiver = FullViewingKey::from(usk.orchard())
+        .address_at(0u32, Scope::External)
+        .to_raw_address_bytes();
+    let on_device = zcash_address::unified::Address::try_from_items(
+        Revision::R0,
+        vec![Uitem::Data(zcash_address::unified::Receiver::Orchard(
+            receiver,
+        ))],
+    )
+    .expect("a valid address")
+    .encode(&zcash_protocol::consensus::NetworkType::Test);
+
+    assert_eq!(
+        parse_displayed(&unified_address_reply(&on_device)),
+        expected
+    );
+
+    // The SDK's address validation accepts it as a testnet unified address.
+    let encoded = CString::new(expected.clone()).expect("no NUL");
+    let (mut network_id, mut kind) = (u32::MAX, u32::MAX);
+    assert!(unsafe {
+        crate::derivation::zcashlc_get_address_metadata(
+            encoded.as_ptr(),
+            &mut network_id,
+            &mut kind,
+        )
+    });
+    assert_eq!((network_id, kind), (crate::NETWORK_ID_TESTNET, 3));
+
+    // Another seed's device shows another address.
+    let other = device_address(
+        crate::NETWORK_ID_TESTNET,
+        &device_ufvk(&[8u8; 32], AccountId::ZERO, true),
+    )
+    .expect("an address");
+    assert_ne!(other, expected);
+}
+
+#[test]
+fn the_device_address_refuses_keys_it_cannot_use() {
+    assert_eq!(
+        device_address(crate::NETWORK_ID_MAINNET, &testnet_ufvk()),
+        None
+    );
+    assert_eq!(take_error().kind, LedgerErrorKind::InvalidInput as u32);
+
+    // A key with only a transparent item has no Orchard receiver to show.
+    let usk = UnifiedSpendingKey::from_seed(
+        &zcash_protocol::consensus::TEST_NETWORK,
+        &PAIRING_SEED,
+        AccountId::ZERO,
+    )
+    .expect("a spending key derives");
+    let pubkey = usk
+        .to_unified_full_viewing_key()
+        .p2pkh()
+        .expect("transparent")
+        .serialize();
+    let transparent_only = Ufvk::try_from_items(
+        Revision::R0,
+        vec![
+            Uitem::Data(Fvk::P2pkh(pubkey.try_into().expect("65 bytes"))),
+            Uitem::Data(Fvk::Unknown {
+                typecode: 0xFFF0,
+                data: vec![0; 32],
+            }),
+        ],
+    )
+    .expect("a valid container")
+    .encode(&zcash_protocol::consensus::NetworkType::Test);
+    assert_eq!(
+        device_address(crate::NETWORK_ID_TESTNET, &transparent_only),
+        None
+    );
+    let error = take_error();
+    assert_eq!(error.kind, LedgerErrorKind::InvalidInput as u32);
+    assert!(error.reason.contains("Orchard"), "{}", error.reason);
+}
+
 // ---------------------------------------------------------------------------
 // Signing sessions
 // ---------------------------------------------------------------------------

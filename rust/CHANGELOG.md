@@ -82,6 +82,12 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Address display: `zcashlc_ledger_unified_address_apdu(network_id, account_index,
     transparent_address_index, display)` and `zcashlc_ledger_parse_unified_address`, which returns
     the encoded unified address holding only the account's Orchard receiver at diversifier index 0.
+    `zcashlc_ledger_device_unified_address(network_id, ufvk)` returns the address the device
+    displays for the account whose viewing key is `ufvk` (free with `zcashlc_string_free`): the
+    external Orchard receiver at diversifier index 0, alone, encoded exactly as
+    `zcashlc_ledger_parse_unified_address` encodes the device's reply, so the two strings are equal
+    when the device shows the address of that key. It returns null with kind `10` (invalid input)
+    when `ufvk` does not parse, is for another network, or has no Orchard item.
   - BLE framing: `zcashlc_ledger_ble_mtu_request`, `zcashlc_ledger_parse_ble_mtu_response`
     (the frame size, or `-1`), `zcashlc_ledger_ble_frames` returning `FfiLedgerFrames` of
     `FfiLedgerFrame` (free with `zcashlc_ledger_free_frames`, which wipes them), and an opaque

@@ -43,15 +43,15 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `deviceIdentity()` (a `LedgerDeviceIdentity`),
   `pairAccount(zip32AccountIndex:readTimeout:reconnect:)` (a `LedgerAccountPairing` carrying the
   account's `UnifiedFullViewingKey`, the `LedgerAccountBinding` to store with the imported account,
-  and the app version) and `displayUnifiedAddress(zip32AccountIndex:transparentAddressIndex:)`.
+  and the app version) and `displayUnifiedAddress(ufvk:zip32AccountIndex:transparentAddressIndex:)`.
   `pairAccount` asks the user to approve the export on the device, refuses an app that cannot sign,
   and reads the device's identity once, before the export (the Zcash app leaves a status screen up
   after the export and drops the next command, so a second probe never gets its reply). For ZIP 32
   account 0, `pairAccount` derives the identity from the transparent item of the exported key and
   refuses the pairing with `ZcashError.ledgerDeviceMismatch` when it is not the identity the device
   gave, or with `ledgerMalformedReply` when the key has no transparent item. The key of any other
-  account does not derive the identity, so `pairAccount` does not check it for those accounts. The
-  app-version and identity reads before the export take `readTimeout` (`LedgerDevice.defaultReadTimeout`,
+  account does not derive the identity, so `pairAccount` does not check it for those accounts;
+  `displayUnifiedAddress` checks their keys. The app-version and identity reads before the export take `readTimeout` (`LedgerDevice.defaultReadTimeout`,
   the engine's normal timeout, by default; `LedgerDevice.defaultPairingReadTimeout`, 10 seconds,
   detects a stalled device early).
   When one of those reads fails on the connection and `reconnect` is given, the failed transport
@@ -59,9 +59,15 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   start; a second such failure, or a refusal, is not retried, and nothing is retried once the export
   command has been sent. `LedgerDevice.transport` names the transport the device currently talks
   over; the caller owns every transport, the reconnected ones included, and closes each one it
-  opened. The address the device displays and returns holds only the account's Orchard receiver at
-  diversifier index 0, whatever the transparent address index: compare it with a unified address
-  holding that receiver, not with the account's default unified address.
+  opened.
+- `LedgerDevice.expectedUnifiedAddress(ufvk:networkType:)` derives, with no device, the unified
+  address a Ledger device displays for an account: the account's Orchard receiver at diversifier
+  index 0, external scope, alone. The account's default unified address also carries a transparent
+  receiver and never matches the device screen. `displayUnifiedAddress` shows the device's address,
+  throws `ZcashError.ledgerDeviceMismatch` when the device replies with an address that `ufvk` does
+  not derive, and otherwise returns the address derived from `ufvk`, never the device's reply. Show
+  `expectedUnifiedAddress` to the user while the device waits for confirmation, for the user to
+  compare with the device screen.
 - `LedgerDeviceIdentity` is validated on construction (`init(encoding:)`, and when decoded), and
   `LedgerAccountBinding` is `Codable`. The identity names the device's seed on one network; it is
   linkable to the device's first transparent address once that address has spent on chain, so a
