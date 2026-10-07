@@ -48,7 +48,7 @@ final class CompactBlockProcessorRewindPollingTests: ZcashTestCase {
         explicitRestart: Bool = false,
         retries: Int? = nil
     ) async throws {
-        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+        let fixture = try await ClassicProcessorCleanupFixture.make(storageDirectory: testTempDirectory)
         let processor = fixture.synchronizer.blockProcessor
         let rewindGate = GiftCardOperationGate()
         let restartGate = GiftCardOperationGate()
@@ -56,9 +56,8 @@ final class CompactBlockProcessorRewindPollingTests: ZcashTestCase {
             await rewindGate.open()
             await restartGate.open()
             await processor.stopAndWait()
-            try await fixture.redeemer.cleanup()
+            try await fixture.cleanup()
         }
-        _ = try await fixture.redeemer.check()
         if let retries {
             let config = await processor.config
             await processor.update(config: CompactBlockProcessor.Configuration(
@@ -151,7 +150,7 @@ final class CompactBlockProcessorRewindPollingTests: ZcashTestCase {
 
     private func assertNextStart(
         _ processor: CompactBlockProcessor,
-        fixture: GiftCardCancellationFixture,
+        fixture: ClassicProcessorCleanupFixture,
         gate: GiftCardOperationGate,
         fireTimer: Bool
     ) async throws {

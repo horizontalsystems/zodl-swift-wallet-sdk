@@ -1368,6 +1368,7 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
         // Admission may have waited on another wallet's write. Native creation is synchronous
         // and cannot be rolled back, so cancellation must be checked here, before it starts.
         try Task.checkCancellation()
+        try GiftCardTransactionCreationContext.admission?.beginNativeCreation()
         let txIdsPtr = proposalBytes.withUnsafeBufferPointer { proposalPtr in
             usk.bytes.withUnsafeBufferPointer { uskPtr in
                 zcashlc_create_proposed_transactions(

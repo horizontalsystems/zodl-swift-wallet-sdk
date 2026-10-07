@@ -8,8 +8,37 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Added
 
+- Gift-card checks accept balances only from a known positive tip with complete scan coverage
+  and the card account present. Empty balances settle for 15 seconds direct / 30 seconds with Tor,
+  resetting when readiness or the tip changes. Disconnects may recover for 60 seconds direct /
+  120 seconds with Tor; expiry throws `giftCardCheckDisconnected` (`ZGIFT0015`). Terminal sync
+  stalls throw `giftCardCheckSyncStalled` (`ZGIFT0016`). Both leave the card balance unknown.
+- `GiftCardRedeemer.check()` keeps its public call syntax and bounds each caller to 600 seconds
+  from method entry, including queued time and wallet preparation. Expiry throws the payload-free
+  `giftCardCheckTimedOut` (`ZGIFT0014`), and cancellation returns `CancellationError` without waiting
+  for non-cooperative preparation. Unfinished wallet work remains owned until it drains; cleanup
+  waits for it before wipe, root deletion, and alias release. Timeout means neither an empty card
+  nor completed cleanup. Later checks reuse a wallet whose native preparation finished after expiry.
+
 - `NetworkActivationHeights.nu7` sets the NU7 activation height of a custom or regtest network.
   A `nil` height means "not activated".
+
+- Gift-card redemption now remains cancellable until native transaction creation begins on the
+  wallet database executor. Once admitted, the SDK finishes creation, submission, and destination
+  receipt recording even if the caller cancels, and cleanup waits for that completion. Accepted
+  receipts are attempted even after a later submission-stream error or another receipt's recording
+  failure. A claim that completes without a submission result throws `giftCardRedemptionIncomplete`
+  (`ZGIFT0012`).
+
+- `GiftCardRedeemer` now always uses Slipstream for its isolated wallet and retains teardown
+  ownership until successful wipe and root deletion. Cleanup cancellation detaches the caller;
+  its 30-second monotonic budget includes queued work and throws `giftCardCleanupTimedOut`
+  (`ZGIFT0011`) on expiry while cleanup continues. Wipe/storage failures preserve the wallet's
+  alias and retry teardown with capped exponential delay, including after the redeemer is dropped.
+  Requested cleanup retains ownership even when the redeemer was never checked.
+  Card service connections and existing host Tor runtimes close after safe wipe and before root
+  deletion. Older gift-card restores preserve the latest bundled recovery fallback independently
+  of their exact birthday.
 
 - `AwaitableStopSynchronizer.stopAndWait()` lets clients of `SDKSynchronizer` and
   `SlipstreamSynchronizer` wait until the synchronizer's stop operation finishes, including
@@ -47,9 +76,11 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `fee` is `nil` and `redeemable` is `.zero` in every other state),
   `redeem(to:memo:)` (sends the whole spendable balance, with an optional memo, minus the ZIP 317
   fee to a `UnifiedAddress` and returns the `TransactionSubmitResult`s), and `cleanup()` (stops the
-  temporary wallet and deletes all of its files). `isTorEnabled` routes the card wallet's birthday
-  lookup, sync and claim submission over Tor; pass the main wallet's setting, since with `false`
-  the server sees the device's IP address with the card and its claim. The redeeming transaction
+  temporary wallet and deletes all of its files). `isTorEnabled` protects the card wallet's
+  identifying metadata requests, including birthday lookup, and claim submission over Tor, with
+  no direct fallback. Slipstream bulk block requests remain direct. Pass the main wallet's
+  setting; with `false`, identifying requests expose the device's IP address with the card and
+  its claim. The redeeming transaction
   discards the outgoing viewing key, so the card's key — which the card's issuer can rederive —
   does not reveal the recipient. Sapling parameters are unnecessary only when the actual proposal
   has no Sapling inputs or outputs; Orchard recipient validation does not change input selection.
@@ -127,6 +158,13 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   releases once those exist. The voting API is unchanged.
 
 ## Fixed
+
+- `GiftCardRedeemer.check()` starts syncing on the first check even when wallet preparation
+  reports an existing chain tip or scan progress, avoiding a check timeout. No caller changes are needed.
+
+- `GiftCardRedeemer.check()` retries a pass after terminal sync-stall recovery exhaustion by
+  starting a fresh pass with a new recovery budget. Repeated checks keep healthy syncing or
+  up-to-date passes. No caller changes are needed.
 
 - Explicit starts requested from rewind completion wait for retained rewind callbacks to finish,
   preserve retry intent and coalesce into one sync run. A later stop or wipe cancels that request.

@@ -1,341 +1,747 @@
 import Combine
 import XCTest
+
 @testable import TestUtils
 @testable import ZcashLightClientKit
 
 final class GiftCardCleanupTests: ZcashTestCase {
-    func testUncleanedDeinitRetainsAliasUntilWriterAndNativeResourcesFinish() async throws {
-        var fixture: GiftCardCancellationFixture? = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
-        _ = try await fixture?.redeemer.check()
-        let card = try XCTUnwrap(fixture).card
-        let synchronizer = try XCTUnwrap(fixture).synchronizer
-        let service = try XCTUnwrap(fixture).service
-        let storage = try XCTUnwrap(fixture).storage
-        let marker = try writeMarker(card: card, name: "uncleaned-owner")
-        let syncFinished = XCTestExpectation(description: "normal sync finished before uncleaned release")
-        let writerEntered = XCTestExpectation(description: "old mempool database writer held")
-        let stopEntered = XCTestExpectation(description: "deinit teardown admitted")
-        let connectionsEntered = XCTestExpectation(description: "native connection owners closing")
-        let runtimeEntered = XCTestExpectation(description: "root native runtime teardown held")
-        let runtimeFreed = XCTestExpectation(description: "root native runtime freed")
-        let runtimeGate = DispatchSemaphore(value: 0)
-        defer { runtimeGate.signal() }
-        let writerGate = GiftCardOperationGate()
-        let nativeGate = GiftCardOperationGate()
-        let events = CleanupEvents()
-        var mempool: AsyncThrowingStream<RawTransaction, Error>.Continuation!
-        let stream = AsyncThrowingStream<RawTransaction, Error> { mempool = $0 }
-        service.getMempoolStreamClosure = { stream }
-        try XCTUnwrap(fixture).backend.decryptAndStoreTransactionTxBytesMinedHeightClosure = { _, _ in
-            writerEntered.fulfill()
-            await writerGate.wait()
-            events.append("writer:exited")
-            return Data([2])
+    func testCleanupWaitsForGiftSlipstreamStartToFinish() async throws {
+        try await assertCleanupWaitsForActivePass(.starting)
+    }
+
+    func testCleanupWaitsForActiveGiftSlipstreamToStopQuiescently() async throws {
+        try await assertCleanupWaitsForActivePass(.syncing)
+    }
+
+    private enum ActivePassPhase: Equatable {
+        case starting
+        case syncing
+    }
+
+    private func assertCleanupWaitsForActivePass(_ phase: ActivePassPhase) async throws {
+        let clock = GiftCardCleanupTestClock()
+        defer { clock.dispose() }
+        let fixture = try await GiftCardCancellationFixture.make(
+            storageDirectory: testTempDirectory,
+            cleanupTiming: clock.timing
+        )
+        defer {
+            fixture.engine.startGate.open()
+            fixture.engine.stopGate.open()
         }
-        try XCTUnwrap(fixture).repository.findRawIDThrowableError = ZcashError.transactionRepositoryEntityNotFound
-        service.closeConnectionsClosure = {
-            XCTAssertTrue(events.events.contains("writer:exited"))
-            connectionsEntered.fulfill()
-            await nativeGate.wait()
-            events.append("connections:closed")
+        fixture.repository.findForResubmissionUpToReturnValue = []
+        await fixture.engine.setSnapshotOnStart(SlipstreamSnapshot.testSyncing(progressPermille: 100, chainTip: 3_000_010))
+        let entered = XCTestExpectation(description: "gift Slipstream reached active \(phase) phase")
+        switch phase {
+        case .starting:
+            fixture.engine.startGate.close()
+            await fixture.engine.onCall("start") { entered.fulfill() }
+        case .syncing:
+            fixture.engine.stopGate.close()
+            await fixture.engine.onCall("start:done") { entered.fulfill() }
         }
-        var native = TorHTTPGetNative()
-        native.createRuntime = { _, _ in
-            XCTFail("Deinit must not bootstrap Tor")
-            return nil
+        let root = testTempDirectory.appendingPathComponent(fixture.card.synchronizerAlias.description)
+        let marker = root.appendingPathComponent("active-pass-marker")
+        let check = Task { try await fixture.redeemer.check() }
+        defer { check.cancel() }
+        await fulfillment(of: [entered], timeout: 5)
+        try Data([1]).write(to: marker)
+        let stopEntered = XCTestExpectation(description: "gift cleanup reached engine stop")
+        if phase == .syncing {
+            await fixture.engine.onCall("stop") { stopEntered.fulfill() }
         }
-        native.freeRuntime = { _ in
-            XCTAssertTrue(events.events.contains("connections:closed"))
-            XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
-            self.assertAlreadyActive(card: card)
-            runtimeEntered.fulfill()
-            runtimeGate.wait()
-            events.append("runtime:freed")
-            runtimeFreed.fulfill()
+        let deadline = clock.expectSleep(at: 30_000_000_000)
+        let cleanup = startCleanup(fixture.redeemer)
+        if phase == .syncing {
+            await fulfillment(of: [stopEntered, deadline], timeout: 5)
+        } else {
+            await fulfillment(of: [deadline], timeout: 5)
         }
-        let tor = TorClient(runtimePtr: OpaquePointer(bitPattern: 1)!, torDir: marker.deletingLastPathComponent(), httpGetNative: native)
-        try XCTUnwrap(fixture).container.mock(type: TorClient.self, isSingleton: true) { _ in tor }
-        await synchronizer.blockProcessor.updateEventClosure(identifier: "deinit-route") { event in
-            if case .startedSyncing = event { await synchronizer.blockProcessor.context.update(state: .txResubmission) }
-            if case .finished = event { syncFinished.fulfill() }
+        clock.advance(to: 30_000_000_000)
+        do {
+            try await cleanup.value
+            XCTFail("Cleanup must wait for the active pass beyond this caller's budget")
+        } catch {
+            XCTAssertEqual(error as? ZcashError, .giftCardCleanupTimedOut)
         }
-        await synchronizer.blockProcessor.start()
-        await fulfillment(of: [syncFinished], timeout: 5)
-        let completedRun = await synchronizer.blockProcessor.syncTask
-        _ = try await completedRun?.value
-        var raw = RawTransaction()
-        raw.data = Data([1])
-        mempool.yield(raw)
-        await fulfillment(of: [writerEntered], timeout: 5)
-        try XCTUnwrap(fixture).downloader.stopDownloadClosure = {
-            if events.appendOnce("stop") { stopEntered.fulfill() }
+        let callsBeforeRelease = await fixture.engine.calls
+        XCTAssertFalse(callsBeforeRelease.contains("close"))
+        if phase == .starting {
+            XCTAssertFalse(callsBeforeRelease.contains("stop"))
+        } else {
+            XCTAssertFalse(callsBeforeRelease.contains("stop:done"))
         }
-        weak var released = fixture?.redeemer
-        fixture = nil
-        await fulfillment(of: [stopEntered], timeout: 5)
-        XCTAssertNil(released, "the independent teardown must not retain deinitializing self")
-        assertAlreadyActive(card: card)
-        XCTAssertEqual(try GiftCardRedeemer.removeLeftoverWallets(in: testTempDirectory), 0)
         XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
-        await writerGate.open()
-        let closed = await XCTWaiter.fulfillment(of: [connectionsEntered], timeout: 5)
-        XCTAssertEqual(closed, .completed)
-        if closed == .completed {
-            assertAlreadyActive(card: card)
-            XCTAssertEqual(try GiftCardRedeemer.removeLeftoverWallets(in: testTempDirectory), 0)
-            XCTAssertFalse(events.events.contains("runtime:freed"))
-        }
-        await nativeGate.open()
-        // RED must still release every gate even when the old implementation never closes natives.
-        if closed != .completed { return }
-        await fulfillment(of: [runtimeEntered], timeout: 5)
-        assertAlreadyActive(card: card)
+        assertAlreadyActive(card: fixture.card)
         XCTAssertEqual(try GiftCardRedeemer.removeLeftoverWallets(in: testTempDirectory), 0)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
-        runtimeGate.signal()
-        await fulfillment(of: [runtimeFreed], timeout: 5)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path), "deinit leaves files for the existing leftover policy")
-        XCTAssertEqual(storage.clearCallsCount, 0)
-        let leftoverRemoved = XCTestExpectation(description: "leftover removable only after true quiescence")
-        let storageDirectory = try XCTUnwrap(testTempDirectory)
-        let removeLeftover = Task {
-            while true {
-                try Task.checkCancellation()
-                if try GiftCardRedeemer.removeLeftoverWallets(in: storageDirectory) == 1 {
-                    leftoverRemoved.fulfill()
-                    return
-                }
-                await Task.yield()
+
+        fixture.engine.startGate.open()
+        fixture.engine.stopGate.open()
+        _ = try? await check.value
+        try await waitForRelease(card: fixture.card)
+        try await fixture.redeemer.cleanup()
+        let calls = await fixture.engine.calls
+        XCTAssertEqual(calls.filter { $0 == "stop" }.count, 1)
+        XCTAssertEqual(calls.filter { $0 == "close" }.count, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+        let replacement = try makeReplacement(card: fixture.card)
+        withExtendedLifetime(replacement) {}
+    }
+
+    func testCleanupJoinsCancelledBackgroundResubmissionBeforeClosingWallet() async throws {
+        let clock = GiftCardCleanupTestClock()
+        defer { clock.dispose() }
+        let gate = GiftCardCleanupTestGate()
+        let fixture = try await GiftCardCancellationFixture.make(
+            storageDirectory: testTempDirectory,
+            cleanupTiming: clock.timing
+        )
+        let reading = XCTestExpectation(description: "background resubmission entered repository read")
+        let cancelled = XCTestExpectation(description: "wipe cancelled background resubmission")
+        fixture.repository.findForResubmissionUpToClosure = { _ in
+            await withTaskCancellationHandler {
+                reading.fulfill()
+                await gate.wait()
+                return []
+            } onCancel: {
+                cancelled.fulfill()
             }
         }
-        let removed = await XCTWaiter.fulfillment(of: [leftoverRemoved], timeout: 5)
-        XCTAssertEqual(removed, .completed)
-        guard removed == .completed else {
-            removeLeftover.cancel()
-            return
+
+        do {
+            _ = try await fixture.redeemer.check()
+            let root = testTempDirectory.appendingPathComponent(fixture.card.synchronizerAlias.description)
+            let marker = root.appendingPathComponent("resubmission-marker")
+            try Data([1]).write(to: marker)
+            await fulfillment(of: [reading], timeout: 5)
+            let cleanup = startCleanup(fixture.redeemer)
+            await fulfillment(of: [cancelled, clock.expectSleep(at: 30_000_000_000)], timeout: 5)
+            clock.advance(to: 30_000_000_000)
+            do {
+                try await cleanup.value
+                XCTFail("The caller budget must expire while the owned wipe waits for resubmission")
+            } catch {
+                XCTAssertEqual(error as? ZcashError, .giftCardCleanupTimedOut)
+            }
+
+            let callsDuringRead = await fixture.engine.calls
+            XCTAssertFalse(callsDuringRead.contains("stop"))
+            XCTAssertFalse(callsDuringRead.contains("close"))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+            assertAlreadyActive(card: fixture.card)
+            XCTAssertEqual(try GiftCardRedeemer.removeLeftoverWallets(in: testTempDirectory), 0)
+
+            await gate.open()
+            try await waitForRelease(card: fixture.card)
+            try await fixture.redeemer.cleanup()
+            let calls = await fixture.engine.calls
+            XCTAssertEqual(calls.filter { $0 == "stop" }.count, 1)
+            XCTAssertEqual(calls.filter { $0 == "close" }.count, 1)
+            XCTAssertEqual(fixture.repository.findForResubmissionUpToCallsCount, 1)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+            let replacement = try makeReplacement(card: fixture.card)
+            withExtendedLifetime(replacement) {}
+        } catch {
+            await gate.open()
+            throw error
         }
-        try await removeLeftover.value
-        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+    }
+
+    func testNonQuiescentCleanupProtectsWalletAndAlias() async throws {
+        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+        _ = try await fixture.redeemer.check()
+        let root = testTempDirectory.appendingPathComponent(fixture.card.synchronizerAlias.description)
+        let marker = root.appendingPathComponent("wallet-marker")
+        try Data([1]).write(to: marker)
+        fixture.engine.stopQuiescent = false
+        do {
+            try await fixture.redeemer.cleanup()
+            XCTFail("A refused wipe must propagate its error")
+        } catch {
+            XCTAssertEqual(error as? ZcashError, .slipstreamEngineNotQuiescent)
+        }
+        let isOpen = await fixture.engine.isOpen
+        XCTAssertTrue(isOpen)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+        XCTAssertThrowsError(try makeReplacement(card: fixture.card)) { error in
+            XCTAssertEqual(error as? ZcashError, .giftCardRedeemerAlreadyActive)
+        }
+        XCTAssertEqual(try GiftCardRedeemer.removeLeftoverWallets(in: testTempDirectory), 0)
+        fixture.engine.stopQuiescent = true
+        try await fixture.redeemer.cleanup()
+    }
+
+    func testCancelledCleanupCallerLeavesOwnedTeardownAndCanDropRedeemer() async throws {
+        let clock = GiftCardCleanupTestClock()
+        defer { clock.dispose() }
+        var fixture: GiftCardCancellationFixture? = try await GiftCardCancellationFixture.make(
+            storageDirectory: testTempDirectory,
+            cleanupTiming: clock.timing
+        )
+        let card = try XCTUnwrap(fixture).card
+        _ = try await fixture?.redeemer.check()
+        let engine = try XCTUnwrap(fixture).engine
+        let root = testTempDirectory.appendingPathComponent(card.synchronizerAlias.description)
+        let marker = root.appendingPathComponent("owned-marker")
+        try Data([1]).write(to: marker)
+        engine.stopGate.close()
+        let entered = XCTestExpectation(description: "wipe reached stop")
+        await engine.onCall("stop") { entered.fulfill() }
+        let cleanup = startCleanup(try XCTUnwrap(fixture).redeemer)
+        await fulfillment(of: [entered], timeout: 5)
+        cleanup.cancel()
+        let returned = XCTestExpectation(description: "cancelled waiter returned")
+        let observer = Task {
+            _ = try? await cleanup.value
+            returned.fulfill()
+        }
+        await fulfillment(of: [returned], timeout: 5)
+        weak let old = fixture?.redeemer
+        fixture = nil
+        XCTAssertNil(old, "The coordinator must own teardown without retaining the redeemer")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+        assertAlreadyActive(card: card)
+        XCTAssertEqual(try GiftCardRedeemer.removeLeftoverWallets(in: testTempDirectory), 0)
+        engine.stopGate.open()
+        _ = await observer.value
+        do {
+            try await cleanup.value
+            XCTFail("Cancellation must detach only this cleanup waiter")
+        } catch is CancellationError {
+        }
+        try await waitForRelease(card: card)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+    }
+
+    func testUnusedCancelledCleanupRetainsOwnershipAfterRedeemerIsDropped() async throws {
+        let clock = GiftCardCleanupTestClock()
+        defer { clock.dispose() }
+        let native = TorHTTPGetNative(
+            get: { _, _, _, _, _, _ in
+                XCTFail("Unused cleanup must not send traffic")
+                return nil
+            },
+            isolateRuntime: { _ in
+                XCTFail("Unused cleanup must not isolate a runtime")
+                return nil
+            },
+            freeRuntime: { _ in XCTFail("Unused cleanup must not free a runtime it never opened") },
+            createRuntime: { _, _ in
+                XCTFail("Unused cleanup must not create a runtime")
+                return nil
+            }
+        )
+        let tor = TorClient(torDir: testTempDirectory.appendingPathComponent("unused-card-tor"), httpGetNative: native)
+        var fixture: GiftCardCancellationFixture? = try await GiftCardCancellationFixture.make(
+            storageDirectory: testTempDirectory,
+            cleanupTiming: clock.timing,
+            torClient: tor
+        )
+        let card = try XCTUnwrap(fixture).card
+        let engine = try XCTUnwrap(fixture).engine
+        let service = try XCTUnwrap(fixture).service
+        let root = testTempDirectory.appendingPathComponent(card.synchronizerAlias.description)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let marker = root.appendingPathComponent("unused-wallet-marker")
+        try Data([1]).write(to: marker)
+        engine.stopGate.close()
+        let entered = XCTestExpectation(description: "unused wallet wipe reached stop")
+        await engine.onCall("stop") { entered.fulfill() }
+        let cleanup = startCleanup(try XCTUnwrap(fixture).redeemer)
+        await fulfillment(of: [entered], timeout: 5)
+        cleanup.cancel()
+        do {
+            try await cleanup.value
+            XCTFail("Cancellation must detach the unused redeemer's waiter")
+        } catch is CancellationError {
+        }
+        weak let old = fixture?.redeemer
+        fixture = nil
+        XCTAssertNil(old)
+        assertAlreadyActive(card: card)
+        XCTAssertEqual(try GiftCardRedeemer.removeLeftoverWallets(in: testTempDirectory), 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+        engine.stopGate.open()
+        try await waitForRelease(card: card)
         let replacement = try makeReplacement(card: card)
-        try await replacement.cleanup()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let replacementMarker = root.appendingPathComponent("replacement-marker")
+        try Data([2]).write(to: replacementMarker)
+        let calls = await engine.calls
+        XCTAssertEqual(calls.filter { $0 == "close" }.count, 1)
+        XCTAssertEqual(service.closeConnectionsCallsCount, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: testTempDirectory.appendingPathComponent("unused-card-tor").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: replacementMarker.path))
+        assertAlreadyActive(card: card)
+        withExtendedLifetime(replacement) {}
     }
 
-    func testCancelledCleanupRetainsOwnershipUntilSuccessfulWipeCompletes() async throws {
-        try await assertCleanupRetainsOwnership(wipeFails: false)
+    func testCleanupTimeoutIncludesQueuedWorkAndLateSuccessReleasesOwnership() async throws {
+        let clock = GiftCardCleanupTestClock()
+        defer { clock.dispose() }
+        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory, cleanupTiming: clock.timing)
+        _ = try await fixture.redeemer.check()
+        let proposalEntered = XCTestExpectation(description: "predecessor entered proposal")
+        let gate = GiftCardCleanupTestGate()
+        fixture.backend.proposeSendMaxTransferAccountUUIDToMemoModeClosure = { _, _, _, _ in
+            proposalEntered.fulfill()
+            await gate.wait()
+            return FfiProposalFixtures.makeProposal(steps: [FfiProposalFixtures.Step(inputValues: [50_000], changeValues: [], fee: 10_000)]).inner
+        }
+        let predecessor = Task { try await fixture.redeemer.check() }
+        await fulfillment(of: [proposalEntered], timeout: 5)
+        let cleanup = startCleanup(fixture.redeemer)
+        await fulfillment(of: [clock.expectSleep(at: 30_000_000_000)], timeout: 5)
+        do {
+            _ = try await fixture.redeemer.check()
+            XCTFail("Cleanup must immediately close admission")
+        } catch ZcashError.giftCardRedeemerCleanedUp {
+        }
+        clock.advance(to: 30_000_000_000)
+        let returned = XCTestExpectation(description: "timed-out waiter returned")
+        let observer = Task {
+            _ = try? await cleanup.value
+            returned.fulfill()
+        }
+        await fulfillment(of: [returned], timeout: 5)
+        assertAlreadyActive(card: fixture.card)
+        let callsBeforeJoin = await fixture.engine.calls
+        XCTAssertFalse(callsBeforeJoin.contains("close"))
+        await gate.open()
+        _ = try? await predecessor.value
+        _ = await observer.value
+        do {
+            try await cleanup.value
+            XCTFail("The caller budget includes time behind the predecessor")
+        } catch {
+            XCTAssertEqual(error as? ZcashError, .giftCardCleanupTimedOut)
+        }
+        try await fixture.redeemer.cleanup()
+        let replacement = try makeReplacement(card: fixture.card)
+        withExtendedLifetime(replacement) {}
     }
 
-    func testCancelledCleanupRetainsOwnershipUntilFailedWipeCompletes() async throws {
-        try await assertCleanupRetainsOwnership(wipeFails: true)
+    func testCleanupAdmissionBudgetCountsCancellationCallbacks() async throws {
+        let clock = GiftCardCleanupTestClock()
+        defer { clock.dispose() }
+        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory, cleanupTiming: clock.timing)
+        _ = try await fixture.redeemer.check()
+        let entered = XCTestExpectation(description: "predecessor installed cancellation callback")
+        let cancelled = XCTestExpectation(description: "cancellation callback consumed twenty seconds")
+        let gate = GiftCardCleanupTestGate()
+        fixture.backend.proposeSendMaxTransferAccountUUIDToMemoModeClosure = { _, _, _, _ in
+            await withTaskCancellationHandler {
+                entered.fulfill()
+                await gate.wait()
+                return FfiProposalFixtures.makeProposal(steps: [FfiProposalFixtures.Step(inputValues: [50_000], changeValues: [], fee: 10_000)]).inner
+            } onCancel: {
+                clock.advance(to: 20_000_000_000)
+                cancelled.fulfill()
+            }
+        }
+        let predecessor = Task { try await fixture.redeemer.check() }
+        await fulfillment(of: [entered], timeout: 5)
+        let cleanup = startCleanup(fixture.redeemer)
+        await fulfillment(of: [cancelled, clock.expectSleep(at: 30_000_000_000)], timeout: 5)
+        // Release both correct and incorrect deadline timers so a RED cannot strand the test.
+        clock.advance(to: 50_000_000_000)
+        do { try await cleanup.value } catch { XCTAssertEqual(error as? ZcashError, .giftCardCleanupTimedOut) }
+        await gate.open()
+        _ = try? await predecessor.value
+        try await fixture.redeemer.cleanup()
     }
 
-    func testRepeatedCleanupAndOldDeinitPreserveReplacementWallet() async throws {
+    func testAlreadyCancelledCleanupClosesAdmissionAndStillWipes() async throws {
+        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+        _ = try await fixture.redeemer.check()
+        let gate = GiftCardCleanupTestGate()
+        let cleanup = Task {
+            await gate.wait()
+            try await fixture.redeemer.cleanup()
+        }
+        cleanup.cancel()
+        await gate.open()
+        do {
+            try await cleanup.value
+            XCTFail("An already-cancelled cleanup caller must get cancellation")
+        } catch is CancellationError {
+        }
+        do {
+            _ = try await fixture.redeemer.check()
+            XCTFail("Cancelled cleanup must close admission")
+        } catch ZcashError.giftCardRedeemerCleanedUp {
+        }
+        try await fixture.redeemer.cleanup()
+        let calls = await fixture.engine.calls
+        XCTAssertEqual(calls.filter { $0 == "close" }.count, 1)
+    }
+
+    func testSimultaneousCleanupCallersAndOldDeinitPreserveReplacement() async throws {
         var fixture: GiftCardCancellationFixture? = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
         let card = try XCTUnwrap(fixture).card
         _ = try await fixture?.redeemer.check()
-        let storage = try XCTUnwrap(fixture).storage
-        let firstFinished = XCTestExpectation(description: "first cleanup completed")
-        let first = Task {
-            defer { firstFinished.fulfill() }
-            try await fixture?.redeemer.cleanup()
-        }
-        try await waitFor(firstFinished)
+        let engine = try XCTUnwrap(fixture).engine
+        engine.stopGate.close()
+        let entered = XCTestExpectation(description: "owned wipe entered stop")
+        await engine.onCall("stop") { entered.fulfill() }
+        let first = startCleanup(try XCTUnwrap(fixture).redeemer)
+        await fulfillment(of: [entered], timeout: 5)
+        let second = startCleanup(try XCTUnwrap(fixture).redeemer)
+        engine.stopGate.open()
         try await first.value
-        XCTAssertEqual(storage.clearCallsCount, 1)
+        try await second.value
         let replacement = try makeReplacement(card: card)
-        let marker = try writeMarker(card: card, name: "replacement-marker")
-        let repeatedFinished = XCTestExpectation(description: "repeated cleanup completed")
-        let repeated = Task {
-            defer { repeatedFinished.fulfill() }
-            try await fixture?.redeemer.cleanup()
-        }
-        try await waitFor(repeatedFinished)
-        try await repeated.value
-        XCTAssertEqual(storage.clearCallsCount, 1)
-        weak var old = fixture?.redeemer
+        let root = testTempDirectory.appendingPathComponent(card.synchronizerAlias.description)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let marker = root.appendingPathComponent("replacement-marker")
+        try Data([1]).write(to: marker)
+        try await fixture?.redeemer.cleanup()
+        weak let old = fixture?.redeemer
         fixture = nil
         XCTAssertNil(old)
         XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
         assertAlreadyActive(card: card)
-        try await replacement.cleanup()
+        let calls = await engine.calls
+        XCTAssertEqual(calls.filter { $0 == "close" }.count, 1)
+        withExtendedLifetime(replacement) {}
     }
 
-    func testDirectoryDeletionErrorPropagatesAfterWipeFailure() async throws {
-        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+    func testDroppedUsedRedeemerRetriesRefusedWipeBeforeRelease() async throws {
+        let clock = GiftCardCleanupTestClock()
+        defer { clock.dispose() }
+        var fixture: GiftCardCancellationFixture? = try await GiftCardCancellationFixture.make(
+            storageDirectory: testTempDirectory,
+            cleanupTiming: clock.timing
+        )
+        let card = try XCTUnwrap(fixture).card
+        _ = try await fixture?.redeemer.check()
+        let engine = try XCTUnwrap(fixture).engine
+        engine.stopQuiescent = false
+        weak let old = fixture?.redeemer
+        fixture = nil
+        XCTAssertNil(old)
+        await fulfillment(of: [clock.expectSleep(at: 1_000_000_000)], timeout: 5)
+        assertAlreadyActive(card: card)
+        let open = await engine.isOpen
+        XCTAssertTrue(open)
+        engine.stopQuiescent = true
+        clock.advance(to: 1_000_000_000)
+        try await waitForRelease(card: card)
+        let calls = await engine.calls
+        XCTAssertEqual(calls.filter { $0 == "close" }.count, 1)
+    }
+
+    func testStorageFailureAfterSafeWipeRetainsAliasAndRetriesOnlyRemoval() async throws {
+        let clock = GiftCardCleanupTestClock()
+        defer { clock.dispose() }
+        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory, cleanupTiming: clock.timing)
         _ = try await fixture.redeemer.check()
-        _ = try writeMarker(card: fixture.card, name: "undeletable-marker")
-        fixture.storage.clearClosure = { throw CleanupTestError.wipeFailed }
+        let root = testTempDirectory.appendingPathComponent(fixture.card.synchronizerAlias.description)
+        try Data([1]).write(to: root.appendingPathComponent("marker"))
         try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: testTempDirectory.path)
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: testTempDirectory.path) }
-        let finished = XCTestExpectation(description: "directory error returned")
-        let cleanup = Task {
-            defer { finished.fulfill() }
-            try await fixture.redeemer.cleanup()
-        }
-        try await waitFor(finished)
         do {
-            try await cleanup.value
-            XCTFail("Directory deletion failure must be returned")
+            try await fixture.redeemer.cleanup()
+            XCTFail("Storage deletion errors must propagate")
         } catch {
             XCTAssertEqual((error as NSError).domain, NSCocoaErrorDomain)
         }
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: testTempDirectory.path)
-        let replacement = try makeReplacement(card: fixture.card)
-        try await replacement.cleanup()
-    }
-
-    func testCleanupWithEarlyWipeValidationFailureWaitsForWriter() async throws {
-        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
-        _ = try await fixture.redeemer.check()
-        let marker = try writeMarker(card: fixture.card, name: "held-writer")
-        let entered = XCTestExpectation(description: "writer entered")
-        let admitted = XCTestExpectation(description: "cleanup drain admitted")
-        let finished = XCTestExpectation(description: "cleanup after early wipe error")
-        let gate = GiftCardOperationGate()
-        let events = CleanupEvents()
-        fixture.service.getInfoModeClosure = { _ in
-            entered.fulfill()
-            await gate.wait()
-            events.append("writer:done")
-            throw ZcashError.synchronizerNotPrepared
-        }
-        await fixture.synchronizer.blockProcessor.start()
-        await fulfillment(of: [entered], timeout: 5)
-        fixture.synchronizer.initializer.urlsParsingError = ZcashError.synchronizerNotPrepared
-        await fixture.synchronizer.updateStatus(.stopped)
-        fixture.downloader.stopDownloadClosure = {
-            if events.appendOnce("stop") { admitted.fulfill() }
-        }
-        let cleanup = Task {
-            defer { finished.fulfill() }
-            try await fixture.redeemer.cleanup()
-        }
-        await fulfillment(of: [admitted], timeout: 5)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
-        XCTAssertEqual(fixture.storage.clearCallsCount, 0)
         assertAlreadyActive(card: fixture.card)
-        await gate.open()
-        try await waitFor(finished)
-        try await cleanup.value
-        XCTAssertTrue(events.events.contains("writer:done"))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.path))
+        let closed = await fixture.engine.isOpen
+        XCTAssertFalse(closed)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: testTempDirectory.path)
+        try await fixture.redeemer.cleanup()
+        let calls = await fixture.engine.calls
+        XCTAssertEqual(calls.filter { $0 == "close" }.count, 1)
+        let replacement = try makeReplacement(card: fixture.card)
+        withExtendedLifetime(replacement) {}
     }
 
-    func testCleanupClosesServiceAndRootBeforeRemovingDirectory() async throws {
-        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+    func testInaccessibleWalletRootIsNotTreatedAsAbsent() async throws {
+        let clock = GiftCardCleanupTestClock()
+        defer { clock.dispose() }
+        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory, cleanupTiming: clock.timing)
         _ = try await fixture.redeemer.check()
-        let marker = try writeMarker(card: fixture.card, name: "tor-writer")
-        let events = CleanupEvents()
-        let closed = XCTestExpectation(description: "service connections closed")
-        let free = XCTestExpectation(description: "native root freed")
-        let gate = GiftCardOperationGate()
-        fixture.service.closeConnectionsClosure = {
-            XCTAssertEqual(fixture.storage.clearCallsCount, 1)
-            events.append("service:entered")
-            closed.fulfill()
-            await gate.wait()
-            events.append("service:done")
-        }
-        var native = TorHTTPGetNative()
-        native.createRuntime = { _, _ in
-            XCTFail("Cleanup must not bootstrap Tor")
-            return nil
-        }
-        native.freeRuntime = { _ in
-            XCTAssertTrue(events.events.contains("service:done"))
-            XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
-            events.append("runtime:free")
-            free.fulfill()
-        }
-        let tor = TorClient(runtimePtr: OpaquePointer(bitPattern: 1)!, torDir: marker.deletingLastPathComponent(), httpGetNative: native)
-        fixture.container.mock(type: TorClient.self, isSingleton: true) { _ in tor }
-        let finished = XCTestExpectation(description: "cleanup completed")
-        let cleanup = Task {
-            defer { finished.fulfill() }
+        let root = testTempDirectory.appendingPathComponent(fixture.card.synchronizerAlias.description)
+        let marker = root.appendingPathComponent("inaccessible-marker")
+        try Data([1]).write(to: marker)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: testTempDirectory.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: testTempDirectory.path) }
+        do {
             try await fixture.redeemer.cleanup()
+            XCTFail("An inaccessible root has not been proven absent or deleted")
+        } catch {
+            XCTAssertEqual((error as NSError).domain, NSCocoaErrorDomain)
         }
-        await fulfillment(of: [closed], timeout: 5)
-        XCTAssertFalse(events.events.contains("runtime:free"))
+        assertAlreadyActive(card: fixture.card)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: testTempDirectory.path)
         XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
-        await gate.open()
-        try await waitFor(finished)
-        try await cleanup.value
-        await fulfillment(of: [free], timeout: 5)
         try await fixture.redeemer.cleanup()
-        XCTAssertEqual(events.events.filter { $0 == "runtime:free" }.count, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+        let replacement = try makeReplacement(card: fixture.card)
+        withExtendedLifetime(replacement) {}
+    }
+
+    func testServiceConnectionsCloseAfterSafeWipeBeforeHostRuntimeAndRootRemoval() async throws {
+        let clock = GiftCardCleanupTestClock()
+        defer { clock.dispose() }
+        let serviceGate = GiftCardCleanupTestGate()
+        defer { Task { await serviceGate.open() } }
+        let runtimes = TorTestRuntimes()
+        let card = try GiftCard(link: GiftCardTests.zodlTestnetLink)
+        let root = testTempDirectory.appendingPathComponent(card.synchronizerAlias.description)
+        let marker = root.appendingPathComponent("tor-marker")
+        let disposed = XCTestExpectation(description: "host runtime disposed")
+        let native = TorHTTPGetNative(
+            get: { _, _, _, _, _, _ in
+                XCTFail("Cleanup must not send traffic")
+                return nil
+            },
+            isolateRuntime: { _ in
+                XCTFail("Cleanup must not bootstrap or isolate a runtime")
+                return nil
+            },
+            freeRuntime: { pointer in
+                XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path), "Host runtime disposal precedes root deletion")
+                runtimes.free(pointer)
+                disposed.fulfill()
+            }
+        )
+        let tor = TorClient(runtimePtr: runtimes.parent, torDir: root.appendingPathComponent("tor"), httpGetNative: native)
+        let fixture = try await GiftCardCancellationFixture.make(
+            storageDirectory: testTempDirectory,
+            cleanupTiming: clock.timing,
+            torClient: tor
+        )
+        let serviceEntered = XCTestExpectation(description: "card service disposal entered after wipe")
+        let engine = fixture.engine
+        fixture.service.closeConnectionsClosure = {
+            let calls = await engine.calls
+            XCTAssertTrue(calls.contains("stop:done"))
+            XCTAssertTrue(calls.contains("close"))
+            serviceEntered.fulfill()
+            await serviceGate.wait()
+        }
+        _ = try await fixture.redeemer.check()
+        try Data([1]).write(to: marker)
+        fixture.engine.stopQuiescent = false
+        do { try await fixture.redeemer.cleanup() } catch {}
+        XCTAssertEqual(fixture.service.closeConnectionsCallsCount, 0, "Refused wipe must preserve service connections")
+        XCTAssertTrue(runtimes.isAlive(runtimes.parent), "Refused wipe must preserve the host runtime")
+        fixture.engine.stopQuiescent = true
+        let cleanup = startCleanup(fixture.redeemer)
+        await fulfillment(of: [serviceEntered, clock.expectSleep(at: 30_000_000_000)], timeout: 5)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+        XCTAssertTrue(runtimes.isAlive(runtimes.parent))
+        assertAlreadyActive(card: card)
+        XCTAssertEqual(try GiftCardRedeemer.removeLeftoverWallets(in: testTempDirectory), 0)
+        let cancelled = startCleanup(fixture.redeemer)
+        cancelled.cancel()
+        do {
+            try await cancelled.value
+            XCTFail("Cancelling a waiter must leave service disposal owned")
+        } catch is CancellationError {
+        }
+        clock.advance(to: 30_000_000_000)
+        do {
+            try await cleanup.value
+            XCTFail("The cleanup waiter must time out while service disposal is held")
+        } catch {
+            XCTAssertEqual(error as? ZcashError, .giftCardCleanupTimedOut)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+        XCTAssertTrue(runtimes.isAlive(runtimes.parent))
+        assertAlreadyActive(card: card)
+        await serviceGate.open()
+        try await waitForRelease(card: card)
+        try await fixture.redeemer.cleanup()
+        await fulfillment(of: [disposed], timeout: 5)
+        XCTAssertEqual(fixture.service.closeConnectionsCallsCount, 1)
+        XCTAssertFalse(runtimes.isAlive(runtimes.parent))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
     }
 
     func testCleanupDisposesActualCachedTorConnectionsBeforeFinalRuntimeAndRootRemoval() async throws {
-        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
-        _ = try await fixture.redeemer.check()
-        let marker = try writeMarker(card: fixture.card, name: "cached-tor-owner")
+        let clock = GiftCardCleanupTestClock()
+        defer { clock.dispose() }
+        let runtimes = TorTestRuntimes()
         let events = CleanupEvents()
-        let wipeEntered = XCTestExpectation(description: "wipe entered")
-        let gate = GiftCardOperationGate()
-        fixture.storage.clearClosure = {
-            wipeEntered.fulfill()
-            await gate.wait()
-            events.append("wipe:done")
-        }
+        let card = try GiftCard(link: GiftCardTests.zodlTestnetLink)
+        let root = testTempDirectory.appendingPathComponent(card.synchronizerAlias.description)
+        let marker = root.appendingPathComponent("cached-tor-owner")
         var native = TorHTTPGetNative()
         native.createRuntime = { _, _ in
-            XCTFail("Cleanup must never create a native runtime")
+            XCTFail("Gift cleanup must not create a runtime")
             return nil
         }
-        native.connectLightwalletd = { _, _ in
-            events.append("connect")
-            return OpaquePointer(bitPattern: 2)
+        native.isolateRuntime = { _ in
+            XCTFail("Gift cleanup must not isolate a runtime")
+            return nil
         }
-        native.freeLightwalletd = { _ in
-            XCTAssertTrue(events.events.contains("wipe:done"))
+        native.get = { _, _, _, _, _, _ in
+            XCTFail("Gift cleanup must not send traffic")
+            return nil
+        }
+        native.connectLightwalletd = { pointer, _ in
+            XCTAssertTrue(runtimes.isAlive(pointer))
+            if events.appendOnce("connect:default") { return OpaquePointer(bitPattern: 2) }
+            events.append("connect:group")
+            return OpaquePointer(bitPattern: 3)
+        }
+        native.freeLightwalletd = { pointer in
+            XCTAssertTrue(events.events.contains("engine:close"), "Cache owners must survive until safe wipe")
+            XCTAssertTrue(runtimes.isAlive(runtimes.parent), "Cache owners must be freed before the root runtime")
             XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
-            events.append("lwd:free")
+            if pointer == OpaquePointer(bitPattern: 2) {
+                events.append("free:default")
+            } else {
+                XCTAssertEqual(pointer, OpaquePointer(bitPattern: 3))
+                events.append("free:group")
+            }
         }
-        native.freeRuntime = { _ in
-            XCTAssertEqual(events.events.filter { $0 == "lwd:free" }.count, 2)
+        native.freeRuntime = { pointer in
+            XCTAssertEqual(events.events.filter { $0 == "free:default" }.count, 1)
+            XCTAssertEqual(events.events.filter { $0 == "free:group" }.count, 1)
             XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
-            events.append("runtime:free")
+            events.append("free:runtime")
+            runtimes.free(pointer)
         }
-        let tor = TorClient(runtimePtr: OpaquePointer(bitPattern: 1)!, torDir: marker.deletingLastPathComponent(), httpGetNative: native)
-        fixture.container.mock(type: TorClient.self, isSingleton: true) { _ in tor }
+        let tor = TorClient(runtimePtr: runtimes.parent, torDir: root.appendingPathComponent("tor"), httpGetNative: native)
+        let fixture = try await GiftCardCancellationFixture.make(
+            storageDirectory: testTempDirectory,
+            cleanupTiming: clock.timing,
+            torClient: tor
+        )
+        defer { fixture.engine.stopGate.open() }
+        _ = try await fixture.redeemer.check()
+        try Data([1]).write(to: marker)
+        // Seed the real retained service caches without sending RPC traffic through synthetic pointers.
         let service = LightWalletGRPCServiceOverTor(endpoint: LightWalletEndpointBuilder.default, tor: tor)
-        fixture.synchronizer.initializer.lightWalletService = service
+        fixture.initializer.lightWalletService = service
         _ = try await service.serviceConnections.connectToLightwalletd(.defaultTor)
         _ = try await service.serviceConnections.connectToLightwalletd(.torInGroup("card-test"))
-        let finished = XCTestExpectation(description: "cleanup completed")
-        let cleanup = Task {
-            defer { finished.fulfill() }
+        _ = try await service.serviceConnections.connectToLightwalletd(.defaultTor)
+        _ = try await service.serviceConnections.connectToLightwalletd(.torInGroup("card-test"))
+        XCTAssertEqual(events.events, ["connect:default", "connect:group"])
+        await fixture.engine.onCall("close") { events.append("engine:close") }
+
+        fixture.engine.stopQuiescent = false
+        do {
             try await fixture.redeemer.cleanup()
+            XCTFail("Refused wipe must retain the cached native owners")
+        } catch {
+            XCTAssertEqual(error as? ZcashError, .slipstreamEngineNotQuiescent)
         }
-        await fulfillment(of: [wipeEntered], timeout: 5)
+        XCTAssertEqual(events.events, ["connect:default", "connect:group"])
+        XCTAssertTrue(runtimes.isAlive(runtimes.parent))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+        assertAlreadyActive(card: card)
+        XCTAssertEqual(try GiftCardRedeemer.removeLeftoverWallets(in: testTempDirectory), 0)
+
+        fixture.engine.stopQuiescent = true
+        fixture.engine.stopGate.close()
+        let stopEntered = XCTestExpectation(description: "safe cleanup attempt reached engine stop")
+        await fixture.engine.onCall("stop") { stopEntered.fulfill() }
+        let cleanup = startCleanup(fixture.redeemer)
+        await fulfillment(of: [stopEntered], timeout: 5)
         cleanup.cancel()
-        XCTAssertEqual(events.events, ["connect", "connect"])
-        assertAlreadyActive(card: fixture.card)
-        await gate.open()
-        try await waitFor(finished)
-        try await cleanup.value
-        XCTAssertEqual(events.events, ["connect", "connect", "wipe:done", "lwd:free", "lwd:free", "runtime:free"])
-        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
-        let replacement = try makeReplacement(card: fixture.card)
-        let replacementMarker = try writeMarker(card: fixture.card, name: "replacement-after-tor")
+        do {
+            try await cleanup.value
+            XCTFail("Cancelled caller must detach from the owned cache teardown")
+        } catch is CancellationError {
+        }
+        XCTAssertEqual(events.events, ["connect:default", "connect:group"])
+        XCTAssertTrue(runtimes.isAlive(runtimes.parent))
+        assertAlreadyActive(card: card)
+        fixture.engine.stopGate.open()
+        try await waitForRelease(card: card)
+        try await fixture.redeemer.cleanup()
+        XCTAssertEqual(Set(events.events), Set([
+            "connect:default", "connect:group", "engine:close", "free:default", "free:group", "free:runtime"
+        ]))
+        XCTAssertEqual(events.events.count, 6)
+        XCTAssertFalse(runtimes.isAlive(runtimes.parent))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+
+        let replacement = try makeReplacement(card: card)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let replacementMarker = root.appendingPathComponent("replacement-after-tor")
+        try Data([2]).write(to: replacementMarker)
         try await fixture.redeemer.cleanup()
         XCTAssertTrue(FileManager.default.fileExists(atPath: replacementMarker.path))
-        XCTAssertEqual(events.events.filter { $0 == "runtime:free" }.count, 1)
-        try await replacement.cleanup()
+        XCTAssertEqual(events.events.count, 6, "Repeated cleanup must not dispose an owner twice")
+        withExtendedLifetime(replacement) {}
     }
 
-    func testCleanupBeforeCheckDoesNotBootstrapTor() async throws {
-        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+    func testUnusedCleanupWithActualServiceCreatesNoRuntimeOrConnection() async throws {
         let events = CleanupEvents()
         var native = TorHTTPGetNative()
         native.createRuntime = { _, _ in
             events.append("create")
             return nil
         }
-        native.freeRuntime = { _ in events.append("free") }
-        let tor = TorClient(torDir: testTempDirectory.appendingPathComponent("unused-tor"), httpGetNative: native)
-        fixture.container.mock(type: TorClient.self, isSingleton: true) { _ in tor }
+        native.connectLightwalletd = { _, _ in
+            events.append("connect")
+            return nil
+        }
+        native.isolateRuntime = { _ in
+            events.append("isolate")
+            return nil
+        }
+        native.get = { _, _, _, _, _, _ in
+            events.append("get")
+            return nil
+        }
+        native.freeRuntime = { _ in events.append("free:runtime") }
+        native.freeLightwalletd = { _ in events.append("free:connection") }
+        let torDirectory = testTempDirectory.appendingPathComponent("unused-native-tor")
+        let tor = TorClient(torDir: torDirectory, httpGetNative: native)
+        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory, torClient: tor)
+        let service = LightWalletGRPCServiceOverTor(endpoint: LightWalletEndpointBuilder.default, tor: tor)
+        fixture.initializer.lightWalletService = service
+        try await fixture.redeemer.cleanup()
         try await fixture.redeemer.cleanup()
         XCTAssertTrue(events.events.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: torDirectory.path))
+    }
+
+    private func startCleanup(_ redeemer: GiftCardRedeemer) -> Task<Void, Error> {
+        Task { try await redeemer.cleanup() }
+    }
+
+    private func assertAlreadyActive(card: GiftCard) {
+        XCTAssertThrowsError(try makeReplacement(card: card)) { error in
+            XCTAssertEqual(error as? ZcashError, .giftCardRedeemerAlreadyActive)
+        }
+    }
+
+    private func waitForRelease(card: GiftCard) async throws {
+        let released = XCTestExpectation(description: "owner lease released")
+        let poll = Task {
+            let owner = UUID()
+            while !Task.isCancelled {
+                if GiftCardRedeemerRegistry.claim(card.synchronizerAlias, owner: owner) {
+                    GiftCardRedeemerRegistry.release(card.synchronizerAlias, owner: owner)
+                    released.fulfill()
+                    return
+                }
+                await Task.yield()
+            }
+        }
+        await fulfillment(of: [released], timeout: 5)
+        poll.cancel()
+        await poll.value
+    }
+
+    private func makeReplacement(card: GiftCard) throws -> GiftCardRedeemer {
+        try GiftCardRedeemer(
+            card: card,
+            network: ZcashNetworkBuilder.network(for: .testnet),
+            endpoint: LightWalletEndpointBuilder.default,
+            isTorEnabled: false,
+            storageDirectory: testTempDirectory
+        )
     }
 
     func testBridgeObservesSuccessCompletedBeforeSubscription() async throws {
@@ -367,109 +773,8 @@ final class GiftCardCleanupTests: ZcashTestCase {
         }
     }
 
-    private func assertCleanupRetainsOwnership(wipeFails: Bool) async throws {
-        var fixture: GiftCardCancellationFixture? = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
-        let card = try XCTUnwrap(fixture).card
-        _ = try await fixture?.redeemer.check()
-        let marker = try writeMarker(card: card, name: "live-marker")
-        let wipeEntered = XCTestExpectation(description: "real wipe reached storage")
-        let gate = GiftCardOperationGate()
-        fixture?.storage.clearClosure = {
-            wipeEntered.fulfill()
-            await gate.wait()
-            if wipeFails { throw CleanupTestError.wipeFailed }
-        }
-        let finished = XCTestExpectation(description: "cleanup returned after wipe")
-        let completion = CleanupCompletionProbe()
-        weak var old = fixture?.redeemer
-        let cleanup = startCleanup(try XCTUnwrap(fixture).redeemer, completion: completion, finished: finished)
-        // Always release the controlled dependency, even if an ordering assertion fails.
-        let entered = await XCTWaiter.fulfillment(of: [wipeEntered], timeout: 5)
-        cleanup.cancel()
-        fixture = nil
-        XCTAssertEqual(entered, .completed)
-        XCTAssertNotNil(old)
-        XCTAssertFalse(completion.isFinished)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
-        assertAlreadyActive(card: card)
-        XCTAssertEqual(try GiftCardRedeemer.removeLeftoverWallets(in: testTempDirectory), 0)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
-        await gate.open()
-        try await waitFor(finished)
-        try await cleanup.value
-        XCTAssertTrue(completion.isFinished)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.deletingLastPathComponent().path))
-        let replacement = try makeReplacement(card: card)
-        let replacementMarker = try writeMarker(card: card, name: "replacement-marker")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: replacementMarker.path))
-        assertAlreadyActive(card: card)
-        try await replacement.cleanup()
-    }
-
-    private func startCleanup(
-        _ redeemer: GiftCardRedeemer,
-        completion: CleanupCompletionProbe,
-        finished: XCTestExpectation
-    ) -> Task<Void, Error> {
-        Task {
-            defer {
-                completion.finish()
-                finished.fulfill()
-            }
-            try await redeemer.cleanup()
-        }
-    }
-
-    private func assertAlreadyActive(card: GiftCard) {
-        XCTAssertThrowsError(try makeReplacement(card: card)) { error in
-            XCTAssertEqual(error as? ZcashError, .giftCardRedeemerAlreadyActive)
-        }
-    }
-
-    private func makeReplacement(card: GiftCard) throws -> GiftCardRedeemer {
-        try GiftCardRedeemer(
-            card: card,
-            network: ZcashNetworkBuilder.network(for: .testnet),
-            endpoint: LightWalletEndpointBuilder.default,
-            isTorEnabled: false,
-            storageDirectory: testTempDirectory,
-            loggingPolicy: .noLogging
-        )
-    }
-
-    private func writeMarker(card: GiftCard, name: String) throws -> URL {
-        let root = testTempDirectory.appendingPathComponent(card.synchronizerAlias.description)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let marker = root.appendingPathComponent(name)
-        try Data([1]).write(to: marker)
-        return marker
-    }
-
     private func waitFor(_ expectation: XCTestExpectation) async throws {
-        let result = await XCTWaiter.fulfillment(of: [expectation], timeout: 5)
-        XCTAssertEqual(result, .completed)
-        guard result == .completed else { throw CleanupTestError.timedOut }
+        await fulfillment(of: [expectation], timeout: 5)
     }
 }
-
-private enum CleanupTestError: Error {
-    case wipeFailed
-    case timedOut
-}
-
-private final class CleanupCompletionProbe {
-    private let lock = NSLock()
-    private var finished = false
-
-    var isFinished: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return finished
-    }
-
-    func finish() {
-        lock.lock()
-        finished = true
-        lock.unlock()
-    }
-}
+private enum CleanupTestError: Error { case wipeFailed }

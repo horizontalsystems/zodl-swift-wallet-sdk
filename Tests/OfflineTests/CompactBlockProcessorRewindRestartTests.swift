@@ -59,7 +59,7 @@ final class CompactBlockProcessorRewindRestartTests: ZcashTestCase {
         requestRestart: Bool = true,
         superseding: SupersedingOperation? = nil
     ) async throws {
-        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+        let fixture = try await ClassicProcessorCleanupFixture.make(storageDirectory: testTempDirectory)
         let processor = fixture.synchronizer.blockProcessor
         let initialActionGate = GiftCardOperationGate()
         let completionGate = GiftCardOperationGate()
@@ -69,9 +69,8 @@ final class CompactBlockProcessorRewindRestartTests: ZcashTestCase {
             await completionGate.open()
             await nextActionGate.open()
             await processor.stopAndWait()
-            try await fixture.redeemer.cleanup()
+            try await fixture.cleanup()
         }
-        _ = try await fixture.redeemer.check()
         if exhaustRetries { await setRetryLimitToOne(processor) }
         let events = CleanupEvents()
         let initialAction = XCTestExpectation(description: "initial sync action entered")

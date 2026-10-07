@@ -585,6 +585,16 @@ public enum ZcashErrorCode: String {
     case giftCardLinkInvalid = "ZGIFT0010"
     /// The gift card recipient must be a unified address with an Orchard receiver.
     case giftCardRecipientRequiresOrchard = "ZGIFT0013"
+    /// Cleanup is still continuing and the gift card remains in use. Wait for cleanup to finish before creating another redeemer.
+    case giftCardCleanupTimedOut = "ZGIFT0011"
+    /// The gift claim completed without any submission result. No successful redemption was reported.
+    case giftCardRedemptionIncomplete = "ZGIFT0012"
+    /// The gift-card check did not finish in time. Cleanup still owns unfinished wallet work.
+    case giftCardCheckTimedOut = "ZGIFT0014"
+    /// The gift-card check could not reconnect in time. The card balance is still unknown.
+    case giftCardCheckDisconnected = "ZGIFT0015"
+    /// The gift-card wallet stopped making progress. The card balance is still unknown.
+    case giftCardCheckSyncStalled = "ZGIFT0016"
     /// Attempt to init TxId with input that is not 32 bytes.
     case txIdNot32Bytes = "ZMODEL0001"
     /// Attempt to init TxId with invalid hex encoding.

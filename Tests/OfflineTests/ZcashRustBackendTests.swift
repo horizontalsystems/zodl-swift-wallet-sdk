@@ -95,6 +95,44 @@ class ZcashRustBackendTests: XCTestCase {
         XCTAssertEqual(summaryAfter, summaryBefore)
     }
 
+    // Removing the TaskLocal check would enter real FFI despite cancelled gift admission.
+    func testGiftTokenCancelsQueuedNativeCreationWithoutCancellingOwnedTask() async throws {
+        _ = try await rustBackend.initDataDb(seed: nil)
+        let accountsBefore = try await rustBackend.listAccounts()
+        let summaryBefore = try await rustBackend.getWalletSummary()
+        let proposal = FfiProposalFixtures.makeFfiProposal(feeRequired: 5_000)
+        let key = TestsData(networkType: .testnet).spendingKey
+        let backend = rustBackend!
+        let admission = GiftCardTransactionCreationAdmission()
+        let held = XCTestExpectation(description: "real DBActor holder entered")
+        let release = DispatchSemaphore(value: 0)
+        let holder = Task { @DBActor in
+            held.fulfill()
+            XCTAssertEqual(release.wait(timeout: .now() + 10), .success)
+        }
+        await fulfillment(of: [held], timeout: 5)
+        let creation = GiftCardTransactionCreationContext.$admission.withValue(admission) {
+            Task { @DBActor in
+                XCTAssertFalse(Task.isCancelled, "gift cancellation closes admission without cancelling owned completion")
+                return try await backend.createProposedTransactions(proposal: proposal, usk: key, ovkPolicy: .discard)
+            }
+        }
+        admission.cancelBeforeCreation()
+        release.signal()
+        await holder.value
+        do {
+            _ = try await creation.value
+            XCTFail("The cancelled token must stop before FFI")
+        } catch is CancellationError {
+        } catch {
+            XCTFail("Expected cancellation before native entry, got \(error.localizedDescription)")
+        }
+        let accountsAfter = try await backend.listAccounts()
+        let summaryAfter = try await backend.getWalletSummary()
+        XCTAssertEqual(accountsAfter, accountsBefore)
+        XCTAssertEqual(summaryAfter, summaryBefore)
+    }
+
     func testInitWithShortSeedAndFail() async throws {
         let seed = "testreferencealice"
         var treeState = TreeState()

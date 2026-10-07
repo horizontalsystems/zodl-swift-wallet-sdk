@@ -118,34 +118,35 @@ public struct GiftCardStatus: Equatable {
 ///
 /// ### Isolation and lifecycle
 ///
-/// The card wallet is an `SDKSynchronizer` of its own, with a custom alias derived from a hash of
+/// The card wallet is a `SlipstreamSynchronizer` of its own, with a custom alias derived from a hash of
 /// the card's funding address (never `.default`) and all of its files in a directory of its own
 /// under `storageDirectory`. It runs alongside the app's main synchronizer without touching its
 /// data. Exchange-rate fetching is off for the card wallet. Tor follows `isTorEnabled`: pass the
 /// main wallet's setting, so that a user who chose Tor does not reveal their IP address together
-/// with the card's birthday, its sync and the claim.
+/// with identifying requests for the card's birthday, sync metadata and claim. Bulk block fetching
+/// stays direct even when Tor is enabled. Protected requests never fall back to direct.
 ///
 /// The card wallet uses the SDK's transfer confirmation policy (ZIP 315): 3 confirmations for
 /// trusted notes and 10 for untrusted ones. Every note on a card comes from another wallet, so
 /// it needs 10.
 ///
 /// - The SDK does not stop two synchronizers from sharing an alias, so this type does: only one
-///   redeemer per card may be alive in the process at a time. Creating a second one throws
-///   ``ZcashError/giftCardRedeemerAlreadyActive`` until the first is cleaned up, or its asynchronous
-///   teardown after release finishes. Teardown retains the alias while writers and native resources drain.
+///   redeemer or owned teardown per card may be active in the process at a time. Creating a second one throws
+///   ``ZcashError/giftCardRedeemerAlreadyActive`` until safe cleanup finishes.
 /// - Calls on one redeemer are serialized in the order they are made; a ``redeem(to:)`` issued
 ///   while ``check()`` is syncing runs after it.
-/// - Both wallets share the SDK's global database executor, so every wallet-database call of
-///   either wallet waits for the other's. Syncing a card's short history is quick, but the main
-///   wallet's sync is slower while the card wallet scans, and vice versa.
+/// - Swift wallet-database calls share the SDK's global executor. Both sync engines also consume
+///   CPU and I/O, so checking a card can slow the main wallet's sync.
 /// - ``check()`` waits for the card wallet to be up to date. The wallet keeps syncing in the
 ///   background afterwards, so calling ``check()`` again (for instance while funds are pending)
-///   reports the latest balance without waiting for a new sync. Cancelling the calling task
-///   stops the wait (the wallet keeps syncing) and throws `CancellationError`.
+///   reports the latest balance without waiting for a new sync. Each caller waits at most 600
+///   seconds, including queueing and preparation. Cancellation or timeout stops only that caller's
+///   wait. The wallet and unfinished work remain owned until they drain and cleanup succeeds.
 /// - ``cleanup()`` is always safe for the funds: the card's key is in the link, not in the
 ///   temporary wallet. Unredeemed funds stay on the card and a new redeemer can sweep them.
-/// - Releasing a redeemer without ``cleanup()`` (or a crash, or the app being killed) leaves its
-///   files behind until a redeemer for the same card is created and cleaned up. They hold the
+/// - Releasing a used redeemer, or one with cleanup requested, retains process ownership until
+///   teardown succeeds. A crash or the
+///   app being killed can leave files behind. They hold the
 ///   card's keys and the claim's recipient, so call ``removeLeftoverWallets(in:)`` at launch.
 ///   During asynchronous teardown after release, leftover cleanup leaves that wallet protected.
 /// - After a redeem whose submission failed, the card wallet considers the notes spent until the
@@ -184,9 +185,15 @@ public actor GiftCardRedeemer {
     private let rootDirectory: URL
     private let initializer: Initializer
     private let checkpointSource: GiftCardCheckpointSource
-    private let synchronizer: SDKSynchronizer
+    private let synchronizer: SlipstreamSynchronizer
     private var accountUUID: AccountUUID?
+    private let cleanupTiming: GiftCardCleanupTiming
+    nonisolated let checkTiming: GiftCardCleanupTiming
+    nonisolated let checkPolicy: GiftCardCheckPolicy
+    private let cleanupCoordinator: GiftCardCleanupCoordinator
     private var isCleanedUp = false
+    private var hasUsedWallet = false
+    private var operations: [UUID: GiftCardOperationAdmission] = [:]
     private var tail: Task<Void, Never>?
 
     /// Creates a redeemer for `card`. Nothing touches the disk or the network until ``check()``.
@@ -195,9 +202,9 @@ public actor GiftCardRedeemer {
     ///   - card: the card to redeem.
     ///   - network: the app's network. It must be the card's network.
     ///   - endpoint: the lightwalletd server the card wallet syncs from and submits to.
-    ///   - isTorEnabled: whether the card wallet reaches `endpoint` over Tor: its birthday lookup,
-    ///     its sync and the claim's submission. Pass the main wallet's setting; with `false` the
-    ///     server sees the device's IP address with all three.
+    ///   - isTorEnabled: whether identifying requests (birthday/restore metadata, sync metadata
+    ///     and claim submission) use Tor. Slipstream bulk blocks stay direct. Protected failures
+    ///     never fall back to direct. Pass the main wallet's setting.
     ///   - storageDirectory: the directory under which the card wallet's own directory is created.
     ///     The app's caches or temporary directory is fine: everything in it is deleted by
     ///     ``cleanup()``, and losing it never loses funds.
@@ -222,7 +229,7 @@ public actor GiftCardRedeemer {
             storageDirectory: storageDirectory,
             loggingPolicy: loggingPolicy,
             container: DIContainer(),
-            makeSynchronizer: { SDKSynchronizer(initializer: $0) }
+            makeSynchronizer: { SlipstreamSynchronizer(initializer: $0) }
         )
     }
 
@@ -234,7 +241,10 @@ public actor GiftCardRedeemer {
         storageDirectory: URL,
         loggingPolicy: Initializer.LoggingPolicy,
         container: DIContainer,
-        makeSynchronizer: (Initializer) -> SDKSynchronizer
+        makeSynchronizer: (Initializer) -> SlipstreamSynchronizer,
+        cleanupTiming: GiftCardCleanupTiming = .live,
+        checkTiming: GiftCardCleanupTiming = .live,
+        checkPolicy: GiftCardCheckPolicy? = nil
     ) throws {
         guard card.network == network.networkType else {
             throw ZcashError.giftCardNetworkMismatch
@@ -283,43 +293,47 @@ public actor GiftCardRedeemer {
         self.rootDirectory = rootDirectory
         self.initializer = initializer
         self.checkpointSource = checkpointSource
-        self.synchronizer = makeSynchronizer(initializer)
-    }
-
-    /// Fetches the server's tree state for the block before the card's birthday, so the card
-    /// wallet scans from the birthday itself. A fetch failure, or a state for another height,
-    /// leaves the bundled checkpoint in place: slower, never wrong. The fetch goes over Tor when
-    /// the card wallet uses it.
-    private func fetchExactBirthday() async {
-        // The rust parser guarantees a birthday at or above NU5 activation, so `- 1` is a block.
-        let height = card.birthdayHeight - 1
-        do {
-            let sdkFlags = initializer.container.resolve(SDKFlags.self)
-            let treeState = try await initializer.lightWalletService.getTreeState(
-                BlockID(height: UInt64(height)),
-                mode: await sdkFlags.ifTor(.uniqueTor)
-            )
-            if !checkpointSource.use(treeState, forBirthday: card.birthdayHeight) {
-                initializer.logger.warn("Gift card: the server sent a tree state for another height; using the bundled checkpoint")
-            }
-        } catch {
-            initializer.logger.warn("Gift card: tree state for the birthday unavailable, using the bundled checkpoint")
-        }
+        let synchronizer = makeSynchronizer(initializer)
+        self.synchronizer = synchronizer
+        self.cleanupTiming = cleanupTiming
+        self.checkTiming = checkTiming
+        self.checkPolicy = checkPolicy ?? GiftCardCheckPolicy.live(isTorEnabled: isTorEnabled)
+        self.cleanupCoordinator = GiftCardCleanupCoordinator(
+            timing: cleanupTiming,
+            wipe: {
+                try await Self.awaitCompletion(of: synchronizer.wipe())
+                // The transaction encoder retains grouped service connections after the
+                // Slipstream engine stops. Dispose them while the card's Tor root still exists.
+                await initializer.lightWalletService.closeConnections()
+                // This host runtime is separate from the engine's Tor directory. Closing an
+                // existing client never creates a runtime or sends traffic.
+                try await initializer.container.resolve(TorClient.self).close()
+            },
+            removeRoot: {
+                do {
+                    try FileManager.default.removeItem(at: rootDirectory)
+                } catch let error as NSError {
+                    // fileExists cannot distinguish an absent root from an inaccessible one.
+                    // Only an actual ENOENT permits ownership release without a deletion.
+                    guard error.domain == NSCocoaErrorDomain,
+                          error.code == NSFileNoSuchFileError,
+                          let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError,
+                          underlying.domain == NSPOSIXErrorDomain,
+                          underlying.code == Int(POSIXErrorCode.ENOENT.rawValue) else {
+                        throw error
+                    }
+                }
+            },
+            didFinish: { GiftCardRedeemerRegistry.release(alias, owner: owner) }
+        )
     }
 
     deinit {
-        guard !isCleanedUp else { return }
-        // Transfer the resource and alias owners without retaining deinitializing self.
-        // Files stay behind, protected from replacement and leftover cleanup until
-        // processor writers and card-owned native resources have finished.
-        Task { [synchronizer, alias, owner] in
-            await synchronizer.stopAndWait()
-            do {
-                try await synchronizer.closeGiftCardResources()
-            } catch {
-                // Keep the alias reserved if resource teardown could not finish.
-                return
+        if hasUsedWallet || isCleanedUp {
+            if GiftCardRedeemerRegistry.retainCleanup(alias: alias, owner: owner, coordinator: cleanupCoordinator) {
+                cleanupCoordinator.requestCleanup(after: tail)
             }
+        } else {
             GiftCardRedeemerRegistry.release(alias, owner: owner)
         }
     }
@@ -327,7 +341,19 @@ public actor GiftCardRedeemer {
     /// Creates (on first use) and syncs the card wallet, then reports what the card holds.
     ///
     /// The first call restores the card wallet from the card's birthday, which downloads and scans
-    /// the blocks since then. It returns once the wallet is up to date.
+    /// the blocks since then. A balance is accepted only from an up-to-date snapshot with a known
+    /// positive chain tip, complete scan coverage through that tip, and the card account present.
+    /// Funded balances return immediately. Zero must remain coherent for 15 seconds direct or
+    /// 30 seconds with Tor; syncing, lost coverage, a missing account or a changed tip resets it.
+    /// A disconnected wallet may recover for 60 seconds direct or 120 seconds with Tor. A terminal
+    /// sync stall fails the check. These failures leave the balance unknown. A later explicit
+    /// check restarts a pass whose stall recovery gave up, with a fresh recovery budget.
+    /// Repeated checks reuse healthy syncing or up-to-date passes.
+    /// The caller has a 600-second monotonic budget from method entry, including queued time and
+    /// preparation. Cancellation or
+    /// expiry requests cancellation of unfinished work and returns without waiting for that work
+    /// to drain. Cleanup still joins it before wiping or releasing the card's alias.
+    /// A timeout, disconnect or terminal stall does not mean the card is empty or cleanup has completed.
     ///
     /// When the card has spendable funds, this also proposes, without creating anything, the
     /// transaction that would sweep them, so that the fee their notes require decides: when it
@@ -340,11 +366,20 @@ public actor GiftCardRedeemer {
     ///
     /// - Returns: the card's balance and whether it can be redeemed now.
     /// - Throws: the sync error if the card wallet cannot sync (for instance, the server is
-    ///   unreachable), `CancellationError` if the calling task is cancelled, and
+    ///   unreachable), `CancellationError` if the calling task is cancelled,
+    ///   ``ZcashError/giftCardCheckTimedOut`` if the caller's budget expires,
+    ///   ``ZcashError/giftCardCheckDisconnected`` after continuous disconnect grace expires,
+    ///   ``ZcashError/giftCardCheckSyncStalled`` when host recovery gives up, and
     ///   ``ZcashError/giftCardRedeemerCleanedUp`` after ``cleanup()``.
-    public func check() async throws -> GiftCardStatus {
-        try await serialized { redeemer in
-            try await redeemer.performCheck()
+    public nonisolated func check() async throws -> GiftCardStatus {
+        // Timestamp before the actor hop, so queueing and preparation consume the same budget.
+        let operation = GiftCardCheckOperation(admittedAt: checkTiming.now(), policy: checkPolicy, timing: checkTiming)
+        return try await operation.value {
+            try operation.requireActive()
+            return try await self.serialized { redeemer, _ in
+                try operation.requireActive()
+                return try await redeemer.performCheck(operation: operation)
+            }
         }
     }
 
@@ -397,90 +432,103 @@ public actor GiftCardRedeemer {
     ///   ``ZcashError/giftCardRecipientRequiresOrchard`` for a unified address without an Orchard
     ///   receiver, and the proposal and creation errors of `Synchronizer.proposeSendMax(accountUUID:recipient:memo:mode:)`
     ///   and `Synchronizer.createProposedTransactions(proposal:spendingKey:ovkPolicy:)`. The
-    ///   destination's errors are never thrown. Cancellation observed before native creation throws
-    ///   `CancellationError`; creation already underway cannot be rolled back.
+    ///   destination's errors are never thrown. Empty completion throws
+    ///   ``ZcashError/giftCardRedemptionIncomplete``.
+    ///
+    /// Cancellation prevents creation until final native admission on the wallet database executor.
+    /// After admission, this call owns creation, submission and accepted receipt recording through
+    /// completion, even when the caller cancels. Cleanup joins that work before deleting the wallet.
+    /// A later stream error is rethrown after accepted receipts are attempted in the destination.
     public func redeem(to recipient: UnifiedAddress, memo: Memo?, recordIn destination: Synchronizer?) async throws -> Redemption {
-        try await serialized { redeemer in
-            try await redeemer.performRedeem(to: recipient, memo: memo, recordIn: destination)
+        try await serialized { redeemer, admission in
+            try await redeemer.performRedeem(to: recipient, memo: memo, recordIn: destination, admission: admission)
         }
     }
 
-    /// Stops the card wallet and deletes every file it created, then frees the card for another
-    /// redeemer. The redeemer cannot be used afterwards. Calling it again does nothing.
-    /// Cancellation does not interrupt cleanup. The redeemer and its alias stay owned until
-    /// its writers drain, wipe terminates and its Tor resources close. Stalled work can keep
-    /// this call pending indefinitely.
+    /// Closes new work admission, joins earlier work, safely wipes the wallet and deletes its
+    /// root directory. Success means another redeemer can claim the card. Repeated calls join
+    /// the same owned teardown and do nothing once it has succeeded.
     ///
-    /// - Throws: the error from deleting the files, if any; the wallet is stopped and the card
-    ///   freed regardless.
+    /// Each caller has a 30-second monotonic budget starting at admission, including queued time.
+    /// Cancellation or timeout detaches only that caller; cleanup continues with the alias owned.
+    /// Wipe or storage failure keeps ownership and retries teardown with capped exponential delay.
+    ///
+    /// - Throws: `CancellationError` when this caller is cancelled,
+    ///   ``ZcashError/giftCardCleanupTimedOut`` when its budget expires, or the wipe/storage error.
     public func cleanup() async throws {
-        try await serialized(cancellationPolicy: .teardown) { redeemer in
-            try await redeemer.performCleanup()
+        let admittedAt = cleanupTiming.now()
+        isCleanedUp = true
+        accountUUID = nil
+        // Close admission and transfer ownership even for an already-cancelled caller.
+        for admission in operations.values { admission.requestCancellation() }
+        _ = GiftCardRedeemerRegistry.retainCleanup(alias: alias, owner: owner, coordinator: cleanupCoordinator)
+        do {
+            try await cleanupCoordinator.cleanup(after: tail, admittedAt: admittedAt)
+        } catch GiftCardCleanupWaitError.timedOut {
+            throw ZcashError.giftCardCleanupTimedOut
         }
     }
 
     // MARK: - Private
 
-    private enum CancellationPolicy {
-        case cancellable
-        case teardown
-    }
-
-    /// Runs `operation` after every operation issued before it has finished. Actor isolation alone
-    /// does not serialize these calls: each suspends at its awaits, which would let a redeem start
-    /// while a check is still syncing, or a cleanup delete the wallet under a redeem.
+    /// Serializes work while retaining its cancellation admission separately from teardown.
     private func serialized<T>(
-        cancellationPolicy: CancellationPolicy = .cancellable,
-        _ operation: @escaping (GiftCardRedeemer) async throws -> T
+        _ operation: @escaping (GiftCardRedeemer, GiftCardOperationAdmission) async throws -> T
     ) async throws -> T {
+        try Task.checkCancellation()
+        guard !isCleanedUp else { throw ZcashError.giftCardRedeemerCleanedUp }
         let previous = tail
+        let id = UUID()
+        let admission = GiftCardOperationAdmission()
         let task = Task<T, Error> {
             await previous?.value
-            if cancellationPolicy == .cancellable {
-                try Task.checkCancellation()
-            }
-            return try await operation(self)
+            try Task.checkCancellation()
+            return try await operation(self, admission)
         }
+        admission.installCancellation { task.cancel() }
+        operations[id] = admission
         tail = Task { _ = try? await task.value }
-        // Teardown must finish even when its caller is cancelled. Cancellable work forwards
-        // cancellation into its own task, including while waiting behind a predecessor.
+        defer { operations.removeValue(forKey: id) }
         return try await withTaskCancellationHandler {
             try await task.value
         } onCancel: {
-            if cancellationPolicy == .cancellable {
-                task.cancel()
-            }
+            admission.requestCancellation()
         }
     }
 
-    private func performCheck() async throws -> GiftCardStatus {
+    private func performCheck(operation: GiftCardCheckOperation) async throws -> GiftCardStatus {
         guard !isCleanedUp else {
             throw ZcashError.giftCardRedeemerCleanedUp
         }
 
-        let accountUUID = try await prepareIfNeeded()
+        let accountUUID = try await prepareIfNeeded(operation: operation)
+        try operation.requireActive()
 
-        let restarting: Bool
-        switch synchronizer.latestState.syncStatus {
-        case .upToDate, .syncing:
-            restarting = false
-        case .unprepared, .stopped, .error:
-            try await synchronizer.start(retry: true)
-            restarting = true
-        }
-        // After a restart the state stream may still replay the error that stopped the previous
-        // sync; only a later error belongs to this attempt.
-        try await waitUntilUpToDate(ignoringStaleError: restarting)
-
-        let balance = try await synchronizer.getAccountsBalances()[accountUUID]
+        let waiter = GiftCardCheckStateWaiter(accountUUID: accountUUID, policy: checkPolicy, timing: checkTiming)
+        let balance = try await waiter.wait(
+            stateStream: synchronizer.stateStream,
+            eventStream: synchronizer.eventStream,
+            shouldStart: { await self.synchronizer.shouldStartForGiftCardCheck() },
+            start: {
+                try operation.requireActive()
+                try await self.synchronizer.start(retry: true)
+                try operation.requireActive()
+            }
+        )
+        try operation.requireActive()
         var sweep: GiftCardStatus.Sweep?
-        if let spendable = balance?.shieldedSpendableValue, spendable > .zero {
+        if balance.shieldedSpendableValue > .zero {
             sweep = try await proposedSweep(accountUUID: accountUUID)
         }
         return GiftCardStatus(balance: balance, sweep: sweep)
     }
 
-    private func performRedeem(to recipient: UnifiedAddress, memo: Memo?, recordIn destination: Synchronizer?) async throws -> Redemption {
+    private func performRedeem(
+        to recipient: UnifiedAddress,
+        memo: Memo?,
+        recordIn destination: Synchronizer?,
+        admission: GiftCardOperationAdmission
+    ) async throws -> Redemption {
         guard !isCleanedUp else {
             throw ZcashError.giftCardRedeemerCleanedUp
         }
@@ -518,6 +566,28 @@ public actor GiftCardRedeemer {
 
         // Preparatory awaits may ignore cancellation. Check before creation can store a claim.
         try Task.checkCancellation()
+        let creationAdmission = GiftCardTransactionCreationAdmission()
+        // Replacement forwards cancellation already requested during preparation or handoff.
+        admission.installCancellation { creationAdmission.cancelBeforeCreation() }
+        return try await withTaskCancellationHandler {
+            let completion = Task {
+                try await GiftCardTransactionCreationContext.$admission.withValue(creationAdmission) {
+                    try await self.completeRedemption(proposal: proposal, spendingKey: spendingKey, recordIn: destination)
+                }
+            }
+            // This task owns creation, submission and recording. Caller cancellation only closes
+            // native admission, and the serialized queue joins completion before teardown.
+            return try await completion.value
+        } onCancel: {
+            creationAdmission.cancelBeforeCreation()
+        }
+    }
+
+    private func completeRedemption(
+        proposal: Proposal,
+        spendingKey: UnifiedSpendingKey,
+        recordIn destination: Synchronizer?
+    ) async throws -> Redemption {
         let stream = try await synchronizer.createProposedTransactions(
             proposal: proposal,
             spendingKey: spendingKey,
@@ -525,8 +595,14 @@ public actor GiftCardRedeemer {
         )
 
         var results: [TransactionSubmitResult] = []
-        for try await result in stream {
-            results.append(result)
+        var streamError: Error?
+        do {
+            for try await result in stream {
+                results.append(result)
+            }
+        } catch {
+            // Accepted receipts still belong in the destination even if a later iteration fails.
+            streamError = error
         }
 
         var recorded = false
@@ -545,35 +621,20 @@ public actor GiftCardRedeemer {
                 )
             }
         }
+        if let streamError { throw streamError }
+        guard !results.isEmpty else { throw ZcashError.giftCardRedemptionIncomplete }
         let sweep = GiftCardStatus.Sweep(proposal: proposal)
         return Redemption(results: results, recordedInDestination: recorded, fee: sweep.fee, amount: sweep.amount)
     }
 
-    private func performCleanup() async throws {
-        guard !isCleanedUp else {
-            return
-        }
-        isCleanedUp = true
-        accountUUID = nil
-        defer { GiftCardRedeemerRegistry.release(alias, owner: owner) }
-
-        // Wipe can fail validation before it reaches the processor. Always pass
-        // the explicit writer boundary before permitting directory fallback.
-        await synchronizer.stopAndWait()
-        try? await Self.awaitCompletion(of: synchronizer.wipe())
-        try await synchronizer.closeGiftCardResources()
-
-        if FileManager.default.fileExists(atPath: rootDirectory.path) {
-            try FileManager.default.removeItem(at: rootDirectory)
-        }
-    }
-
     /// Prepares the card wallet from the card's seed and birthday on first use, and returns the
     /// card account.
-    private func prepareIfNeeded() async throws -> AccountUUID {
+    private func prepareIfNeeded(operation: GiftCardCheckOperation) async throws -> AccountUUID {
         if let accountUUID {
             return accountUUID
         }
+
+        hasUsedWallet = true
 
         // A wallet left behind by an earlier redeemer for this card (a crash, a killed app) is
         // never reused: it may have been created from an older checkpoint, or hold a half-done
@@ -590,6 +651,7 @@ public actor GiftCardRedeemer {
         try? directory.setResourceValues(values)
 
         await fetchExactBirthday()
+        try operation.requireActive()
 
         let synchronizer = self.synchronizer
         let birthday = card.birthdayHeight
@@ -605,31 +667,33 @@ public actor GiftCardRedeemer {
         guard let account = try await synchronizer.listAccounts().first else {
             throw ZcashError.giftCardRedeemerNotReady
         }
+        // Native preparation can finish after caller cancellation. Retain its account before
+        // checking cancellation, so a later check cannot delete this already prepared wallet.
         accountUUID = account.id
+        try Task.checkCancellation()
         return account.id
     }
+}
 
-    /// Waits until the card wallet's sync status is up to date, or throws its sync error.
-    private func waitUntilUpToDate(ignoringStaleError: Bool) async throws {
-        var stateStream = synchronizer.stateStream
-        if ignoringStaleError {
-            stateStream = stateStream
-                .drop { state in
-                    if case .error = state.syncStatus { return true }
-                    return false
-                }
-                .eraseToAnyPublisher()
-        }
-
-        let waiter = SyncWaiter()
-        // The waiter owns the subscription; keep it alive until the continuation resumes.
-        defer { withExtendedLifetime(waiter) {} }
-        try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                waiter.begin(continuation: continuation, stateStream: stateStream)
+private extension GiftCardRedeemer {
+    /// Fetches the server's tree state for the block before the card's birthday, so the card
+    /// wallet scans from the birthday itself. A fetch failure, or a state for another height,
+    /// leaves the bundled checkpoint in place: slower, never wrong. The fetch goes over Tor when
+    /// the card wallet uses it.
+    func fetchExactBirthday() async {
+        // The rust parser guarantees a birthday at or above NU5 activation, so `- 1` is a block.
+        let height = card.birthdayHeight - 1
+        do {
+            let sdkFlags = initializer.container.resolve(SDKFlags.self)
+            let treeState = try await initializer.lightWalletService.getTreeState(
+                BlockID(height: UInt64(height)),
+                mode: await sdkFlags.ifTor(.uniqueTor)
+            )
+            if !checkpointSource.use(treeState, forBirthday: card.birthdayHeight) {
+                initializer.logger.warn("Gift card: the server sent a tree state for another height; using the bundled checkpoint")
             }
-        } onCancel: {
-            waiter.finish(.failure(CancellationError()))
+        } catch {
+            initializer.logger.warn("Gift card: tree state for the birthday unavailable, using the bundled checkpoint")
         }
     }
 }
@@ -641,12 +705,11 @@ public extension GiftCardRedeemer {
     static let defaultStorageDirectory = FileManager.default.temporaryDirectory
         .appendingPathComponent("ZcashGiftCards", isDirectory: true)
 
-    /// Deletes the card wallets that earlier redeemers left in `storageDirectory`: released
-    /// without ``cleanup()``, or cut short by a crash or the app being killed.
+    /// Deletes card wallets left in `storageDirectory` by a crash or the app being killed.
     ///
     /// A leftover card wallet holds the card's keys, its notes and the claim transaction with its
-    /// recipient, so call this when the app starts. It never touches the wallet of a redeemer that
-    /// is alive in this process, nor anything in `storageDirectory` that is not a card wallet.
+    /// recipient, so call this when the app starts. It skips every wallet with an active redeemer
+    /// or retained teardown in this process, and anything that is not a card wallet.
     /// Losing a card wallet never loses funds: the card's key is in its link.
     ///
     /// - Parameter storageDirectory: the directory passed to ``init(card:network:endpoint:isTorEnabled:storageDirectory:loggingPolicy:)``.
@@ -685,6 +748,8 @@ public extension GiftCardRedeemer {
 // MARK: - Helpers
 
 extension GiftCardRedeemer {
+    func cardWalletSynchronizer() -> Synchronizer { synchronizer }
+
     /// The confirmation policy the card wallet spends with: the backend's transfer policy, 3
     /// confirmations for trusted notes and 10 for untrusted ones (ZIP 315). Card notes are
     /// untrusted, so they need 10. Internal, so that a test pins it.
@@ -732,21 +797,23 @@ extension GiftCardRedeemer {
         logger: Logger
     ) async -> Bool {
         var recordedAny = false
+        var recordedAll = true
         for result in results {
             guard case .success(let txId) = result else { continue }
             do {
                 guard let raw = try await rawTransaction(txId) else {
                     logger.warn("Gift card: the claim transaction is not in the card wallet; the destination will learn about it from the chain")
-                    return false
+                    recordedAll = false
+                    continue
                 }
                 try await destination.recordTrustedTransaction(raw, txId: try TxId([UInt8](txId)))
                 recordedAny = true
             } catch {
                 logger.warn("Gift card: recording the claim in the destination wallet failed: \(error.localizedDescription)")
-                return false
+                recordedAll = false
             }
         }
-        return recordedAny
+        return recordedAny && recordedAll
     }
 
     /// Waits for terminal completion, even when the caller is cancelled. A pending wipe must
@@ -758,101 +825,6 @@ extension GiftCardRedeemer {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             waiter.begin(continuation: continuation, publisher: publisher)
         }
-    }
-}
-
-/// The aliases of the redeemers alive in this process.
-///
-/// `UsedAliasesChecker` exists but nothing calls it, so two synchronizers can share an alias and
-/// overwrite each other's files. A gift card's alias is unique to the card, so this registry is
-/// what keeps two redeemers of the same card apart.
-enum GiftCardRedeemerRegistry {
-    private static let lock = NSLock()
-    private static var active: [ZcashSynchronizerAlias: UUID] = [:]
-
-    static func claim(_ alias: ZcashSynchronizerAlias, owner: UUID) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        guard active[alias] == nil else {
-            return false
-        }
-        active[alias] = owner
-        return true
-    }
-
-    static func release(_ alias: ZcashSynchronizerAlias, owner: UUID) {
-        lock.lock()
-        defer { lock.unlock() }
-        guard active[alias] == owner else {
-            return
-        }
-        active.removeValue(forKey: alias)
-    }
-
-    /// Runs `body` with the active aliases, holding off every claim and release until it returns.
-    static func withActiveAliases<T>(_ body: (Set<ZcashSynchronizerAlias>) throws -> T) rethrows -> T {
-        lock.lock()
-        defer { lock.unlock() }
-        return try body(Set(active.keys))
-    }
-}
-
-/// Resumes a continuation once, with the first of: the sync status turning up to date, the sync
-/// status turning into an error, or cancellation. The state stream delivers values on arbitrary
-/// threads, so every access is under a lock.
-private final class SyncWaiter {
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<Void, Error>?
-    private var cancellable: AnyCancellable?
-    private var outcome: Result<Void, Error>?
-
-    func begin(continuation: CheckedContinuation<Void, Error>, stateStream: AnyPublisher<SynchronizerState, Never>) {
-        lock.lock()
-        if let outcome {
-            // Cancelled before the continuation existed.
-            lock.unlock()
-            continuation.resume(with: outcome)
-            return
-        }
-        self.continuation = continuation
-        lock.unlock()
-
-        let cancellable = stateStream.sink { [weak self] state in
-            switch state.syncStatus {
-            case .upToDate:
-                self?.finish(.success(()))
-            case .error(let error):
-                self?.finish(.failure(error))
-            case .unprepared, .syncing, .stopped:
-                break
-            }
-        }
-
-        lock.lock()
-        if outcome == nil {
-            self.cancellable = cancellable
-            lock.unlock()
-        } else {
-            lock.unlock()
-            cancellable.cancel()
-        }
-    }
-
-    func finish(_ result: Result<Void, Error>) {
-        lock.lock()
-        guard outcome == nil else {
-            lock.unlock()
-            return
-        }
-        outcome = result
-        let continuation = self.continuation
-        self.continuation = nil
-        let cancellable = self.cancellable
-        self.cancellable = nil
-        lock.unlock()
-
-        cancellable?.cancel()
-        continuation?.resume(with: result)
     }
 }
 

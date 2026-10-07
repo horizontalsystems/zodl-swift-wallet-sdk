@@ -1166,6 +1166,23 @@ enum ZcashErrorDefinition {
     // sourcery: code="ZGIFT0013"
     case giftCardRecipientRequiresOrchard
 
+    /// Cleanup is still continuing and the gift card remains in use. Wait for cleanup to finish before creating another redeemer.
+    // sourcery: code="ZGIFT0011"
+    case giftCardCleanupTimedOut
+
+    /// The gift claim completed without any submission result. No successful redemption was reported.
+    // sourcery: code="ZGIFT0012"
+    case giftCardRedemptionIncomplete
+    /// The gift-card check did not finish in time. Cleanup still owns unfinished wallet work.
+    // sourcery: code="ZGIFT0014"
+    case giftCardCheckTimedOut
+    /// The gift-card check could not reconnect in time. The card balance is still unknown.
+    // sourcery: code="ZGIFT0015"
+    case giftCardCheckDisconnected
+    /// The gift-card wallet stopped making progress. The card balance is still unknown.
+    // sourcery: code="ZGIFT0016"
+    case giftCardCheckSyncStalled
+
     // MARK: - Models
 
     /// Attempt to init TxId with input that is not 32 bytes.

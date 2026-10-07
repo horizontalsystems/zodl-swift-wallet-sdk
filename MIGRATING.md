@@ -1,5 +1,49 @@
 # Migrating from previous versions to _Unreleased_
 
+## Gift-card checks require coherent balances
+
+`check()` now waits for an up-to-date snapshot with a positive chain tip, scan coverage through
+that tip, and the card account present. A funded snapshot returns immediately. Empty snapshots
+must stay coherent for 15 seconds direct or 30 seconds with Tor; readiness loss and tip changes
+restart that interval. Temporary disconnects receive 60 seconds direct or 120 seconds with Tor
+before failing. These intervals remain within the overall 600-second caller budget.
+
+Add the payload-free errors to exhaustive `ZcashError` and `ZcashErrorCode` switches:
+
+```swift
+case .giftCardCheckDisconnected, .giftCardCheckSyncStalled:
+    // Balance is unknown. Offer a later check and keep normal cleanup ownership.
+    break
+```
+
+The stable codes are `ZGIFT0015` and `ZGIFT0016`. A terminal host stall fails immediately;
+recoverable stall notifications continue waiting. Cancellation, timeout, disconnect and stall
+never establish that the card is empty. Public initializer and `check()` call syntax are unchanged.
+
+## Gift-card checks have a bounded caller wait
+
+`GiftCardRedeemer.check()` and its public initializer keep their existing call syntax. Each check
+caller now has a 600-second monotonic budget starting at method entry, including queued work and
+preparation. Cancellation throws `CancellationError` promptly even when native preparation does
+not cooperate. Expiry throws the new payload-free `ZcashError.giftCardCheckTimedOut` /
+`ZcashErrorCode.giftCardCheckTimedOut` (`ZGIFT0014`); add it to exhaustive switches, for example:
+
+```swift
+switch error {
+case .giftCardCheckTimedOut:
+    // Offer a later check or await cleanup; the card's balance is still unknown.
+    break
+default:
+    break
+}
+```
+
+Cancellation and timeout detach the caller and request work cancellation. Already admitted wallet
+work remains owned until it drains. `cleanup()` still joins that work before wiping, deleting the
+root, or releasing the alias, and keeps its separate 30-second caller budget. A check timeout does
+not establish that funds are absent or that cleanup has completed. A later check reuses a wallet
+whose native preparation finished after the earlier caller detached.
+
 ## Gift-card redemption requires an Orchard receiver
 
 Both `GiftCardRedeemer.redeem(to:memo:)` and `redeem(to:memo:recordIn:)` keep their signatures,
@@ -18,6 +62,41 @@ the card's Orchard-only address. Show `GiftCardStatus.redeemable` before redeemi
 changes can change that outcome. Input selection is unchanged, so an Orchard recipient alone
 does not guarantee that Sapling parameters will be unnecessary: the actual proposal must have
 no Sapling inputs or outputs.
+
+## Gift-card Slipstream wallets and bounded cleanup
+
+`GiftCardRedeemer` now always uses `SlipstreamSynchronizer`. Its public initializer, status,
+`Redemption.fee`, and `Redemption.amount` remain source-compatible. Configured Tor carries
+birthday/restore metadata, identifying sync requests, and claim submission; bulk blocks remain
+on Slipstream's direct route, with no direct fallback for failed protected requests.
+
+`cleanup()` closes new work admission immediately. Success means safe wipe, card service connection
+disposal, host runtime disposal, root deletion, and alias release have all completed. Its per-caller
+30-second monotonic budget includes preceding queued work. Cancellation returns
+`CancellationError`; timeout throws the new
+`ZcashError.giftCardCleanupTimedOut` (`ZGIFT0011`). Update exhaustive `ZcashError` switches.
+Neither outcome cancels owned teardown or makes the card reusable. Keep the UI in a cleanup/pending
+state until cleanup succeeds; do not force-delete the root or assume a replacement can be created.
+
+Wipe/storage failures keep ownership and are retried automatically with capped exponential delay.
+Dropping a used redeemer also transfers cleanup to retained process ownership; leftover sweeping
+skips these wallets. Once cleanup is requested, ownership also survives dropping a redeemer that
+was never checked. These changes add no redemption or submission retries.
+
+
+Gift redemption cancellation has a precise boundary: cancellation before native creation begins on
+the wallet database executor prevents creation and throws `CancellationError`. After admission,
+`redeem(to:memo:recordIn:)` finishes creation, submission, and accepted receipt recording before
+returning, even when its caller is cancelled. Cleanup joins that completion before wiping. Keep
+awaiting the redemption's outcome before changing the UI or retrying a claim. Ordinary synchronizer
+transaction cancellation is unchanged.
+
+A claim with no submission results now throws `ZcashError.giftCardRedemptionIncomplete`
+(`ZGIFT0012`); update exhaustive error switches. Accepted results remain accepted when destination
+recording fails: `recordedInDestination` is `false`, and every accepted receipt is still attempted.
+If a later stream iteration throws, earlier accepted receipts are attempted before that error is
+rethrown. These changes add no claim or submission retries.
+
 
 ## `TxId` validates its length — `init(_: [UInt8])` throws
 
