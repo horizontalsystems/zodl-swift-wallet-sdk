@@ -1001,6 +1001,9 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
 
     /// An explicit check gives an exhausted pass a fresh start while reusing healthy work.
     func shouldStartForGiftCardCheck() -> Bool {
+        // Preparation can display syncing before any pass exists. Recovery intent still owns
+        // a pass while its native teardown and reopen temporarily clear isRunning.
+        guard passIntendedRunning else { return true }
         switch latestState.syncStatus {
         case .syncing:
             return stallGaveUpReported

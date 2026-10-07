@@ -159,6 +159,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Fixed
 
+- `GiftCardRedeemer.check()` starts syncing on the first check even when wallet preparation
+  reports an existing chain tip or scan progress, avoiding a check timeout. No caller changes are needed.
+
 - `GiftCardRedeemer.check()` retries a pass after terminal sync-stall recovery exhaustion by
   starting a fresh pass with a new recovery budget. Repeated checks keep healthy syncing or
   up-to-date passes. No caller changes are needed.
