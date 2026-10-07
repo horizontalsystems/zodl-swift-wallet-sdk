@@ -137,7 +137,7 @@ final class GiftCardCheckStateWaiter: @unchecked Sendable {
     }
 
     private func refreshTimerLocked() -> Effects {
-        let deadline = disconnectedUntil ?? empty?.deadline
+        let deadline = disconnectedUntil ?? (pendingBalance == nil ? empty?.deadline : nil)
         guard deadline != timerDeadline else { return Effects() }
         var effects = Effects()
         effects.cancelledTimer = timer
@@ -195,7 +195,9 @@ final class GiftCardCheckStateWaiter: @unchecked Sendable {
         // terminal/error callbacks must still be able to fail this attempt before that boundary.
         if startInProgress, case .success(let balance) = result {
             pendingBalance = balance
-            empty = nil
+            // Settled zero retains its completed interval for same-tip snapshots during start.
+            // Funded readiness removes that candidate. Either success disposes its timer.
+            if balance.shieldedTotal() > .zero { empty = nil }
             return refreshTimerLocked()
         }
         self.result = result

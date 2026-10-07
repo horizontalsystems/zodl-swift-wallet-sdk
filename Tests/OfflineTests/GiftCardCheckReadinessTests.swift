@@ -304,6 +304,82 @@ final class GiftCardCheckReadinessTests: ZcashTestCase {
         XCTAssertEqual(accepted.shieldedSpendableValue, Zatoshi(80_000))
     }
 
+    func testSettledZeroDuringHeldStartKeepsCompletedWindowAcrossIdenticalSnapshots() async throws {
+        for tor in [false, true] {
+            let harness = Harness(tor: tor)
+            defer { harness.clock.dispose() }
+            let gate = GiftCardOperationGate()
+            let completed = XCTestExpectation(description: "settled zero returns as soon as startup drains")
+            let caller = Task {
+                defer { completed.fulfill() }
+                return try await harness.waiter.wait(
+                    stateStream: harness.states.eraseToAnyPublisher(),
+                    eventStream: harness.events.eraseToAnyPublisher(),
+                    start: {
+                        harness.states.send(self.state(tip: 100, scanned: 100, value: 0))
+                        await gate.wait()
+                    }
+                )
+            }
+            let settle = harness.policy.emptySettleNanoseconds
+            await fulfillment(of: [harness.clock.expectSleep(at: settle)], timeout: 5)
+            // A same-tip state at expiry settles synchronously, independent of timer delivery.
+            harness.clock.advance(to: settle, deliveringSleeps: false)
+            harness.states.send(state(tip: 100, scanned: 100, value: 0))
+            await fulfillment(of: [harness.clock.expectNoPendingSleeps()], timeout: 5)
+            harness.clock.advance(to: settle + 1_000_000_000)
+            harness.states.send(state(tip: 100, scanned: 100, value: 0))
+            await gate.open()
+            await fulfillment(of: [completed], timeout: 5)
+            // Drain a regressed implementation too, so RED cannot strand its continuation.
+            harness.clock.advance(to: settle * 2 + 1_000_000_000)
+            let accepted = try await caller.value
+            XCTAssertEqual(accepted.shieldedTotal(), .zero)
+            await fulfillment(of: [harness.clock.expectNoPendingSleeps()], timeout: 5)
+        }
+    }
+
+    func testSettledZeroDuringHeldStartRestartsWindowAfterReadinessLossOrTipChange() async throws {
+        var syncing = state(tip: 100, scanned: 100, value: 0)
+        syncing.syncStatus = .syncing(0, false)
+        let invalidations = [
+            syncing,
+            state(tip: 100, scanned: 100, value: nil),
+            state(tip: 100, scanned: 99, value: 0),
+            state(tip: 0, scanned: 0, value: 0),
+            state(tip: 101, scanned: 101, value: 0)
+        ]
+        for invalid in invalidations {
+            let harness = Harness()
+            defer { harness.clock.dispose() }
+            let gate = GiftCardOperationGate()
+            let caller = Task {
+                try await harness.waiter.wait(
+                    stateStream: harness.states.eraseToAnyPublisher(),
+                    eventStream: harness.events.eraseToAnyPublisher(),
+                    start: {
+                        harness.states.send(self.state(tip: 100, scanned: 100, value: 0))
+                        await gate.wait()
+                    }
+                )
+            }
+            await fulfillment(of: [harness.clock.expectSleep(at: 15_000_000_000)], timeout: 5)
+            harness.clock.advance(to: 15_000_000_000, deliveringSleeps: false)
+            harness.states.send(state(tip: 100, scanned: 100, value: 0))
+            await fulfillment(of: [harness.clock.expectNoPendingSleeps()], timeout: 5)
+            harness.clock.advance(to: 16_000_000_000)
+            harness.states.send(invalid)
+            let tip = max(invalid.latestBlockHeight, 100)
+            harness.states.send(state(tip: tip, scanned: tip, value: 0))
+            await fulfillment(of: [harness.clock.expectSleep(at: 31_000_000_000)], timeout: 5)
+            await gate.open()
+            harness.clock.advance(to: 31_000_000_000)
+            let accepted = try await caller.value
+            XCTAssertEqual(accepted.shieldedTotal(), .zero)
+            await fulfillment(of: [harness.clock.expectNoPendingSleeps()], timeout: 5)
+        }
+    }
+
     func testPolicyDefaultsAreExact() {
         let direct = GiftCardCheckPolicy.live(isTorEnabled: false)
         let tor = GiftCardCheckPolicy.live(isTorEnabled: true)
