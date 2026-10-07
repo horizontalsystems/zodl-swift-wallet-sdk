@@ -49,8 +49,16 @@ final class CompactBlockProcessorRewindPollingTests: ZcashTestCase {
         retries: Int? = nil
     ) async throws {
         let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
-        _ = try await fixture.redeemer.check()
         let processor = fixture.synchronizer.blockProcessor
+        let rewindGate = GiftCardOperationGate()
+        let restartGate = GiftCardOperationGate()
+        addTeardownBlock {
+            await rewindGate.open()
+            await restartGate.open()
+            await processor.stopAndWait()
+            try await fixture.redeemer.cleanup()
+        }
+        _ = try await fixture.redeemer.check()
         if let retries {
             let config = await processor.config
             await processor.update(config: CompactBlockProcessor.Configuration(
@@ -93,10 +101,9 @@ final class CompactBlockProcessorRewindPollingTests: ZcashTestCase {
         if stopped { await processor.stopAndWait() }
         let startsBeforeRewind = events.events.filter { $0 == "start" }.count
         let entered = XCTestExpectation(description: "rewind backend held")
-        let gate = GiftCardOperationGate()
         fixture.backend.rewindToHeightHeightClosure = { height in
             entered.fulfill()
-            await gate.wait()
+            await rewindGate.wait()
             if failure == .backend { throw RewindFailure.backend }
             return .success(height)
         }
@@ -123,7 +130,7 @@ final class CompactBlockProcessorRewindPollingTests: ZcashTestCase {
         await fulfillment(of: [entered], timeout: 5)
         let reserved = await processor.rewindTask
         let owner = try XCTUnwrap(reserved)
-        await gate.open()
+        await rewindGate.open()
         await owner.value
         try await rewind.value
         XCTAssertEqual(events.events.filter { $0 == "completion" }.count, 1)
@@ -133,24 +140,22 @@ final class CompactBlockProcessorRewindPollingTests: ZcashTestCase {
         let shouldPoll = polling && !stopped && !stopInCompletion && !stopInFailure && retries != 1
         if shouldPoll {
             XCTAssertEqual(timerValidity, true)
-            try await assertNextStart(processor, fixture: fixture, fireTimer: true)
+            try await assertNextStart(processor, fixture: fixture, gate: restartGate, fireTimer: true)
         } else {
             XCTAssertNil(timerValidity)
         }
         if explicitRestart {
-            try await assertNextStart(processor, fixture: fixture, fireTimer: false)
+            try await assertNextStart(processor, fixture: fixture, gate: restartGate, fireTimer: false)
         }
-        await processor.stopAndWait()
-        try await fixture.redeemer.cleanup()
     }
 
     private func assertNextStart(
         _ processor: CompactBlockProcessor,
         fixture: GiftCardCancellationFixture,
+        gate: GiftCardOperationGate,
         fireTimer: Bool
     ) async throws {
         let entered = XCTestExpectation(description: "next sync action held")
-        let gate = GiftCardOperationGate()
         fixture.repository.findForResubmissionUpToClosure = { _ in
             entered.fulfill()
             await gate.wait()
