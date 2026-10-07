@@ -114,6 +114,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Fixed
 
+- Explicit starts requested from rewind completion wait for retained rewind callbacks to finish,
+  preserve retry intent and coalesce into one sync run. A later stop or wipe cancels that request.
+
 - `SDKSynchronizer.rewind(_:)` keeps stopped and never-started wallets stopped after success or failure.
   A stop requested during rewind also prevents automatic polling from restarting. Call `start()` explicitly to resume syncing.
 

@@ -30,6 +30,8 @@ actor CompactBlockProcessor {
     private var admissionGeneration: UInt64 = 0
     private var syncGeneration: UInt64?
     private var mempoolGeneration: UInt64?
+    private var syncIsRewinding = false
+    private var queuedRewindStart: (generation: UInt64, retry: Bool)?
 
     private let actions: [CBPState: Action]
     var context: ActionContext
@@ -270,6 +272,16 @@ actor CompactBlockProcessor {
 
 extension CompactBlockProcessor {
     func start(retry: Bool = false) async {
+        guard drainTask == nil, wipeTask == nil, !Task.isCancelled else { return }
+        if rewindTask != nil || syncIsRewinding {
+            let priorRetry = queuedRewindStart?.generation == admissionGeneration && queuedRewindStart?.retry == true
+            queuedRewindStart = (generation: admissionGeneration, retry: retry || priorRetry)
+            return
+        }
+        await startWhenUnowned(retry: retry)
+    }
+
+    private func startWhenUnowned(retry: Bool, fromRewindOwner: Bool = false) async {
         guard drainTask == nil, wipeTask == nil, rewindTask == nil else { return }
         let admission = admissionGeneration
         if retry {
@@ -281,7 +293,7 @@ extension CompactBlockProcessor {
 
         let canStart = await canStartSync()
         guard admission == admissionGeneration, drainTask == nil, wipeTask == nil,
-              rewindTask == nil, !Task.isCancelled else { return }
+              rewindTask == nil, fromRewindOwner || !Task.isCancelled else { return }
         guard canStart else {
             if await isIdle() {
                 logger.warn("max retry attempts reached on \(await context.state) state")
@@ -317,6 +329,7 @@ extension CompactBlockProcessor {
     /// Request-only stop for processor-owned callbacks. It must never join its own run.
     func stop() async {
         admissionGeneration &+= 1
+        queuedRewindStart = nil
         syncTask?.cancel()
         mempoolDetectionTask?.cancel()
         pollTask?.cancel()
@@ -340,6 +353,7 @@ extension CompactBlockProcessor {
     private func reserveDrain() -> Task<Void, Never> {
         if let drainTask { return drainTask }
         admissionGeneration &+= 1
+        queuedRewindStart = nil
         let sync = syncTask
         let mempool = mempoolDetectionTask
         let poll = pollTask
@@ -433,6 +447,7 @@ extension CompactBlockProcessor {
                 await setTimer()
             }
             rewindTask = nil
+            await startQueuedAfterRewind()
         }
         rewindTask = task
         return task
@@ -851,8 +866,11 @@ extension CompactBlockProcessor {
         if syncGeneration == generation {
             syncTask = nil
             syncGeneration = nil
+            syncIsRewinding = false
         }
-        if restartAfterCancellation, drainTask == nil, wipeTask == nil {
+        if queuedRewindStart != nil {
+            await startQueuedAfterRewind()
+        } else if restartAfterCancellation, drainTask == nil, wipeTask == nil {
             let generation = admissionGeneration
             // A fresh task can run the queued sync without inheriting this run's
             // cancellation. Teardown invalidates its admission if it is delayed.
@@ -860,9 +878,18 @@ extension CompactBlockProcessor {
         }
     }
 
+    private func startQueuedAfterRewind() async {
+        guard let request = queuedRewindStart else { return }
+        queuedRewindStart = nil
+        guard request.generation == admissionGeneration, drainTask == nil, wipeTask == nil else { return }
+        // The cancelled run still owns its terminal callbacks. Only after those
+        // return may it admit a fresh, uncancelled task for the explicit caller.
+        await startWhenUnowned(retry: request.retry, fromRewindOwner: true)
+    }
+
     private func restartAfterRequestStop(generation: UInt64) async {
         guard generation == admissionGeneration, drainTask == nil, wipeTask == nil else { return }
-        await start()
+        await startWhenUnowned(retry: false)
     }
 
     private func syncTaskWasCancelled() async throws -> Bool {
@@ -994,6 +1021,7 @@ extension CompactBlockProcessor {
             afterSyncHooksManager = AfterSyncHooksManager()
             let rewinds = hooks.rewindContexts()
             rewound = rewound || !rewinds.isEmpty
+            syncIsRewinding = syncIsRewinding || !rewinds.isEmpty
             anotherSync = anotherSync || hooks.shouldExecuteAnotherSyncHook()
             for rewind in rewinds { try await doRewind(context: rewind) }
         }
@@ -1025,7 +1053,7 @@ extension CompactBlockProcessor {
         pollTask = Task {
             if await isIdle() {
                 if await canStartSync() {
-                    await start()
+                    await startWhenUnowned(retry: false)
                 } else if !Task.isCancelled, drainTask == nil, wipeTask == nil, hasRetryAttempt() {
                     await failure(ZcashError.compactBlockProcessorMaxAttemptsReached(config.retries))
                 }
