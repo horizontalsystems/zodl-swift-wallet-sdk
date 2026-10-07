@@ -7412,7 +7412,9 @@ mod tests {
         use orchard::tree::MerkleHashOrchard;
         use zcash_client_backend::data_api::WalletCommitmentTrees;
         use zcash_client_backend::data_api::chain::{CommitmentTreeRoot, scan_cached_blocks};
-        use zcash_client_backend::proto::compact_formats::{ChainMetadata, CompactBlock, CompactTx};
+        use zcash_client_backend::proto::compact_formats::{
+            ChainMetadata, CompactBlock, CompactTx,
+        };
         use zcash_client_backend::proto::service::TreeState;
         use zcash_client_sqlite::WalletDb;
         use zcash_client_sqlite::util::SystemClock;

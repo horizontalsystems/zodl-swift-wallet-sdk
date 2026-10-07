@@ -1296,7 +1296,8 @@ pub unsafe extern "C" fn zcashlc_ledger_sign_session_new(
         let firmware_reply = unsafe { bytes(firmware_reply, firmware_reply_len)? };
         let caps = pairing::device_caps(firmware_reply).map_err(|e| pairing_error(&e))?;
 
-        let db_data = unsafe { wallet_db(crate::system_rng(), db_data, db_data_len, network_params)? };
+        let db_data =
+            unsafe { wallet_db(crate::system_rng(), db_data, db_data_len, network_params)? };
         let account_uuid = account_uuid_from_bytes(account_uuid_bytes)?;
         let account = db_data
             .get_account(account_uuid)?

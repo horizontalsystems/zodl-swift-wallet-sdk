@@ -542,10 +542,7 @@ fn transparent_only_pczt(wallet: &Wallet) -> Pczt {
         .expect("transparent output");
     finish(
         builder
-            .build_for_pczt(
-                crate::system_rng(),
-                &zip317::FeeRule::standard(),
-            )
+            .build_for_pczt(crate::system_rng(), &zip317::FeeRule::standard())
             .expect("build_for_pczt"),
     )
 }
@@ -609,10 +606,7 @@ fn orchard_spend_pczt(wallet: &Wallet) -> Pczt {
         .expect("transparent change output");
     finish(
         builder
-            .build_for_pczt(
-                crate::system_rng(),
-                &zip317::FeeRule::standard(),
-            )
+            .build_for_pczt(crate::system_rng(), &zip317::FeeRule::standard())
             .expect("build_for_pczt"),
     )
 }

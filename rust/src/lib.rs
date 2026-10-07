@@ -2441,8 +2441,10 @@ pub unsafe extern "C" fn zcashlc_propose_transfer(
         }?;
 
         let account = db_data.get_account(account_uuid)?;
-        let (change_strategy, input_selector) =
-            zip317_helper(None, change_split_policy(account.as_ref().map(|a| a.source())));
+        let (change_strategy, input_selector) = zip317_helper(
+            None,
+            change_split_policy(account.as_ref().map(|a| a.source())),
+        );
 
         let req = TransactionRequest::new(vec![
             Payment::new(to, Some(value), memo, None, None, vec![]).map_err(|e| {
@@ -2690,8 +2692,10 @@ pub unsafe extern "C" fn zcashlc_propose_transfer_from_uri(
         let payment_uri_str = unsafe { CStr::from_ptr(payment_uri) }.to_str()?;
 
         let account = db_data.get_account(account_uuid)?;
-        let (change_strategy, input_selector) =
-            zip317_helper(None, change_split_policy(account.as_ref().map(|a| a.source())));
+        let (change_strategy, input_selector) = zip317_helper(
+            None,
+            change_split_policy(account.as_ref().map(|a| a.source())),
+        );
 
         let req = TransactionRequest::from_uri(payment_uri_str).map_err(|e| {
             debug!("{CONTEXT}: payment URI did not parse: {e:?}");
