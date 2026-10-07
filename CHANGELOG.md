@@ -114,6 +114,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Fixed
 
+- Block download shutdown now waits for in-flight storage writes even when its caller is
+  cancelled. Cancellation during the final write no longer starts an extended download range.
+  No call-site changes are required. (MOB-2138)
+
 - Setting a transaction's trust status now fails if this wallet has not stored the transaction.
   Gift claims sent to a recipient outside the `recordIn:` wallet report
   `recordedInDestination == false`, rather than reporting a receive that was never stored.
