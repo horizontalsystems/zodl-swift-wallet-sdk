@@ -113,11 +113,11 @@ discovers the claim as an ordinary untrusted receive with the ten-confirmation w
   shared database executor. The example uses a main synchronizer typed as
   `AwaitableStopSynchronizer`, the optional capability both SDK implementations support. Await
   `stopAndWait()` before starting work that needs the stop operation to finish; synchronous
-  `stop()` only requests it. Completion includes classic processor actions and Tor dormancy, or
-  Slipstream's queued teardown and earlier lifecycle work. It completes even when no new stopped
-  state is emitted, including idle or unprepared paths. This is not full engine quiescence: classic
-  cancelled background tasks are not joined, and Slipstream's engine can return a non-quiescent
-  stop. Keep ownership of the pause so other app lifecycle paths do not start the main wallet
+  `stop()` only requests it. The classic synchronizer joins processor-owned sync, mempool,
+  polling and action work before returning; queued automatic restarts are superseded by this stop.
+  Slipstream completes its queued teardown and earlier lifecycle work, but its engine can return a
+  non-quiescent stop. Both complete even when no new stopped state is emitted, including idle or
+  unprepared paths. Keep ownership of the pause so other app lifecycle paths do not start the main wallet
   while the claim is running, then restart it afterwards.
 - Recording can never fail the redemption: the funds are already on their way. A failure is logged
   and reported as `Redemption.recordedInDestination == false`. When the claim pays the specified
@@ -153,10 +153,12 @@ discovers the claim as an ordinary untrusted receive with the ten-confirmation w
   it cannot be cancelled or rolled back; cancellation does not establish whether the claim was
   created or submitted, so recheck the card before retrying.
 - `cleanup()` runs to completion even when the calling task is cancelled, including when it was
-  queued behind another operation. It retains the redeemer and card alias until `wipe()` reports
-  terminal completion, then removes the remaining directory. Only terminal wipe failure permits
-  the directory-removal fallback; directory deletion errors are returned to the caller. A stalled
-  wipe can keep cleanup and same-card reuse pending indefinitely. Cancellation or dropping the
+  queued behind another operation. It first joins the card wallet's processor writers, then waits
+  for `wipe()` terminal completion and releases its Tor connection caches and isolated clients
+  before closing its root Tor runtime and removing the directory. The redeemer and card alias stay
+  owned throughout. A terminal wipe failure permits directory fallback only after those same writer
+  and resource boundaries; directory deletion errors reach the caller. Stalled writers, wipe or
+  native shutdown can keep cleanup and same-card reuse pending indefinitely. Cancellation or dropping the
   caller's reference does not authorize early deletion or release, and leftover-wallet cleanup
   continues to skip this wallet. This does not promise universal engine quiescence.
 - `cleanup()` never loses funds: the key is in the link. If a submission failed, clean up and use

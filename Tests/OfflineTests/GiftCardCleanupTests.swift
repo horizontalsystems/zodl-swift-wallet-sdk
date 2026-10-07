@@ -66,6 +66,161 @@ final class GiftCardCleanupTests: ZcashTestCase {
         withExtendedLifetime(replacement) { }
     }
 
+    func testCleanupWithEarlyWipeValidationFailureWaitsForWriter() async throws {
+        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+        _ = try await fixture.redeemer.check()
+        let marker = try writeMarker(card: fixture.card, name: "held-writer")
+        let entered = XCTestExpectation(description: "writer entered")
+        let admitted = XCTestExpectation(description: "cleanup drain admitted")
+        let finished = XCTestExpectation(description: "cleanup after early wipe error")
+        let gate = GiftCardOperationGate()
+        let events = CleanupEvents()
+        fixture.service.getInfoModeClosure = { _ in
+            entered.fulfill()
+            await gate.wait()
+            events.append("writer:done")
+            throw ZcashError.synchronizerNotPrepared
+        }
+        await fixture.synchronizer.blockProcessor.start()
+        await fulfillment(of: [entered], timeout: 5)
+        fixture.synchronizer.initializer.urlsParsingError = ZcashError.synchronizerNotPrepared
+        await fixture.synchronizer.updateStatus(.stopped)
+        fixture.downloader.stopDownloadClosure = {
+            if events.appendOnce("stop") { admitted.fulfill() }
+        }
+        let cleanup = Task {
+            defer { finished.fulfill() }
+            try await fixture.redeemer.cleanup()
+        }
+        await fulfillment(of: [admitted], timeout: 5)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+        XCTAssertEqual(fixture.storage.clearCallsCount, 0)
+        assertAlreadyActive(card: fixture.card)
+        await gate.open()
+        try await waitFor(finished)
+        try await cleanup.value
+        XCTAssertTrue(events.events.contains("writer:done"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+    }
+
+    func testCleanupClosesServiceAndRootBeforeRemovingDirectory() async throws {
+        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+        _ = try await fixture.redeemer.check()
+        let marker = try writeMarker(card: fixture.card, name: "tor-writer")
+        let events = CleanupEvents()
+        let closed = XCTestExpectation(description: "service connections closed")
+        let free = XCTestExpectation(description: "native root freed")
+        let gate = GiftCardOperationGate()
+        fixture.service.closeConnectionsClosure = {
+            XCTAssertEqual(fixture.storage.clearCallsCount, 1)
+            events.append("service:entered")
+            closed.fulfill()
+            await gate.wait()
+            events.append("service:done")
+        }
+        var native = TorHTTPGetNative()
+        native.createRuntime = { _, _ in
+            XCTFail("Cleanup must not bootstrap Tor")
+            return nil
+        }
+        native.freeRuntime = { _ in
+            XCTAssertTrue(events.events.contains("service:done"))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+            events.append("runtime:free")
+            free.fulfill()
+        }
+        let tor = TorClient(runtimePtr: OpaquePointer(bitPattern: 1)!, torDir: marker.deletingLastPathComponent(), httpGetNative: native)
+        fixture.container.mock(type: TorClient.self, isSingleton: true) { _ in tor }
+        let finished = XCTestExpectation(description: "cleanup completed")
+        let cleanup = Task {
+            defer { finished.fulfill() }
+            try await fixture.redeemer.cleanup()
+        }
+        await fulfillment(of: [closed], timeout: 5)
+        XCTAssertFalse(events.events.contains("runtime:free"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+        await gate.open()
+        try await waitFor(finished)
+        try await cleanup.value
+        await fulfillment(of: [free], timeout: 5)
+        try await fixture.redeemer.cleanup()
+        XCTAssertEqual(events.events.filter { $0 == "runtime:free" }.count, 1)
+    }
+
+    func testCleanupDisposesActualCachedTorConnectionsBeforeFinalRuntimeAndRootRemoval() async throws {
+        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+        _ = try await fixture.redeemer.check()
+        let marker = try writeMarker(card: fixture.card, name: "cached-tor-owner")
+        let events = CleanupEvents()
+        let wipeEntered = XCTestExpectation(description: "wipe entered")
+        let gate = GiftCardOperationGate()
+        fixture.storage.clearClosure = {
+            wipeEntered.fulfill()
+            await gate.wait()
+            events.append("wipe:done")
+        }
+        var native = TorHTTPGetNative()
+        native.createRuntime = { _, _ in
+            XCTFail("Cleanup must never create a native runtime")
+            return nil
+        }
+        native.connectLightwalletd = { _, _ in
+            events.append("connect")
+            return OpaquePointer(bitPattern: 2)
+        }
+        native.freeLightwalletd = { _ in
+            XCTAssertTrue(events.events.contains("wipe:done"))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+            events.append("lwd:free")
+        }
+        native.freeRuntime = { _ in
+            XCTAssertEqual(events.events.filter { $0 == "lwd:free" }.count, 2)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+            events.append("runtime:free")
+        }
+        let tor = TorClient(runtimePtr: OpaquePointer(bitPattern: 1)!, torDir: marker.deletingLastPathComponent(), httpGetNative: native)
+        fixture.container.mock(type: TorClient.self, isSingleton: true) { _ in tor }
+        let service = LightWalletGRPCServiceOverTor(endpoint: LightWalletEndpointBuilder.default, tor: tor)
+        fixture.synchronizer.initializer.lightWalletService = service
+        _ = try await service.serviceConnections.connectToLightwalletd(.defaultTor)
+        _ = try await service.serviceConnections.connectToLightwalletd(.torInGroup("card-test"))
+        let finished = XCTestExpectation(description: "cleanup completed")
+        let cleanup = Task {
+            defer { finished.fulfill() }
+            try await fixture.redeemer.cleanup()
+        }
+        await fulfillment(of: [wipeEntered], timeout: 5)
+        cleanup.cancel()
+        XCTAssertEqual(events.events, ["connect", "connect"])
+        assertAlreadyActive(card: fixture.card)
+        await gate.open()
+        try await waitFor(finished)
+        try await cleanup.value
+        XCTAssertEqual(events.events, ["connect", "connect", "wipe:done", "lwd:free", "lwd:free", "runtime:free"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+        let replacement = try makeReplacement(card: fixture.card)
+        let replacementMarker = try writeMarker(card: fixture.card, name: "replacement-after-tor")
+        try await fixture.redeemer.cleanup()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: replacementMarker.path))
+        XCTAssertEqual(events.events.filter { $0 == "runtime:free" }.count, 1)
+        withExtendedLifetime(replacement) { }
+    }
+
+    func testCleanupBeforeCheckDoesNotBootstrapTor() async throws {
+        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+        let events = CleanupEvents()
+        var native = TorHTTPGetNative()
+        native.createRuntime = { _, _ in
+            events.append("create")
+            return nil
+        }
+        native.freeRuntime = { _ in events.append("free") }
+        let tor = TorClient(torDir: testTempDirectory.appendingPathComponent("unused-tor"), httpGetNative: native)
+        fixture.container.mock(type: TorClient.self, isSingleton: true) { _ in tor }
+        try await fixture.redeemer.cleanup()
+        XCTAssertTrue(events.events.isEmpty)
+    }
+
     func testBridgeObservesSuccessCompletedBeforeSubscription() async throws {
         let subject = PassthroughSubject<Void, Error>()
         subject.send(completion: .finished)

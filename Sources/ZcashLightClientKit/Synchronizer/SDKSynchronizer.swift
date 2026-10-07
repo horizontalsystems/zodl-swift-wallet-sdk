@@ -267,8 +267,8 @@ public class SDKSynchronizer: AwaitableStopSynchronizer {
         }
     }
 
-    /// Stops the synchronizer and waits for its stop body, including processor actions and Tor dormancy.
-    /// Does not join the processor's cancelled sync or mempool tasks.
+    /// Stops the synchronizer and joins its processor-owned sync, mempool and action work.
+    /// Caller cancellation does not interrupt the owned drain.
     public func stopAndWait() async {
         await stopTask().value
     }
@@ -288,15 +288,22 @@ public class SDKSynchronizer: AwaitableStopSynchronizer {
     private func stopImpl() async {
         await sdkFlags.sdkStopped()
 
-        let status = await self.status
-        guard status != .stopped, status != .disconnected else {
-            logger.info("attempted to stop when status was: \(status)")
-            return
-        }
-
-        await blockProcessor.stop()
+        await blockProcessor.stopAndWait()
         await exchangeRateTor?.sleep()
         await httpTor?.sleep()
+    }
+
+    /// Card-only final resource release. The redeemer has serialized and drained
+    /// every card operation and awaited wipe before calling this helper.
+    func closeGiftCardResources() async throws {
+        // Tor's service cache drops native connection owners synchronously. The
+        // direct gRPC service's detached NIO shutdown is not an awaited drain.
+        await initializer.lightWalletService.closeConnections()
+        try await exchangeRateTor?.close()
+        exchangeRateTor = nil
+        try await httpTor?.close()
+        httpTor = nil
+        try await initializer.container.resolve(TorClient.self).close()
     }
 
     // MARK: Witnesses Fix

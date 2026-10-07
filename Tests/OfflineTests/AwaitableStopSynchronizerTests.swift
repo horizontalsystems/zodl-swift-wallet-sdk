@@ -26,7 +26,7 @@ final class AwaitableStopSynchronizerTests: ZcashTestCase {
         XCTAssertEqual(sync.latestState.internalSyncStatus, .unprepared)
     }
 
-    func testClassicAlreadyStoppedAndDisconnectedSkipProcessorStop() async throws {
+    func testClassicAlreadyStoppedAndDisconnectedStillDrainProcessor() async throws {
         let trace = StopTrace()
         let sync = try makeClassic(trace: trace)
         for status: InternalSyncStatus in [.stopped, .disconnected] {
@@ -36,7 +36,7 @@ final class AwaitableStopSynchronizerTests: ZcashTestCase {
             let chainTipUpdated = await sync.sdkFlags.chainTipUpdated
             XCTAssertFalse(chainTipUpdated)
         }
-        XCTAssertEqual(trace.events, [])
+        XCTAssertEqual(trace.events, ["stop", "stop:done", "stop", "stop:done"])
     }
 
     func testClassicLegacyStopReturnsWhileOneProcessorStopIsHeld() async throws {

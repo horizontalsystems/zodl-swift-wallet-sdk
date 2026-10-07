@@ -344,8 +344,9 @@ public actor GiftCardRedeemer {
 
     /// Stops the card wallet and deletes every file it created, then frees the card for another
     /// redeemer. The redeemer cannot be used afterwards. Calling it again does nothing.
-    /// Cancellation does not interrupt cleanup. Until wipe reports terminal completion, the
-    /// redeemer and its alias stay owned; a stalled wipe can keep this call pending indefinitely.
+    /// Cancellation does not interrupt cleanup. The redeemer and its alias stay owned until
+    /// its writers drain, wipe terminates and its Tor resources close. Stalled work can keep
+    /// this call pending indefinitely.
     ///
     /// - Throws: the error from deleting the files, if any; the wallet is stopped and the card
     ///   freed regardless.
@@ -489,11 +490,11 @@ public actor GiftCardRedeemer {
         accountUUID = nil
         defer { GiftCardRedeemerRegistry.release(alias, owner: owner) }
 
-        synchronizer.stop()
-        // `wipe()` waits for a running sync to stop and closes the wallet's database connections
-        // before deleting its files. Retain this operation and its alias until that wipe really
-        // completes. Only a terminal failure permits the directory-removal fallback below.
+        // Wipe can fail validation before it reaches the processor. Always pass
+        // the explicit writer boundary before permitting directory fallback.
+        await synchronizer.stopAndWait()
         try? await Self.awaitCompletion(of: synchronizer.wipe())
+        try await synchronizer.closeGiftCardResources()
 
         if FileManager.default.fileExists(atPath: rootDirectory.path) {
             try FileManager.default.removeItem(at: rootDirectory)

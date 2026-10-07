@@ -15,9 +15,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SlipstreamSynchronizer` wait until the synchronizer's stop operation finishes, including
   earlier queued lifecycle work in Slipstream. Idle and unprepared calls complete without waiting
   for a new state-stream event. Existing `Synchronizer` conformers need no new requirement, and
-  `stop()` still returns immediately. This boundary does not promise full engine quiescence:
-  cancelled background tasks are not necessarily joined, and Slipstream can still report a
-  non-quiescent stop. Coordinate subsequent starts when pausing the main wallet for a gift claim.
+  `stop()` still returns immediately. The classic synchronizer joins processor-owned sync,
+  mempool, polling and action work and supersedes queued automatic restarts. Slipstream can still
+  report a non-quiescent stop. Coordinate subsequent starts when pausing the main wallet for a gift claim.
 - `GiftCard` reads a gift card link with `GiftCard(link:)`: any `https` URL whose fragment carries
   a `v=1` card (`#v=1&key=…&height=…`, as `https://gift.zodl.com/` issues) or the legacy JSON
   payment-link encoding at `/payment-links/open#vN=`; `GiftCard.Origin` names the encoding read
@@ -123,11 +123,13 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `recordedInDestination == false`, rather than reporting a receive that was never stored.
   The accepted submission remains unaffected. (MOB-2138)
 
-- `GiftCardRedeemer.cleanup()` now retains the temporary wallet and card alias until wipe
-  actually completes, including when its caller is cancelled or releases its reference. A
-  deadline no longer permits early deletion or same-card reuse. A stalled wipe can keep cleanup
-  pending; terminal wipe failure still allows directory removal, whose errors reach the caller.
-  Public signatures are unchanged. (MOB-2138)
+- `GiftCardRedeemer.cleanup()` now joins the temporary wallet's sync, mempool, polling and action
+  writers before wipe, then releases cached Tor connections and card-owned isolated clients before
+  closing its root runtime and deleting the directory. Cleanup retains the card alias throughout,
+  even when its caller is cancelled. Early wipe validation failure and terminal storage errors use
+  the same drain before directory fallback. Concurrent wipes complete every caller once. Stalled
+  work can keep cleanup pending indefinitely; directory deletion errors reach the caller. Public
+  signatures are unchanged. (MOB-2138)
 
 - `GiftCardRedeemer.check()` and the `redeem` overloads now throw `CancellationError` for
   cancelled queued calls before running them. Cancellation observed after redemption preparation

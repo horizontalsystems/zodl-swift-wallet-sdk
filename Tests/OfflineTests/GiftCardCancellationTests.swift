@@ -144,18 +144,18 @@ private extension GiftCardRedeemer {
 }
 
 actor GiftCardOperationGate {
-    private var continuation: CheckedContinuation<Void, Never>?
+    private var continuations: [CheckedContinuation<Void, Never>] = []
     private var isOpen = false
 
     func wait() async {
         if isOpen { return }
-        await withCheckedContinuation { continuation = $0 }
+        await withCheckedContinuation { continuations.append($0) }
     }
 
     func open() {
         isOpen = true
-        continuation?.resume()
-        continuation = nil
+        for continuation in continuations { continuation.resume() }
+        continuations.removeAll()
     }
 }
 
@@ -165,6 +165,12 @@ struct GiftCardCancellationFixture {
     let synchronizer: SDKSynchronizer
     let encoder: GiftCardCancellationEncoder
     let storage: CompactBlockRepositoryMock
+    let backend: ZcashRustBackendWeldingMock
+    let repository: TransactionRepositoryMock
+    let service: LightWalletServiceMock
+    let downloader: BlockDownloaderMock
+    let container: DIContainer
+    let latest: LatestBlocksDataProviderMock
 
     static func make(storageDirectory: URL) async throws -> GiftCardCancellationFixture {
         let card = try GiftCard(link: GiftCardTests.zodlTestnetLink)
@@ -198,8 +204,11 @@ struct GiftCardCancellationFixture {
         )
         let service = LightWalletServiceMock()
         service.getTreeStateModeThrowableError = LightWalletServiceError.timeOut
+        service.getMempoolStreamClosure = { AsyncThrowingStream { $0.finish() } }
+        service.closeConnectionsClosure = { }
         let repository = TransactionRepositoryMock()
         repository.closeDBConnectionClosure = { }
+        repository.findForResubmissionUpToReturnValue = []
         let storage = CompactBlockRepositoryMock()
         storage.clearClosure = { }
         let latest = LatestBlocksDataProviderMock()
@@ -208,11 +217,17 @@ struct GiftCardCancellationFixture {
         latest.underlyingMaxScannedHeight = 3_000_010
         latest.underlyingWalletBirthday = 3_000_000
         latest.resetClosure = { }
+        latest.updateScannedDataClosure = { }
+        latest.updateBlockDataClosure = { }
         container.mock(type: ZcashRustBackendWelding.self, isSingleton: true) { _ in backend }
         container.mock(type: LightWalletService.self, isSingleton: true) { _ in service }
         container.mock(type: TransactionRepository.self, isSingleton: true) { _ in repository }
         container.mock(type: CompactBlockRepository.self, isSingleton: true) { _ in storage }
         container.mock(type: LatestBlocksDataProvider.self, isSingleton: true) { _ in latest }
+        let downloader = BlockDownloaderMock()
+        downloader.stopDownloadClosure = { }
+        downloader.rewindLatestDownloadedBlockHeightClosure = { _ in }
+        container.mock(type: BlockDownloader.self, isSingleton: true) { _ in downloader }
         let encoder = GiftCardCancellationEncoder()
         var synchronizer: SDKSynchronizer!
         let redeemer = try GiftCardRedeemer(
@@ -237,7 +252,10 @@ struct GiftCardCancellationFixture {
             }
         )
         await synchronizer.updateStatus(.synced)
-        return GiftCardCancellationFixture(card: card, redeemer: redeemer, synchronizer: synchronizer, encoder: encoder, storage: storage)
+        return GiftCardCancellationFixture(
+            card: card, redeemer: redeemer, synchronizer: synchronizer, encoder: encoder, storage: storage,
+            backend: backend, repository: repository, service: service, downloader: downloader, container: container, latest: latest
+        )
     }
 }
 
