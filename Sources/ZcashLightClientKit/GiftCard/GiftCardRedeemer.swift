@@ -57,13 +57,15 @@ public struct GiftCardStatus: Equatable {
     public let spendable: Zatoshi
     /// The value still waiting for confirmations: `total - spendable`.
     public let pending: Zatoshi
-    /// The fee a redemption pays now, as librustzcash proposes it for the card's actual spendable
-    /// notes (ZIP 317: more than the 10,000 zatoshi minimum for a card holding several notes).
+    /// The preview fee for an Orchard-capable recipient, as librustzcash proposes it for the
+    /// current spendable notes and chain height (ZIP 317: potentially more than the 10,000 zatoshi
+    /// minimum). Later note or chain changes can change the actual redemption's fee and amount.
     /// Set only when ``state`` is ``State/ready``; `nil` otherwise.
     public let fee: Zatoshi?
-    /// What a redemption sends to the recipient now: the value it spends minus ``fee``, as the same
-    /// proposal computes it. This is the amount to show the user before they redeem. Non-zero only
-    /// when ``state`` is ``State/ready``; `.zero` otherwise.
+    /// The preview amount for an Orchard-capable recipient: the value the current proposal spends
+    /// minus ``fee``. Show this before redeeming, then use ``GiftCardRedeemer/Redemption/amount``
+    /// for the actual proposal's result. Non-zero only when ``state`` is ``State/ready``;
+    /// `.zero` otherwise.
     public let redeemable: Zatoshi
 
     /// - Parameters:
@@ -100,14 +102,15 @@ public struct GiftCardStatus: Equatable {
 ///
 /// 1. ``check()`` creates the card wallet from the card's seed and birthday, syncs it, and reports
 ///    what it holds (``GiftCardStatus``): ready, pending confirmations, dust (less than the fee),
-///    or empty. A ready card comes with the fee its redemption pays and the amount it sends
-///    (``GiftCardStatus/fee``, ``GiftCardStatus/redeemable``).
+///    or empty. A ready card comes with the current proposal's preview fee and amount for an
+///    Orchard-capable recipient (``GiftCardStatus/fee``, ``GiftCardStatus/redeemable``).
+///    Later note or chain changes can change the actual redemption's result.
 /// 2. ``redeem(to:memo:recordIn:)`` sends the card's entire spendable balance, minus the fee, to
-///    the given address. The transaction discards the outgoing viewing key (``OvkPolicy/discard``):
-///    the card's key — which its issuer can rederive — cannot reveal where the funds went. It only
-///    spends Orchard and Ironwood notes to an Orchard receiver, so it never downloads the Sapling
-///    parameters. Given the user's own synchronizer as the destination, the claim is recorded
-///    there at once as a trusted transaction (ZIP 315), so the main wallet shows it immediately
+///    the given unified address, which must have an Orchard receiver and may have other receivers.
+///    The transaction discards the outgoing viewing key (``OvkPolicy/discard``): the card's key —
+///    which its issuer can rederive — cannot reveal where the funds went. Sapling parameters are
+///    unnecessary only when the actual proposal has no Sapling inputs or outputs. Given the user's
+///    own synchronizer as the destination, the claim is recorded there at once as a trusted transaction (ZIP 315), so the main wallet shows it immediately
 ///    and can spend it after the default three confirmations. The issuer and anyone holding the
 ///    link share the card's spending key, so a competing spend during a reorg remains a risk;
 ///    see `docs/GIFT_CARDS.md`.
@@ -330,7 +333,10 @@ public actor GiftCardRedeemer {
     /// transaction that would sweep them, so that the fee their notes require decides: when it
     /// takes everything, the state is ``GiftCardStatus/State/dust`` rather than
     /// ``GiftCardStatus/State/ready``; otherwise the status reports that fee and the amount the
-    /// sweep sends (``GiftCardStatus/fee``, ``GiftCardStatus/redeemable``).
+    /// sweep sends (``GiftCardStatus/fee``, ``GiftCardStatus/redeemable``). The preview uses the
+    /// card's own Orchard-only address for the Orchard-capable recipient class accepted by
+    /// ``redeem(to:memo:recordIn:)``. It reflects the current notes and chain height, so later
+    /// note or chain changes can change the actual proposal's fee and amount.
     ///
     /// - Returns: the card's balance and whether it can be redeemed now.
     /// - Throws: the sync error if the card wallet cannot sync (for instance, the server is
@@ -342,8 +348,8 @@ public actor GiftCardRedeemer {
         }
     }
 
-    /// Sends the card's entire spendable balance, minus the fee, to `recipient`, without recording
-    /// the claim anywhere else. See ``redeem(to:memo:recordIn:)``.
+    /// Sends the card's entire spendable balance, minus the fee, to the Orchard-capable unified
+    /// address `recipient`, without recording the claim anywhere else. See ``redeem(to:memo:recordIn:)``.
     ///
     /// - Returns: the submission result of each created transaction (usually one). A
     ///   `.success` means a server accepted it; the funds arrive once it is mined.
@@ -355,9 +361,10 @@ public actor GiftCardRedeemer {
     /// claim in `destination` as a trusted transaction.
     ///
     /// The transaction discards the outgoing viewing key, so the card's key cannot reveal the
-    /// recipient or the amount, and it does not need the Sapling parameters when `recipient` has
-    /// an Orchard receiver (every wallet's own unified address does). Only spendable funds are
-    /// swept; value still waiting for confirmations stays on the card.
+    /// recipient or the amount. The recipient must have an Orchard receiver and may also have
+    /// Sapling or transparent receivers. Input selection is unchanged: Sapling parameters may
+    /// still be needed if the actual proposal contains Sapling inputs or outputs. Only spendable
+    /// funds are swept; value still waiting for confirmations stays on the card.
     ///
     /// When `destination` is given, every accepted claim transaction is stored in it once the
     /// submission is over, and marked as trusted under [ZIP 315](https://zips.z.cash/zip-0315):
@@ -374,18 +381,21 @@ public actor GiftCardRedeemer {
     /// receive if trust was never recorded. An unrelated destination does not receive the claim.
     ///
     /// - Parameters:
-    ///   - recipient: the user's own address, on the card's network.
+    ///   - recipient: the user's own unified address, on the card's network, with an Orchard receiver.
     ///   - memo: an optional memo for the claim transaction.
     ///   - destination: the synchronizer of the wallet `recipient` belongs to, or `nil` to record
     ///     the claim nowhere. Only the SDK's own synchronizers (`SDKSynchronizer`,
     ///     `SlipstreamSynchronizer`) can record it; with any other conformer the claim is not
     ///     recorded and ``Redemption/recordedInDestination`` is `false`.
-    /// - Returns: the submission results and whether the destination recorded the claim.
+    /// - Returns: the submission results, actual proposal-derived fee and amount, and whether the
+    ///   destination recorded the claim. Later note or chain changes can make these amounts differ
+    ///   from the earlier ``check()`` preview.
     /// - Throws: ``ZcashError/giftCardRedeemerNotReady`` before ``check()`` has prepared the
     ///   card wallet, ``ZcashError/giftCardNothingToRedeem`` when nothing is spendable or the fee
     ///   would take everything (``GiftCardStatus/State/dust``),
-    ///   ``ZcashError/giftCardNetworkMismatch`` for an address on another network, and the
-    ///   proposal and creation errors of `Synchronizer.proposeSendMax(accountUUID:recipient:memo:mode:)`
+    ///   ``ZcashError/giftCardNetworkMismatch`` for an address on another network,
+    ///   ``ZcashError/giftCardRecipientRequiresOrchard`` for a unified address without an Orchard
+    ///   receiver, and the proposal and creation errors of `Synchronizer.proposeSendMax(accountUUID:recipient:memo:mode:)`
     ///   and `Synchronizer.createProposedTransactions(proposal:spendingKey:ovkPolicy:)`. The
     ///   destination's errors are never thrown. Cancellation observed before native creation throws
     ///   `CancellationError`; creation already underway cannot be rolled back.
@@ -479,6 +489,9 @@ public actor GiftCardRedeemer {
         }
         guard recipient.networkType == card.network else {
             throw ZcashError.giftCardNetworkMismatch
+        }
+        guard try recipient.availableReceiverTypecodes().contains(.orchard) else {
+            throw ZcashError.giftCardRecipientRequiresOrchard
         }
 
         let balances = try await synchronizer.getAccountsBalances()
@@ -683,9 +696,9 @@ extension GiftCardRedeemer {
     /// take everything.
     ///
     /// librustzcash computes both: a send-max proposal (never turned into a transaction) to the
-    /// card's own address, which has the same Orchard receiver as any wallet's, so it spends the
-    /// same notes and pays the same fee as the redemption. It fails with insufficient funds exactly
-    /// when the fee takes everything.
+    /// card's own Orchard-only address, for the Orchard-capable recipient class redemption accepts.
+    /// This is a snapshot of the current notes and chain height, not a reservation of the later
+    /// redemption's inputs or fee. It fails with insufficient funds when the fee takes everything.
     private func proposedSweep(accountUUID: AccountUUID) async throws -> GiftCardStatus.Sweep? {
         do {
             let proposal = try await synchronizer.proposeSendMax(

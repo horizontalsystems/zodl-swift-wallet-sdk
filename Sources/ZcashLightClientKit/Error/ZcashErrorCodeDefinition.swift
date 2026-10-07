@@ -1162,6 +1162,9 @@ enum ZcashErrorDefinition {
     /// a valid card key, or the link is too long. Thrown by `GiftCard(link:)`.
     // sourcery: code="ZGIFT0010"
     case giftCardLinkInvalid
+    /// The gift card recipient must be a unified address with an Orchard receiver.
+    // sourcery: code="ZGIFT0013"
+    case giftCardRecipientRequiresOrchard
 
     // MARK: - Models
 

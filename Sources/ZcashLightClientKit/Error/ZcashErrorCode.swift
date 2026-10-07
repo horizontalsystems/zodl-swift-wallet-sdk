@@ -583,6 +583,8 @@ public enum ZcashErrorCode: String {
     case giftCardLinkInvalidBirthday = "ZGIFT0009"
     /// The gift card link is malformed: a field is missing, repeated or invalid, the key is not
     case giftCardLinkInvalid = "ZGIFT0010"
+    /// The gift card recipient must be a unified address with an Orchard receiver.
+    case giftCardRecipientRequiresOrchard = "ZGIFT0013"
     /// Attempt to init TxId with input that is not 32 bytes.
     case txIdNot32Bytes = "ZMODEL0001"
     /// Attempt to init TxId with invalid hex encoding.

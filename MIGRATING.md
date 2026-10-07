@@ -1,5 +1,24 @@
 # Migrating from previous versions to _Unreleased_
 
+## Gift-card redemption requires an Orchard receiver
+
+Both `GiftCardRedeemer.redeem(to:memo:)` and `redeem(to:memo:recordIn:)` keep their signatures,
+but now reject a unified address without an Orchard receiver before proposing or creating a
+claim. Pass a same-network Orchard-capable unified address: Orchard-only addresses and addresses
+with Orchard plus Sapling or transparent receivers are accepted unchanged.
+
+Handle the new `ZcashError.giftCardRecipientRequiresOrchard` / `ZcashErrorCode.giftCardRecipientRequiresOrchard`
+case (`ZGIFT0013`) in exhaustive switches. Its safe message asks for an Orchard receiver and carries
+no address or key data. The existing cleaned-up, not-ready and network-mismatch errors keep
+precedence.
+
+`check()` previews the proposal-derived fee and amount for current notes and chain height using
+the card's Orchard-only address. Show `GiftCardStatus.redeemable` before redeeming; use
+`Redemption.amount` and `Redemption.fee` from the actual proposal afterwards. Later note or chain
+changes can change that outcome. Input selection is unchanged, so an Orchard recipient alone
+does not guarantee that Sapling parameters will be unnecessary: the actual proposal must have
+no Sapling inputs or outputs.
+
 ## `TxId` validates its length — `init(_: [UInt8])` throws
 
 `TxId.init(_ id: [UInt8])` now throws `ZcashError.txIdNot32Bytes` for anything but 32 bytes,
