@@ -566,6 +566,150 @@ final class GiftCardCleanupTests: ZcashTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
     }
 
+    func testCleanupDisposesActualCachedTorConnectionsBeforeFinalRuntimeAndRootRemoval() async throws {
+        let clock = GiftCardCleanupTestClock()
+        defer { clock.dispose() }
+        let runtimes = TorTestRuntimes()
+        let events = CleanupEvents()
+        let card = try GiftCard(link: GiftCardTests.zodlTestnetLink)
+        let root = testTempDirectory.appendingPathComponent(card.synchronizerAlias.description)
+        let marker = root.appendingPathComponent("cached-tor-owner")
+        var native = TorHTTPGetNative()
+        native.createRuntime = { _, _ in
+            XCTFail("Gift cleanup must not create a runtime")
+            return nil
+        }
+        native.isolateRuntime = { _ in
+            XCTFail("Gift cleanup must not isolate a runtime")
+            return nil
+        }
+        native.get = { _, _, _, _, _, _ in
+            XCTFail("Gift cleanup must not send traffic")
+            return nil
+        }
+        native.connectLightwalletd = { pointer, _ in
+            XCTAssertTrue(runtimes.isAlive(pointer))
+            if events.appendOnce("connect:default") { return OpaquePointer(bitPattern: 2) }
+            events.append("connect:group")
+            return OpaquePointer(bitPattern: 3)
+        }
+        native.freeLightwalletd = { pointer in
+            XCTAssertTrue(events.events.contains("engine:close"), "Cache owners must survive until safe wipe")
+            XCTAssertTrue(runtimes.isAlive(runtimes.parent), "Cache owners must be freed before the root runtime")
+            XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+            if pointer == OpaquePointer(bitPattern: 2) {
+                events.append("free:default")
+            } else {
+                XCTAssertEqual(pointer, OpaquePointer(bitPattern: 3))
+                events.append("free:group")
+            }
+        }
+        native.freeRuntime = { pointer in
+            XCTAssertEqual(events.events.filter { $0 == "free:default" }.count, 1)
+            XCTAssertEqual(events.events.filter { $0 == "free:group" }.count, 1)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+            events.append("free:runtime")
+            runtimes.free(pointer)
+        }
+        let tor = TorClient(runtimePtr: runtimes.parent, torDir: root.appendingPathComponent("tor"), httpGetNative: native)
+        let fixture = try await GiftCardCancellationFixture.make(
+            storageDirectory: testTempDirectory,
+            cleanupTiming: clock.timing,
+            torClient: tor
+        )
+        defer { fixture.engine.stopGate.open() }
+        _ = try await fixture.redeemer.check()
+        try Data([1]).write(to: marker)
+        // Seed the real retained service caches without sending RPC traffic through synthetic pointers.
+        let service = LightWalletGRPCServiceOverTor(endpoint: LightWalletEndpointBuilder.default, tor: tor)
+        fixture.initializer.lightWalletService = service
+        _ = try await service.serviceConnections.connectToLightwalletd(.defaultTor)
+        _ = try await service.serviceConnections.connectToLightwalletd(.torInGroup("card-test"))
+        _ = try await service.serviceConnections.connectToLightwalletd(.defaultTor)
+        _ = try await service.serviceConnections.connectToLightwalletd(.torInGroup("card-test"))
+        XCTAssertEqual(events.events, ["connect:default", "connect:group"])
+        await fixture.engine.onCall("close") { events.append("engine:close") }
+
+        fixture.engine.stopQuiescent = false
+        do {
+            try await fixture.redeemer.cleanup()
+            XCTFail("Refused wipe must retain the cached native owners")
+        } catch {
+            XCTAssertEqual(error as? ZcashError, .slipstreamEngineNotQuiescent)
+        }
+        XCTAssertEqual(events.events, ["connect:default", "connect:group"])
+        XCTAssertTrue(runtimes.isAlive(runtimes.parent))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+        assertAlreadyActive(card: card)
+        XCTAssertEqual(try GiftCardRedeemer.removeLeftoverWallets(in: testTempDirectory), 0)
+
+        fixture.engine.stopQuiescent = true
+        fixture.engine.stopGate.close()
+        let stopEntered = XCTestExpectation(description: "safe cleanup attempt reached engine stop")
+        await fixture.engine.onCall("stop") { stopEntered.fulfill() }
+        let cleanup = startCleanup(fixture.redeemer)
+        await fulfillment(of: [stopEntered], timeout: 5)
+        cleanup.cancel()
+        do {
+            try await cleanup.value
+            XCTFail("Cancelled caller must detach from the owned cache teardown")
+        } catch is CancellationError {
+        }
+        XCTAssertEqual(events.events, ["connect:default", "connect:group"])
+        XCTAssertTrue(runtimes.isAlive(runtimes.parent))
+        assertAlreadyActive(card: card)
+        fixture.engine.stopGate.open()
+        try await waitForRelease(card: card)
+        try await fixture.redeemer.cleanup()
+        XCTAssertEqual(Set(events.events), Set([
+            "connect:default", "connect:group", "engine:close", "free:default", "free:group", "free:runtime"
+        ]))
+        XCTAssertEqual(events.events.count, 6)
+        XCTAssertFalse(runtimes.isAlive(runtimes.parent))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+
+        let replacement = try makeReplacement(card: card)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let replacementMarker = root.appendingPathComponent("replacement-after-tor")
+        try Data([2]).write(to: replacementMarker)
+        try await fixture.redeemer.cleanup()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: replacementMarker.path))
+        XCTAssertEqual(events.events.count, 6, "Repeated cleanup must not dispose an owner twice")
+        withExtendedLifetime(replacement) {}
+    }
+
+    func testUnusedCleanupWithActualServiceCreatesNoRuntimeOrConnection() async throws {
+        let events = CleanupEvents()
+        var native = TorHTTPGetNative()
+        native.createRuntime = { _, _ in
+            events.append("create")
+            return nil
+        }
+        native.connectLightwalletd = { _, _ in
+            events.append("connect")
+            return nil
+        }
+        native.isolateRuntime = { _ in
+            events.append("isolate")
+            return nil
+        }
+        native.get = { _, _, _, _, _, _ in
+            events.append("get")
+            return nil
+        }
+        native.freeRuntime = { _ in events.append("free:runtime") }
+        native.freeLightwalletd = { _ in events.append("free:connection") }
+        let torDirectory = testTempDirectory.appendingPathComponent("unused-native-tor")
+        let tor = TorClient(torDir: torDirectory, httpGetNative: native)
+        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory, torClient: tor)
+        let service = LightWalletGRPCServiceOverTor(endpoint: LightWalletEndpointBuilder.default, tor: tor)
+        fixture.initializer.lightWalletService = service
+        try await fixture.redeemer.cleanup()
+        try await fixture.redeemer.cleanup()
+        XCTAssertTrue(events.events.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: torDirectory.path))
+    }
+
     private func startCleanup(_ redeemer: GiftCardRedeemer) -> Task<Void, Error> {
         Task { try await redeemer.cleanup() }
     }

@@ -13,7 +13,7 @@ final class CompactBlockProcessorCleanupTests: ZcashTestCase {
     }
 
     private func assertLateDownloadIsDrained(wipe: Bool) async throws {
-        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+        let fixture = try await ClassicProcessorCleanupFixture.make(storageDirectory: testTempDirectory)
         let processor = fixture.synchronizer.blockProcessor
         let actionEntered = XCTestExpectation(description: "real download action suspended before admission")
         let drainEntered = XCTestExpectation(description: "initial action stop completed without a downloader")
@@ -115,12 +115,12 @@ final class CompactBlockProcessorCleanupTests: ZcashTestCase {
         let trace = events.events
         XCTAssertLessThan(try XCTUnwrap(trace.firstIndex(of: "writer:exited")), try XCTUnwrap(trace.firstIndex(of: "completed")))
         withExtendedLifetime(subscription) { }
-        try await fixture.redeemer.cleanup()
+        try await fixture.cleanup()
     }
 
     func testCleanupCompletesWhenCancelledFinalActionReturnsNormally() async throws {
-        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
-        _ = try await fixture.redeemer.check()
+        let fixture = try await ClassicProcessorCleanupFixture.make(storageDirectory: testTempDirectory)
+        try fixture.prepareRoot()
         let processor = fixture.synchronizer.blockProcessor
         let entered = XCTestExpectation(description: "real final action entered")
         let admitted = XCTestExpectation(description: "teardown stopped downloader")
@@ -140,11 +140,11 @@ final class CompactBlockProcessorCleanupTests: ZcashTestCase {
         }
         let cleanup = Task {
             defer { finished.fulfill() }
-            try await fixture.redeemer.cleanup()
+            try await fixture.cleanup()
         }
         await fulfillment(of: [admitted], timeout: 5)
         cleanup.cancel()
-        let root = testTempDirectory.appendingPathComponent(fixture.card.synchronizerAlias.description)
+        let root = fixture.rootDirectory
         XCTAssertTrue(FileManager.default.fileExists(atPath: root.path))
         XCTAssertEqual(fixture.storage.clearCallsCount, 0)
         await gate.open()
@@ -154,8 +154,8 @@ final class CompactBlockProcessorCleanupTests: ZcashTestCase {
         try await cleanup.value
         XCTAssertEqual(fixture.storage.clearCallsCount, 1)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
-        let replacement = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
-        try await replacement.redeemer.cleanup()
+        let replacement = try await ClassicProcessorCleanupFixture.make(storageDirectory: testTempDirectory)
+        try await replacement.cleanup()
     }
 
     func testIdleWipeWaitsForMempoolDatabaseWrite() async throws {
@@ -175,7 +175,7 @@ final class CompactBlockProcessorCleanupTests: ZcashTestCase {
     }
 
     func testConcurrentWipesCompleteEveryCallerOnce() async throws {
-        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+        let fixture = try await ClassicProcessorCleanupFixture.make(storageDirectory: testTempDirectory)
         let processor = fixture.synchronizer.blockProcessor
         let entered = XCTestExpectation(description: "wipe holds storage")
         let gate = GiftCardOperationGate()
@@ -211,11 +211,11 @@ final class CompactBlockProcessorCleanupTests: ZcashTestCase {
         try await secondOperation.value
         XCTAssertEqual(events.events.filter { $0 == "done1" }.count, 1)
         XCTAssertEqual(events.events.filter { $0 == "done2" }.count, 1)
-        try await fixture.redeemer.cleanup()
+        try await fixture.cleanup()
     }
 
     func testStartDuringWipeCannotCreateReplacementTasks() async throws {
-        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+        let fixture = try await ClassicProcessorCleanupFixture.make(storageDirectory: testTempDirectory)
         let processor = fixture.synchronizer.blockProcessor
         let entered = XCTestExpectation(description: "wipe entered")
         let finished = XCTestExpectation(description: "wipe finished")
@@ -248,7 +248,7 @@ final class CompactBlockProcessorCleanupTests: ZcashTestCase {
         await processor.start()
         await fulfillment(of: [fresh], timeout: 5)
         fixture.storage.clearClosure = { }
-        let cleanup = Task { try await fixture.redeemer.cleanup() }
+        let cleanup = Task { try await fixture.cleanup() }
         let cleanupFinished = XCTestExpectation(description: "final cleanup finished")
         Task { _ = try? await cleanup.value
             cleanupFinished.fulfill()
@@ -259,8 +259,8 @@ final class CompactBlockProcessorCleanupTests: ZcashTestCase {
     }
 
     func testCleanupWaitsForAlreadyAdmittedTimerServiceCall() async throws {
-        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
-        _ = try await fixture.redeemer.check()
+        let fixture = try await ClassicProcessorCleanupFixture.make(storageDirectory: testTempDirectory)
+        try fixture.prepareRoot()
         let processor = fixture.synchronizer.blockProcessor
         let actionEntered = XCTestExpectation(description: "final action held")
         let pollEntered = XCTestExpectation(description: "real timer poll held")
@@ -300,7 +300,7 @@ final class CompactBlockProcessorCleanupTests: ZcashTestCase {
         }
         let cleanup = Task {
             defer { finished.fulfill() }
-            try await fixture.redeemer.cleanup()
+            try await fixture.cleanup()
         }
         await fulfillment(of: [admitted], timeout: 5)
         // The cancellation event is a positive owner checkpoint. The negative
@@ -314,7 +314,7 @@ final class CompactBlockProcessorCleanupTests: ZcashTestCase {
     }
 
     func testAwaitedStopCompletesQueuedRewindsAndSupersedesAutomaticRestart() async throws {
-        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+        let fixture = try await ClassicProcessorCleanupFixture.make(storageDirectory: testTempDirectory)
         let processor = fixture.synchronizer.blockProcessor
         let entered = XCTestExpectation(description: "action entered")
         let admitted = XCTestExpectation(description: "stop admitted")
@@ -360,11 +360,11 @@ final class CompactBlockProcessorCleanupTests: ZcashTestCase {
         let freshSync = await processor.syncTask
         _ = try await freshSync?.value
         XCTAssertEqual(events.events.filter { $0 == "start" }.count, 2)
-        try await fixture.redeemer.cleanup()
+        try await fixture.cleanup()
     }
 
     func testWipeAdmittedFromOrdinaryTerminalErrorCallbackCompletes() async throws {
-        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+        let fixture = try await ClassicProcessorCleanupFixture.make(storageDirectory: testTempDirectory)
         let processor = fixture.synchronizer.blockProcessor
         let finished = XCTestExpectation(description: "wipe after terminal error")
         fixture.service.getInfoModeThrowableError = ZcashError.synchronizerNotPrepared
@@ -379,11 +379,11 @@ final class CompactBlockProcessorCleanupTests: ZcashTestCase {
         await processor.start()
         await fulfillment(of: [finished], timeout: 5)
         XCTAssertEqual(fixture.storage.clearCallsCount, 1)
-        try await fixture.redeemer.cleanup()
+        try await fixture.cleanup()
     }
 
     func testWipeKeepsAdmissionClosedUntilEveryTerminalCallbackReturns() async throws {
-        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+        let fixture = try await ClassicProcessorCleanupFixture.make(storageDirectory: testTempDirectory)
         let processor = fixture.synchronizer.blockProcessor
         let entered = XCTestExpectation(description: "first terminal callback held")
         let joined = XCTestExpectation(description: "second wipe joined")
@@ -405,11 +405,11 @@ final class CompactBlockProcessorCleanupTests: ZcashTestCase {
         await fulfillment(of: [secondDone], timeout: 5)
         await processor.stopAndWait()
         XCTAssertEqual(fixture.storage.clearCallsCount, 1)
-        try await fixture.redeemer.cleanup()
+        try await fixture.cleanup()
     }
 
     func testInternalRequestStopPreservesQueuedRestartWithoutJoiningItself() async throws {
-        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+        let fixture = try await ClassicProcessorCleanupFixture.make(storageDirectory: testTempDirectory)
         let processor = fixture.synchronizer.blockProcessor
         let entered = XCTestExpectation(description: "first action held")
         let restarted = XCTestExpectation(description: "queued internal restart admitted")
@@ -436,7 +436,7 @@ final class CompactBlockProcessorCleanupTests: ZcashTestCase {
         await gate.open()
         let result = await XCTWaiter.fulfillment(of: [restarted], timeout: 5)
         XCTAssertEqual(result, .completed)
-        try await fixture.redeemer.cleanup()
+        try await fixture.cleanup()
     }
 
     func testIdleBackendRewindIsJoinedBeforeCleanupCanWipeOrRemoveRoot() async throws {
@@ -448,7 +448,7 @@ final class CompactBlockProcessorCleanupTests: ZcashTestCase {
     }
 
     func testRewindQueuedByOrdinaryFailureCallbackCompletesWithoutAnotherOperation() async throws {
-        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+        let fixture = try await ClassicProcessorCleanupFixture.make(storageDirectory: testTempDirectory)
         let processor = fixture.synchronizer.blockProcessor
         let queued = XCTestExpectation(description: "ordinary failure queued rewind")
         let completed = XCTestExpectation(description: "queued rewind completed")
@@ -473,11 +473,11 @@ final class CompactBlockProcessorCleanupTests: ZcashTestCase {
         // Cleanup follows the bounded observation; it cannot supply the missing
         // completion that this regression requires from the ordinary-error exit.
         XCTAssertEqual(events.events, ["storage:rewind", "completion"])
-        try await fixture.redeemer.cleanup()
+        try await fixture.cleanup()
     }
 
     func testPublicRewindDuringSuspendedOrdinaryFailureCallbackCompletesWithoutAnotherOperation() async throws {
-        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+        let fixture = try await ClassicProcessorCleanupFixture.make(storageDirectory: testTempDirectory)
         let processor = fixture.synchronizer.blockProcessor
         let failed = XCTestExpectation(description: "ordinary failure callback held")
         let completed = XCTestExpectation(description: "public rewind completed")
@@ -511,11 +511,11 @@ final class CompactBlockProcessorCleanupTests: ZcashTestCase {
         XCTAssertEqual(result, .completed)
         XCTAssertEqual(events.events.filter { $0 == "completion" }.count, 1)
         withExtendedLifetime(subscription) { }
-        try await fixture.redeemer.cleanup()
+        try await fixture.cleanup()
     }
 
     func testRewindRacingWipeCannotAdmitWriterOrResetLaterStart() async throws {
-        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+        let fixture = try await ClassicProcessorCleanupFixture.make(storageDirectory: testTempDirectory)
         let processor = fixture.synchronizer.blockProcessor
         let entered = XCTestExpectation(description: "wipe holds storage")
         let wiped = XCTestExpectation(description: "wipe terminal")
@@ -555,12 +555,12 @@ final class CompactBlockProcessorCleanupTests: ZcashTestCase {
         XCTAssertFalse(events.events.contains("stale:backend"))
         XCTAssertFalse(events.events.contains("stale:storage"))
         fixture.storage.clearClosure = { }
-        try await fixture.redeemer.cleanup()
+        try await fixture.cleanup()
     }
 
     private func assertIdleRewindIsJoined(holdStorage: Bool) async throws {
-        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
-        _ = try await fixture.redeemer.check()
+        let fixture = try await ClassicProcessorCleanupFixture.make(storageDirectory: testTempDirectory)
+        try fixture.prepareRoot()
         let processor = fixture.synchronizer.blockProcessor
         let entered = XCTestExpectation(description: "idle rewind writer held")
         let admitted = XCTestExpectation(description: "external drain admitted")
@@ -620,12 +620,12 @@ final class CompactBlockProcessorCleanupTests: ZcashTestCase {
         await fulfillment(of: [admitted], timeout: 5)
         let cleanup = Task {
             defer { cleanupFinished.fulfill() }
-            try await fixture.redeemer.cleanup()
+            try await fixture.cleanup()
         }
         await fulfillment(of: [prematureStop], timeout: 0.1)
         XCTAssertFalse(events.events.contains("prewipe"))
         XCTAssertFalse(events.events.contains("clear"))
-        let root = testTempDirectory.appendingPathComponent(fixture.card.synchronizerAlias.description)
+        let root = fixture.rootDirectory
         XCTAssertTrue(FileManager.default.fileExists(atPath: root.path))
         events.append("released")
         await gate.open()
@@ -641,8 +641,8 @@ final class CompactBlockProcessorCleanupTests: ZcashTestCase {
     }
 
     private func assertIdleWipeWaitsForMempool(wipeFails: Bool) async throws {
-        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
-        _ = try await fixture.redeemer.check()
+        let fixture = try await ClassicProcessorCleanupFixture.make(storageDirectory: testTempDirectory)
+        try fixture.prepareRoot()
         let processor = fixture.synchronizer.blockProcessor
         let syncFinished = XCTestExpectation(description: "normal sync finished")
         let writerEntered = XCTestExpectation(description: "mempool writer entered")
@@ -685,10 +685,10 @@ final class CompactBlockProcessorCleanupTests: ZcashTestCase {
         }
         let cleanup = Task {
             defer { cleanupFinished.fulfill() }
-            try await fixture.redeemer.cleanup()
+            try await fixture.cleanup()
         }
         await fulfillment(of: [stopped], timeout: 5)
-        let root = testTempDirectory.appendingPathComponent(fixture.card.synchronizerAlias.description)
+        let root = fixture.rootDirectory
         XCTAssertFalse(events.events.contains("prewipe"))
         XCTAssertFalse(events.events.contains("clear"))
         XCTAssertTrue(FileManager.default.fileExists(atPath: root.path))
@@ -701,7 +701,7 @@ final class CompactBlockProcessorCleanupTests: ZcashTestCase {
     }
 
     private func assertWipeAfterActionError(_ error: Error) async throws {
-        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+        let fixture = try await ClassicProcessorCleanupFixture.make(storageDirectory: testTempDirectory)
         let processor = fixture.synchronizer.blockProcessor
         let entered = XCTestExpectation(description: "backend action entered")
         let stopped = XCTestExpectation(description: "wipe requested stop")
@@ -727,7 +727,7 @@ final class CompactBlockProcessorCleanupTests: ZcashTestCase {
         try await operation.value
         XCTAssertEqual(fixture.service.getInfoModeCallsCount, 1, "cancellation must win over service retry")
         XCTAssertEqual(fixture.service.closeConnectionsCallsCount, 0, "cancelled service errors must not reset connections for retries")
-        try await fixture.redeemer.cleanup()
+        try await fixture.cleanup()
     }
 
     private func routeToFinalAction(_ processor: CompactBlockProcessor) async {
@@ -744,7 +744,8 @@ final class CleanupEvents: @unchecked Sendable {
     private var values: [String] = []
     var events: [String] { lock.withLock { values } }
     func append(_ value: String) { lock.withLock { values.append(value) } }
-    @discardableResult func appendOnce(_ value: String) -> Bool {
+    @discardableResult
+    func appendOnce(_ value: String) -> Bool {
         lock.withLock {
             guard !values.contains(value) else { return false }
             values.append(value)
