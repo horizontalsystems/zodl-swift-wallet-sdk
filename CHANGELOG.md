@@ -189,7 +189,7 @@ Mainnet
 ````
 Sources/ZcashLightClientKit/Resources/checkpoints/mainnet/3485000.json
 ...
-Sources/ZcashLightClientKit/Resources/checkpoints/mainnet/3505000.json
+Sources/ZcashLightClientKit/Resources/checkpoints/mainnet/3507500.json
 ````
 
 Testnet
@@ -197,7 +197,7 @@ Testnet
 ````
 Sources/ZcashLightClientKit/Resources/checkpoints/testnet/4360000.json
 ...
-Sources/ZcashLightClientKit/Resources/checkpoints/testnet/4460000.json
+Sources/ZcashLightClientKit/Resources/checkpoints/testnet/4470000.json
 ````
 
 # 5.0.0 - 2026-09-23
