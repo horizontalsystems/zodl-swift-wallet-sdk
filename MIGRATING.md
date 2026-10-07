@@ -1,5 +1,25 @@
 # Migrating from previous versions to _Unreleased_
 
+## Gift-card checks require coherent balances
+
+`check()` now waits for an up-to-date snapshot with a positive chain tip, scan coverage through
+that tip, and the card account present. A funded snapshot returns immediately. Empty snapshots
+must stay coherent for 15 seconds direct or 30 seconds with Tor; readiness loss and tip changes
+restart that interval. Temporary disconnects receive 60 seconds direct or 120 seconds with Tor
+before failing. These intervals remain within the overall 600-second caller budget.
+
+Add the payload-free errors to exhaustive `ZcashError` and `ZcashErrorCode` switches:
+
+```swift
+case .giftCardCheckDisconnected, .giftCardCheckSyncStalled:
+    // Balance is unknown. Offer a later check and keep normal cleanup ownership.
+    break
+```
+
+The stable codes are `ZGIFT0015` and `ZGIFT0016`. A terminal host stall fails immediately;
+recoverable stall notifications continue waiting. Cancellation, timeout, disconnect and stall
+never establish that the card is empty. Public initializer and `check()` call syntax are unchanged.
+
 ## Gift-card checks have a bounded caller wait
 
 `GiftCardRedeemer.check()` and its public initializer keep their existing call syntax. Each check

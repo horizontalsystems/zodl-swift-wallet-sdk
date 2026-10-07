@@ -1176,6 +1176,12 @@ enum ZcashErrorDefinition {
     /// The gift-card check did not finish in time. Cleanup still owns unfinished wallet work.
     // sourcery: code="ZGIFT0014"
     case giftCardCheckTimedOut
+    /// The gift-card check could not reconnect in time. The card balance is still unknown.
+    // sourcery: code="ZGIFT0015"
+    case giftCardCheckDisconnected
+    /// The gift-card wallet stopped making progress. The card balance is still unknown.
+    // sourcery: code="ZGIFT0016"
+    case giftCardCheckSyncStalled
 
     // MARK: - Models
 

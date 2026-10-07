@@ -292,6 +292,7 @@ struct GiftCardCancellationFixture {
         storageDirectory: URL,
         cardLink: String = GiftCardTests.zodlTestnetLink,
         spendableValue: Zatoshi = Zatoshi(50_000),
+        chainTip: UInt64 = 3_000_010,
         isTorEnabled: Bool = false,
         cleanupTiming: GiftCardCleanupTiming = .live,
         checkTiming: GiftCardCleanupTiming = .live,
@@ -347,6 +348,7 @@ struct GiftCardCancellationFixture {
         service.submitSpendTransactionModeReturnValue = SendResponse()
         let repository = TransactionRepositoryMock()
         repository.closeDBConnectionClosure = {}
+        repository.findForResubmissionUpToReturnValue = []
         repository.findRawIDReturnValue = TestsData(networkType: .testnet).pendingTransactionEntity
         let storage = CompactBlockRepositoryMock()
         storage.createClosure = {}
@@ -369,7 +371,7 @@ struct GiftCardCancellationFixture {
         )
         await engine.setSnapshotOnStart(
             SlipstreamSnapshot(
-                chainTip: 0,
+                chainTip: chainTip,
                 fetchedBlocks: 0,
                 scannedBlocks: 0,
                 enhancedTxs: 0,

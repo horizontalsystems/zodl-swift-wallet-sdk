@@ -96,28 +96,23 @@ final class GiftCardCleanupTests: ZcashTestCase {
             storageDirectory: testTempDirectory,
             cleanupTiming: clock.timing
         )
+        let reading = XCTestExpectation(description: "background resubmission entered repository read")
+        let cancelled = XCTestExpectation(description: "wipe cancelled background resubmission")
+        fixture.repository.findForResubmissionUpToClosure = { _ in
+            await withTaskCancellationHandler {
+                reading.fulfill()
+                await gate.wait()
+                return []
+            } onCancel: {
+                cancelled.fulfill()
+            }
+        }
+
         do {
             _ = try await fixture.redeemer.check()
             let root = testTempDirectory.appendingPathComponent(fixture.card.synchronizerAlias.description)
             let marker = root.appendingPathComponent("resubmission-marker")
             try Data([1]).write(to: marker)
-            let reading = XCTestExpectation(description: "background resubmission entered repository read")
-            let cancelled = XCTestExpectation(description: "wipe cancelled background resubmission")
-            fixture.repository.findForResubmissionUpToClosure = { _ in
-                await withTaskCancellationHandler {
-                    reading.fulfill()
-                    await gate.wait()
-                    return []
-                } onCancel: {
-                    cancelled.fulfill()
-                }
-            }
-
-            await fixture.synchronizer.maybeRunTxResubmission(
-                state: 1,
-                chainTip: 3_000_010,
-                isCancelled: false
-            )
             await fulfillment(of: [reading], timeout: 5)
             let cleanup = startCleanup(fixture.redeemer)
             await fulfillment(of: [cancelled, clock.expectSleep(at: 30_000_000_000)], timeout: 5)

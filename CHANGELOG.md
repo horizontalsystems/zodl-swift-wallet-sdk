@@ -8,6 +8,11 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Added
 
+- Gift-card checks accept balances only from a known positive tip with complete scan coverage
+  and the card account present. Empty balances settle for 15 seconds direct / 30 seconds with Tor,
+  resetting when readiness or the tip changes. Disconnects may recover for 60 seconds direct /
+  120 seconds with Tor; expiry throws `giftCardCheckDisconnected` (`ZGIFT0015`). Terminal sync
+  stalls throw `giftCardCheckSyncStalled` (`ZGIFT0016`). Both leave the card balance unknown.
 - `GiftCardRedeemer.check()` keeps its public call syntax and bounds each caller to 600 seconds
   from method entry, including queued time and wallet preparation. Expiry throws the payload-free
   `giftCardCheckTimedOut` (`ZGIFT0014`), and cancellation returns `CancellationError` without waiting

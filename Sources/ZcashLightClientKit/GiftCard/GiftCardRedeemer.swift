@@ -341,11 +341,17 @@ public actor GiftCardRedeemer {
     /// Creates (on first use) and syncs the card wallet, then reports what the card holds.
     ///
     /// The first call restores the card wallet from the card's birthday, which downloads and scans
-    /// the blocks since then. It returns once the wallet is up to date. The caller has a 600-second
-    /// monotonic budget from method entry, including queued time and preparation. Cancellation or
+    /// the blocks since then. A balance is accepted only from an up-to-date snapshot with a known
+    /// positive chain tip, complete scan coverage through that tip, and the card account present.
+    /// Funded balances return immediately. Zero must remain coherent for 15 seconds direct or
+    /// 30 seconds with Tor; syncing, lost coverage, a missing account or a changed tip resets it.
+    /// A disconnected wallet may recover for 60 seconds direct or 120 seconds with Tor. A terminal
+    /// sync stall fails the check. These failures leave the balance unknown.
+    /// The caller has a 600-second monotonic budget from method entry, including queued time and
+    /// preparation. Cancellation or
     /// expiry requests cancellation of unfinished work and returns without waiting for that work
     /// to drain. Cleanup still joins it before wiping or releasing the card's alias.
-    /// A timeout does not mean the card is empty or cleanup has completed.
+    /// A timeout, disconnect or terminal stall does not mean the card is empty or cleanup has completed.
     ///
     /// When the card has spendable funds, this also proposes, without creating anything, the
     /// transaction that would sweep them, so that the fee their notes require decides: when it
@@ -359,7 +365,9 @@ public actor GiftCardRedeemer {
     /// - Returns: the card's balance and whether it can be redeemed now.
     /// - Throws: the sync error if the card wallet cannot sync (for instance, the server is
     ///   unreachable), `CancellationError` if the calling task is cancelled,
-    ///   ``ZcashError/giftCardCheckTimedOut`` if the caller's budget expires, and
+    ///   ``ZcashError/giftCardCheckTimedOut`` if the caller's budget expires,
+    ///   ``ZcashError/giftCardCheckDisconnected`` after continuous disconnect grace expires,
+    ///   ``ZcashError/giftCardCheckSyncStalled`` when host recovery gives up, and
     ///   ``ZcashError/giftCardRedeemerCleanedUp`` after ``cleanup()``.
     public nonisolated func check() async throws -> GiftCardStatus {
         // Timestamp before the actor hop, so queueing and preparation consume the same budget.
@@ -494,24 +502,22 @@ public actor GiftCardRedeemer {
         let accountUUID = try await prepareIfNeeded(operation: operation)
         try operation.requireActive()
 
-        let restarting: Bool
+        let start: (() async throws -> Void)?
         switch synchronizer.latestState.syncStatus {
         case .upToDate, .syncing:
-            restarting = false
+            start = nil
         case .unprepared, .stopped, .error:
-            try await synchronizer.start(retry: true)
-            restarting = true
+            start = {
+                try operation.requireActive()
+                try await self.synchronizer.start(retry: true)
+                try operation.requireActive()
+            }
         }
-        // After a restart the state stream may still replay the error that stopped the previous
-        // sync; only a later error belongs to this attempt.
-        try operation.requireActive()
-        try await waitUntilUpToDate(ignoringStaleError: restarting)
-        try operation.requireActive()
-
-        let balance = try await synchronizer.getAccountsBalances()[accountUUID]
+        let waiter = GiftCardCheckStateWaiter(accountUUID: accountUUID, policy: checkPolicy, timing: checkTiming)
+        let balance = try await waiter.wait(stateStream: synchronizer.stateStream, eventStream: synchronizer.eventStream, start: start)
         try operation.requireActive()
         var sweep: GiftCardStatus.Sweep?
-        if let spendable = balance?.shieldedSpendableValue, spendable > .zero {
+        if balance.shieldedSpendableValue > .zero {
             sweep = try await proposedSweep(accountUUID: accountUUID)
         }
         return GiftCardStatus(balance: balance, sweep: sweep)
@@ -667,30 +673,6 @@ public actor GiftCardRedeemer {
         try Task.checkCancellation()
         return account.id
     }
-
-    /// Waits until the card wallet's sync status is up to date, or throws its sync error.
-    private func waitUntilUpToDate(ignoringStaleError: Bool) async throws {
-        var stateStream = synchronizer.stateStream
-        if ignoringStaleError {
-            stateStream = stateStream
-                .drop { state in
-                    if case .error = state.syncStatus { return true }
-                    return false
-                }
-                .eraseToAnyPublisher()
-        }
-
-        let waiter = SyncWaiter()
-        // The waiter owns the subscription; keep it alive until the continuation resumes.
-        defer { withExtendedLifetime(waiter) {} }
-        try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                waiter.begin(continuation: continuation, stateStream: stateStream)
-            }
-        } onCancel: {
-            waiter.finish(.failure(CancellationError()))
-        }
-    }
 }
 
 private extension GiftCardRedeemer {
@@ -843,65 +825,6 @@ extension GiftCardRedeemer {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             waiter.begin(continuation: continuation, publisher: publisher)
         }
-    }
-}
-
-/// Resumes a continuation once, with the first of: the sync status turning up to date, the sync
-/// status turning into an error, or cancellation. The state stream delivers values on arbitrary
-/// threads, so every access is under a lock.
-private final class SyncWaiter {
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<Void, Error>?
-    private var cancellable: AnyCancellable?
-    private var outcome: Result<Void, Error>?
-
-    func begin(continuation: CheckedContinuation<Void, Error>, stateStream: AnyPublisher<SynchronizerState, Never>) {
-        lock.lock()
-        if let outcome {
-            // Cancelled before the continuation existed.
-            lock.unlock()
-            continuation.resume(with: outcome)
-            return
-        }
-        self.continuation = continuation
-        lock.unlock()
-
-        let cancellable = stateStream.sink { [weak self] state in
-            switch state.syncStatus {
-            case .upToDate:
-                self?.finish(.success(()))
-            case .error(let error):
-                self?.finish(.failure(error))
-            case .unprepared, .syncing, .stopped:
-                break
-            }
-        }
-
-        lock.lock()
-        if outcome == nil {
-            self.cancellable = cancellable
-            lock.unlock()
-        } else {
-            lock.unlock()
-            cancellable.cancel()
-        }
-    }
-
-    func finish(_ result: Result<Void, Error>) {
-        lock.lock()
-        guard outcome == nil else {
-            lock.unlock()
-            return
-        }
-        outcome = result
-        let continuation = self.continuation
-        self.continuation = nil
-        let cancellable = self.cancellable
-        self.cancellable = nil
-        lock.unlock()
-
-        cancellable?.cancel()
-        continuation?.resume(with: result)
     }
 }
 
