@@ -35,11 +35,8 @@ use transparent::{
     keys::TransparentKeyScope,
 };
 use zcash_address::ZcashAddress;
-use zcash_address::unified::{
-    Container as _, Encoding as _, Fvk, Ivk, Receiver, Revision, Ufvk, Uitem, Uivk,
-};
 use zcash_client_backend::{
-    address::{Address, UnifiedAddress},
+    address::Address,
     data_api::{
         Account, AccountBirthday, AccountPurpose, CoinbaseFilter, InputSource, MaxSpendMode,
         SeedRelevance, TransactionDataRequest, TransactionStatus, TransparentKeyOrigin,
@@ -59,7 +56,7 @@ use zcash_client_backend::{
     fees::{DustOutputPolicy, SplitPolicy, StandardFeeRule, zip317::MultiOutputChangeStrategy},
     keys::{
         DecodingError, Era, ReceiverRequirement, ReceiverRequirementError, UnifiedAddressRequest,
-        UnifiedFullViewingKey, UnifiedIncomingViewingKey, UnifiedSpendingKey,
+        UnifiedFullViewingKey, UnifiedSpendingKey,
     },
     proto::{proposal::Proposal, service::TreeState},
     tor::http::{HttpError, cryptex},
@@ -103,7 +100,6 @@ mod error_report;
 mod ext_schema;
 mod ffi;
 mod interactive_qos;
-mod legacy_ufvk;
 mod migration;
 mod migration_engine;
 mod migration_finalize;
@@ -236,120 +232,6 @@ fn block_db(fsblock_db: *const u8, fsblock_db_len: usize) -> anyhow::Result<FsBl
     }));
     FsBlockDb::for_path(cache_db)
         .map_err(|e| anyhow!("Error opening block source database connection: {}", e))
-}
-
-/// Encodes a unified full viewing key at ZIP 316 revision 0, for the given network, with every
-/// item `zcash_keys`'s own encoder gave it.
-///
-/// `zcash_keys`'s own [`UnifiedFullViewingKey::encode`] produces revision 2 unconditionally on
-/// the NU7 crates. Ledger and Keystone still produce revision 0, and Swift compares these
-/// strings raw against those and against values already stored, so this reproduces the string
-/// the SDK handed Swift before the move. `zcash_keys`'s own item builder (`to_ufvk`) is private,
-/// so this takes the string `encode` already produced, decodes it back with `zcash_address`, and
-/// re-encodes the same parsed items — whatever they are, known or not — at revision 0.
-///
-/// Falls back to the revision 2 string unchanged for a key revision 0 cannot hold: one with
-/// expiry metadata, a P2SH viewing-key item (`Fvk::P2sh`, specified only for revision 2), or no
-/// Orchard or Sapling item (revision 0 requires a shielded item).
-pub(crate) fn encode_ufvk_r0(ufvk: &UnifiedFullViewingKey, network: &impl Parameters) -> String {
-    let r2 = ufvk.encode(network);
-    let (_, _, container) =
-        Ufvk::decode(&r2).expect("zcash_keys just encoded this string, so it must decode");
-    let items = container.items_as_parsed();
-
-    let has_metadata = items.iter().any(|item| matches!(item, Uitem::Metadata(_)));
-    let has_p2sh_item = items
-        .iter()
-        .any(|item| matches!(item, Uitem::Data(Fvk::P2sh(_))));
-    let has_shielded_item = items.iter().any(|item| {
-        matches!(
-            item,
-            Uitem::Data(Fvk::Orchard(_)) | Uitem::Data(Fvk::Sapling(_))
-        )
-    });
-
-    if has_metadata || has_p2sh_item || !has_shielded_item {
-        return r2;
-    }
-
-    Ufvk::try_from_items(Revision::R0, items.to_vec())
-        .expect("zcash_keys's own items, unchanged, must be valid at revision 0")
-        .encode(&network.network_type())
-}
-
-/// Encodes a unified incoming viewing key at ZIP 316 revision 0, for the given network. See
-/// [`encode_ufvk_r0`]: same method (`encode`, decode, re-encode), same revision 2 fallback.
-pub(crate) fn encode_uivk_r0(
-    uivk: &UnifiedIncomingViewingKey,
-    network: &impl Parameters,
-) -> String {
-    let r2 = uivk.encode(network);
-    let (_, _, container) =
-        Uivk::decode(&r2).expect("zcash_keys just encoded this string, so it must decode");
-    let items = container.items_as_parsed();
-
-    let has_metadata = items.iter().any(|item| matches!(item, Uitem::Metadata(_)));
-    let has_p2sh_item = items
-        .iter()
-        .any(|item| matches!(item, Uitem::Data(Ivk::P2sh(_))));
-    let has_shielded_item = items.iter().any(|item| {
-        matches!(
-            item,
-            Uitem::Data(Ivk::Orchard(_)) | Uitem::Data(Ivk::Sapling(_))
-        )
-    });
-
-    if has_metadata || has_p2sh_item || !has_shielded_item {
-        return r2;
-    }
-
-    Uivk::try_from_items(Revision::R0, items.to_vec())
-        .expect("zcash_keys's own items, unchanged, must be valid at revision 0")
-        .encode(&network.network_type())
-}
-
-/// Encodes a unified address at ZIP 316 revision 0, for the given network, with every receiver
-/// `zcash_keys`'s own encoder gave it.
-///
-/// `zcash_keys`'s own [`UnifiedAddress::encode`]/[`UnifiedAddress::to_zcash_address`] produce
-/// revision 2 unconditionally on the NU7 crates, and drop the transparent receiver whenever a
-/// shielded one is present. `getTransparentAddress` takes the transparent receiver back out of
-/// this string on the Swift side, so that drop breaks it, UTXO refresh and shielding with it;
-/// Ledger, Keystone and stored values also still compare at revision 0. This reproduces the
-/// string the SDK handed Swift before the move: it takes `zcash_keys`'s own
-/// [`UnifiedAddress::encode_receiver_preserving`] string — revision 2, but with every receiver,
-/// including transparent, never dropped — decodes it back with `zcash_address`, and re-encodes
-/// the same parsed items at revision 0.
-///
-/// Falls back to that revision 2, receiver-preserving string unchanged for an address revision 0
-/// cannot hold: one with expiry metadata, or no Orchard or Sapling receiver (revision 0 requires
-/// a shielded receiver). A P2SH *receiver* (an ordinary transparent address) is unaffected by
-/// either check; only a P2SH *viewing-key item*, which only a UFVK or UIVK can carry, is
-/// revision-2-only.
-pub(crate) fn encode_unified_address_r0(
-    address: &UnifiedAddress,
-    network: &impl Parameters,
-) -> String {
-    let r2 = address.encode_receiver_preserving(network);
-    let (_, _, container) = zcash_address::unified::Address::decode(&r2)
-        .expect("zcash_keys just encoded this string, so it must decode");
-    let items = container.items_as_parsed();
-
-    let has_metadata = items.iter().any(|item| matches!(item, Uitem::Metadata(_)));
-    let has_shielded_item = items.iter().any(|item| {
-        matches!(
-            item,
-            Uitem::Data(Receiver::Orchard(_)) | Uitem::Data(Receiver::Sapling(_))
-        )
-    });
-
-    if has_metadata || !has_shielded_item {
-        return r2;
-    }
-
-    zcash_address::unified::Address::try_from_items(Revision::R0, items.to_vec())
-        .expect("zcash_keys's own items, unchanged, must be valid at revision 0")
-        .encode(&network.network_type())
 }
 
 pub(crate) fn account_uuid_from_bytes(
@@ -533,16 +415,6 @@ pub unsafe extern "C" fn zcashlc_init_data_database(
 ) -> i32 {
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
-        {
-            // See `legacy_ufvk`: a database from before `full_account_ids` needs its stored
-            // viewing keys re-encoded, or that migration rejects the wallet's own seed.
-            let path = Path::new(OsStr::from_bytes(unsafe {
-                slice::from_raw_parts(db_data, db_data_len)
-            }));
-            let conn = rusqlite::Connection::open(path)
-                .map_err(|e| anyhow!("Error opening wallet database connection: {}", e))?;
-            legacy_ufvk::realign_legacy_ufvk_encodings(&conn, &network)?;
-        }
         let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
 
         let seed = if seed.is_null() {
@@ -648,9 +520,9 @@ pub unsafe extern "C" fn zcashlc_get_account(
         Ok(Box::into_raw(Box::new(
             db_data
                 .get_account(account_uuid)?
-                .map_or(ffi::Account::NOT_FOUND, |account| {
+                .map_or(Ok(ffi::Account::NOT_FOUND), |account| {
                     ffi::Account::from_account(&account, &network)
-                }),
+                })?,
         )))
     });
     unwrap_exc_or_null(res)
@@ -1030,7 +902,7 @@ pub unsafe extern "C" fn zcashlc_get_current_address(
             UnifiedAddressRequest::AllAvailableKeys,
         ) {
             Ok(Some(ua)) => {
-                let address_str = encode_unified_address_r0(&ua, &network);
+                let address_str = ua.encode_receiver_preserving(&network);
                 Ok(CString::new(address_str).unwrap().into_raw())
             }
             Ok(None) => Err(anyhow!(
@@ -1195,7 +1067,7 @@ pub unsafe extern "C" fn zcashlc_get_next_available_address(
 
         match db_data.get_next_available_address(account_uuid, address_request) {
             Ok(Some((ua, _))) => {
-                let address_str = encode_unified_address_r0(&ua, &network);
+                let address_str = ua.encode_receiver_preserving(&network);
                 Ok(CString::new(address_str).unwrap().into_raw())
             }
             Ok(None) => Err(anyhow!(
@@ -7560,5 +7432,54 @@ mod engine_schema_names_tests {
              resolve_recovery_nets to match. Engine DDL: {}",
             slipstream_core::reconcile::RECOVERY_BALANCE_VIEW_SQL
         );
+    }
+}
+
+/// The bundled wallet from before `zcash_client_sqlite`'s `full_account_ids` migration migrates
+/// end to end through the FFI with the seed the Swift tests use. The wallet stores its UFVK at
+/// ZIP 316 revision 0.
+#[cfg(test)]
+mod legacy_wallet_migration_tests {
+    #[test]
+    fn the_legacy_fixture_migrates_with_its_own_seed() {
+        let src = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/Tests/TestUtils/Resources/darkside_data.db"
+        );
+        let dst = std::env::temp_dir().join(format!("legacy-ufvk-{}.db", std::process::id()));
+        std::fs::copy(src, &dst).expect("the fixture copies");
+        // `Environment.seedBytes` in `Tests/TestUtils/Tests+Utils.swift`.
+        let seed = base64_seed();
+        let path = dst.to_str().unwrap().as_bytes();
+        let rc = unsafe {
+            crate::zcashlc_init_data_database(
+                path.as_ptr(),
+                path.len(),
+                seed.as_ptr(),
+                seed.len(),
+                crate::NETWORK_ID_MAINNET,
+            )
+        };
+        let conn = rusqlite::Connection::open(&dst).unwrap();
+        let columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(accounts)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let _ = std::fs::remove_file(&dst);
+        assert_eq!(rc, 0, "the fixture's own seed must be accepted");
+        assert!(
+            columns.iter().any(|c| c == "id") && columns.iter().any(|c| c == "uuid"),
+            "the accounts table must have been rebuilt by full_account_ids: {columns:?}"
+        );
+    }
+
+    fn base64_seed() -> Vec<u8> {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD
+            .decode("9VDVOZZZOWWHpZtq1Ebridp3Qeux5C+HwiRR0g7Oi7HgnMs8Gfln83+/Q1NnvClcaSwM4ADFL1uZHxypEWlWXg==")
+            .unwrap()
     }
 }

@@ -1747,9 +1747,9 @@ dependencies = [
 
 [[package]]
 name = "f4jumble"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d42773cb15447644d170be20231a3268600e0c4cea8987d013b93ac973d3cf7"
+checksum = "2cae5503f6dc8629246d7e9b3450d3712e5be20f2ed7f9fb6b67212a4f315adc"
 dependencies = [
  "blake2b_simd",
 ]
@@ -2729,7 +2729,7 @@ dependencies = [
 [[package]]
 name = "imt-tree"
 version = "0.5.4"
-source = "git+https://github.com/zodl-inc/voting-circuits?rev=1e33d48e436482e0f364ff0f9f886904f88fa515#1e33d48e436482e0f364ff0f9f886904f88fa515"
+source = "git+https://github.com/zodl-inc/voting-circuits?rev=6a399f9260ebbb278cc180a23c89dc73323ee5f5#6a399f9260ebbb278cc180a23c89dc73323ee5f5"
 dependencies = [
  "anyhow",
  "hex",
@@ -3820,9 +3820,9 @@ checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
 name = "pczt"
-version = "0.10.0-pre.0"
+version = "0.10.0-pre.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4875346691fe8d61ee4995e0be580530893f5aacf08d8fae14bfd2c0733ecb9"
+checksum = "fbb353f91d5caf22e351cc75e6c531b2a74b7cfbef5274c6ce7d1859a0ab30b4"
 dependencies = [
  "blake2b_simd",
  "bls12_381",
@@ -4009,7 +4009,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 [[package]]
 name = "pir-client"
 version = "0.7.4"
-source = "git+https://github.com/zodl-inc/vote-nullifier-pir?rev=9c62d0565f6cc963e7875f9f40822764431eeab9#9c62d0565f6cc963e7875f9f40822764431eeab9"
+source = "git+https://github.com/zodl-inc/vote-nullifier-pir?rev=74327f9073e310b2b915d30f2a3c4d7918db7778#74327f9073e310b2b915d30f2a3c4d7918db7778"
 dependencies = [
  "anyhow",
  "futures",
@@ -4026,7 +4026,7 @@ dependencies = [
 [[package]]
 name = "pir-types"
 version = "0.6.4"
-source = "git+https://github.com/zodl-inc/vote-nullifier-pir?rev=9c62d0565f6cc963e7875f9f40822764431eeab9#9c62d0565f6cc963e7875f9f40822764431eeab9"
+source = "git+https://github.com/zodl-inc/vote-nullifier-pir?rev=74327f9073e310b2b915d30f2a3c4d7918db7778#74327f9073e310b2b915d30f2a3c4d7918db7778"
 dependencies = [
  "anyhow",
  "imt-tree",
@@ -7276,7 +7276,7 @@ checksum = "6a02e4885ed3bc0f2de90ea6dd45ebcbb66dacffe03547fadbb0eeae2770887d"
 [[package]]
 name = "vote-commitment-tree"
 version = "0.6.3"
-source = "git+https://github.com/zodl-inc/zcash_voting?rev=79bab8da827ae39aa34c881743af6fe9de3c3e3b#79bab8da827ae39aa34c881743af6fe9de3c3e3b"
+source = "git+https://github.com/zodl-inc/zcash_voting?rev=9bb376295431a3c73a260ed6bbbcc870284f2db3#9bb376295431a3c73a260ed6bbbcc870284f2db3"
 dependencies = [
  "anyhow",
  "imt-tree",
@@ -7289,7 +7289,7 @@ dependencies = [
 [[package]]
 name = "vote-commitment-tree-client"
 version = "0.8.3"
-source = "git+https://github.com/zodl-inc/zcash_voting?rev=79bab8da827ae39aa34c881743af6fe9de3c3e3b#79bab8da827ae39aa34c881743af6fe9de3c3e3b"
+source = "git+https://github.com/zodl-inc/zcash_voting?rev=9bb376295431a3c73a260ed6bbbcc870284f2db3#9bb376295431a3c73a260ed6bbbcc870284f2db3"
 dependencies = [
  "base64",
  "hex",
@@ -7303,7 +7303,7 @@ dependencies = [
 [[package]]
 name = "voting-circuits"
 version = "0.12.2"
-source = "git+https://github.com/zodl-inc/voting-circuits?rev=1e33d48e436482e0f364ff0f9f886904f88fa515#1e33d48e436482e0f364ff0f9f886904f88fa515"
+source = "git+https://github.com/zodl-inc/voting-circuits?rev=6a399f9260ebbb278cc180a23c89dc73323ee5f5#6a399f9260ebbb278cc180a23c89dc73323ee5f5"
 dependencies = [
  "blake2b_simd",
  "imt-tree",
@@ -7315,7 +7315,7 @@ dependencies = [
 [[package]]
 name = "voting-crypto-deps"
 version = "0.2.4"
-source = "git+https://github.com/zodl-inc/voting-circuits?rev=1e33d48e436482e0f364ff0f9f886904f88fa515#1e33d48e436482e0f364ff0f9f886904f88fa515"
+source = "git+https://github.com/zodl-inc/voting-circuits?rev=6a399f9260ebbb278cc180a23c89dc73323ee5f5#6a399f9260ebbb278cc180a23c89dc73323ee5f5"
 dependencies = [
  "halo2_gadgets",
  "halo2_poseidon",
@@ -8138,7 +8138,7 @@ dependencies = [
 [[package]]
 name = "zakura-wallet-lib"
 version = "0.1.0-rc6"
-source = "git+https://github.com/zodl-inc/zakura-wallet-libraries?rev=8128fc437ae5c65c5e108cfacf95046714b34db8#8128fc437ae5c65c5e108cfacf95046714b34db8"
+source = "git+https://github.com/zodl-inc/zakura-wallet-libraries?rev=29fa15e0ca839d8a6807721ea7275f0994f09b72#29fa15e0ca839d8a6807721ea7275f0994f09b72"
 dependencies = [
  "orchard",
  "pczt",
@@ -8150,9 +8150,9 @@ dependencies = [
 
 [[package]]
 name = "zcash_address"
-version = "0.14.0-pre.0"
+version = "0.14.0-pre.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43e96e21e873c5a12fcd2ee6b04315e23e8ca4488cf4929c0774483dad24a995"
+checksum = "db56348a60fb82895c37475a4a3a39e9eaf47bc4267c05cad42f83b0771b18c8"
 dependencies = [
  "bech32",
  "bs58",
@@ -8164,9 +8164,9 @@ dependencies = [
 
 [[package]]
 name = "zcash_client_backend"
-version = "0.25.0-pre.0"
+version = "0.25.0-pre.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1c2ce1c0d0a353c2c4554bf547c4c41a72adfd2047a37897a50b937798f67df"
+checksum = "081a6a497f0016a4de2ef9f45cbca6d271037035f5e7614b2c16363f8c3b4a84"
 dependencies = [
  "arti-client",
  "base64",
@@ -8232,9 +8232,9 @@ dependencies = [
 
 [[package]]
 name = "zcash_client_sqlite"
-version = "0.23.0-pre.0"
+version = "0.23.0-pre.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e8954e0ebe6f1850f21e9b1da262ec214e149234db7bf424bc7816324619f2a"
+checksum = "e59202fe720b383d4340318785add4ae1870c82cd950159758d96f4f875c0fbd"
 dependencies = [
  "bip32",
  "bitflags",
@@ -8293,9 +8293,9 @@ dependencies = [
 
 [[package]]
 name = "zcash_keys"
-version = "0.17.0-pre.0"
+version = "0.17.0-pre.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2fc5f0dfdaf6eb7f6252522f7c8f013754dd1ef22aec81c5c065f8704a2af278"
+checksum = "96e6eaf9ae82ea0e40aadd35df0778f37125fb3405a25e2b1f0d6b45a9884e14"
 dependencies = [
  "bech32",
  "bip32",
@@ -8336,9 +8336,9 @@ dependencies = [
 
 [[package]]
 name = "zcash_pool_migration"
-version = "0.2.0-pre.0"
+version = "0.2.0-pre.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a04b3479f0a71ac560fdf07ca5119b1c9d1e44a42991a3c0595612fd51b46440"
+checksum = "02dba1fbb3fa84188fa248f5b282e9226434f1608b48d0f1f3139f269d0c7cd2"
 dependencies = [
  "blake2b_simd",
  "corez",
@@ -8358,9 +8358,9 @@ dependencies = [
 
 [[package]]
 name = "zcash_primitives"
-version = "0.31.0-pre.0"
+version = "0.31.0-pre.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e2f5bf9a1e5a16612cbbab5a112bcec36a3623d8585da0187dcb58a247bc078"
+checksum = "0329bee4107df1aaaaaab365bdf94fcc0d9a185165c4675dff2397c5af7d13f4"
 dependencies = [
  "blake2b_simd",
  "corez",
@@ -8387,9 +8387,9 @@ dependencies = [
 
 [[package]]
 name = "zcash_proofs"
-version = "0.31.0-pre.0"
+version = "0.31.0-pre.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9bc8791093fe97f895ff7779645aa0bf71fde708640fe51e7fc05b6d9e68bb4"
+checksum = "1cc30f2c394b8558269a13f5c9b4188eae7b9b5b659afdc60d1c6fcd861d2311"
 dependencies = [
  "bellman",
  "blake2b_simd",
@@ -8449,9 +8449,9 @@ dependencies = [
 
 [[package]]
 name = "zcash_transparent"
-version = "0.11.0-pre.0"
+version = "0.11.0-pre.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eeb255bbf28f7a6ad34e2e94871569ed1f5604d2d3ccac2ef63e0e7ce1a8ed4b"
+checksum = "d3b7dfde65266233ad2babba2f115d41a786e0270cac1a4644e26b9992dcf375"
 dependencies = [
  "bip32",
  "bs58",
@@ -8475,7 +8475,7 @@ dependencies = [
 [[package]]
 name = "zcash_voting"
 version = "5.1.1-rc.3"
-source = "git+https://github.com/zodl-inc/zcash_voting?rev=79bab8da827ae39aa34c881743af6fe9de3c3e3b#79bab8da827ae39aa34c881743af6fe9de3c3e3b"
+source = "git+https://github.com/zodl-inc/zcash_voting?rev=9bb376295431a3c73a260ed6bbbcc870284f2db3#9bb376295431a3c73a260ed6bbbcc870284f2db3"
 dependencies = [
  "anyhow",
  "base64",
@@ -8630,9 +8630,9 @@ dependencies = [
 
 [[package]]
 name = "zip321"
-version = "0.10.0-pre.0"
+version = "0.10.0-pre.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e3ae1d6a417376e485a1d230adf71601ea06e5f9e27f3f6931f79db52106952"
+checksum = "60e43f36a390a70ff428ee900f50c146fb43277028502717fbbb44918e575488"
 dependencies = [
  "base64",
  "nom",
@@ -8649,9 +8649,9 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zodl-slipstream"
-version = "0.4.0-pre.0"
+version = "0.4.0-pre.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa31455567466ce07089ee1a33539f37fbd95892b566abf76ee484e952698cec"
+checksum = "635eb2eb5a8360239c4cb45262065b8aa59f64ce141005714f6b5a73329fde4f"
 dependencies = [
  "ff 0.14.0",
  "futures-util",

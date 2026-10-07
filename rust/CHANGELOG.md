@@ -543,32 +543,23 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   therefore trail a just-mined broadcast by at most one such pass. Reads no longer contend with
   proving.
 - The crate now builds against the NU7 pre-release generation of the `librustzcash` crates and
-  the `zodl-slipstream` 0.4.0-pre.0 engine.
-- `zcashlc_init_data_database` re-encodes the unified full viewing keys a wallet database from
-  before `zcash_client_sqlite`'s `full_account_ids` migration stores, before migrating it. That
-  migration decides whether the seed is relevant by comparing the stored string with a freshly
-  encoded one, and on these crates the encoder produces ZIP 316 revision 2 where the stored
-  string is revision 0, so without this every such database rejected its own seed.
-- Every unified address, UFVK and UIVK string a `zcashlc_*` function returns is now ZIP 316
-  revision 0, with every receiver or item the value carries, reproducing the strings this crate
-  returned before the NU7 move: `zcash_keys`'s own encoders now produce revision 2
-  unconditionally, dropping the transparent receiver from a shielded unified address in the
-  process, so the SDK builds the revision 0 form itself from the same items and falls back to
-  `zcash_keys`'s revision 2 string only for a value revision 0 cannot hold (one with expiry
-  metadata, a P2SH viewing-key item, or no Orchard or Sapling item at all). A row
-  `zcash_client_sqlite` writes for itself, such as `v_tx_outputs.to_address`, can still be
-  revision 2, so it does not necessarily string-compare with an address a `zcashlc_*` function
-  returns. Decoding accepts both revisions, unchanged.
+  the `zodl-slipstream` 0.4.0-pre.1 engine.
+- Every unified address, UFVK and UIVK string a `zcashlc_*` function returns is ZIP 316
+  revision 0, with every receiver or item the value carries, as before the NU7 move. Revision 2
+  is used only for a value revision 0 cannot represent (one with expiry metadata, a P2SH
+  viewing-key item, or only transparent items). A row `zcash_client_sqlite` writes for itself,
+  such as `v_tx_outputs.to_address`, can still be revision 2, so it does not necessarily
+  string-compare with an address a `zcashlc_*` function returns. Decoding accepts both
+  revisions, unchanged.
 - `zcash_voting` moves from 5.1.0 to 5.1.1-rc.3 as it stands at the head of
   valargroup/zcash_voting#373, which moves the crate's `lrz` backend to the NU7 pre-release
   crates. No release carries that change yet, so `[patch.crates-io]` takes the crate from
-  `zodl-inc/zcash_voting@79bab8d`, and the crates under it that the change also needs from the
+  `zodl-inc/zcash_voting@9bb3762`, and the crates under it that the change also needs from the
   heads of their own pull requests: `voting-circuits`, `voting-crypto-deps` and `imt-tree`
   (valargroup/voting-circuits#135), `pir-types` and `pir-client`
   (valargroup/vote-nullifier-pir#173), and `zakura-wallet-lib`
   (zakura-core/wallet-libraries#83). Each entry is replaced by the release that contains its
-  pull request. The `zcashlc_voting_*` C surface is unchanged. Inside the crate, the
-  `user_address` a delegation PCZT carries is now a ZIP 316 revision 2 encoding.
+  pull request. The `zcashlc_voting_*` C surface is unchanged.
 
 ### Removed
 - The step-by-step coinholder-voting C surface is gone: `zcash_voting` absorbed the

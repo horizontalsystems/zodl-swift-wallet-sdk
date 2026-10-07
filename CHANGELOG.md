@@ -11,15 +11,11 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### NU7 pre-release crates
 
 - The SDK now builds on the NU7 pre-release generation of the underlying Zcash Rust crates and the
-  `zodl-slipstream` 0.4.0-pre.0 engine.
-- A wallet database last opened by an SDK from before early 2024 (before `zcash_client_sqlite`'s
-  `full_account_ids` migration) still migrates with its own seed. On these crates that migration
-  compared the stored viewing-key string with a freshly encoded one in a newer ZIP 316 revision,
-  and would have reported the seed as not relevant.
+  `zodl-slipstream` 0.4.0-pre.1 engine.
 - Every unified address, unified full viewing key and unified incoming viewing key string the SDK
   returns is ZIP 316 revision 0, with every receiver or item it carries. Revision 2 is used only
   for a value revision 0 cannot represent (one with expiry metadata, a P2SH viewing-key item, or
-  no Orchard or Sapling item at all). Decoding still accepts both revisions. A row
+  only transparent items). Decoding still accepts both revisions. A row
   `zcash_client_sqlite` writes for itself, such as `v_tx_outputs.to_address`, can still be
   revision 2, so it does not necessarily string-compare with an address the SDK returns.
 - Coinholder voting is built on `zcash_voting` 5.1.1-rc.3 as it stands at the head of
