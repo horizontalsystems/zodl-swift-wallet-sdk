@@ -6,6 +6,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 # Unreleased
 
+# 5.1.0 - 2026-10-07
+
 ## Added
 
 - `GiftCard` reads a gift card link with `GiftCard(link:)`: any `https` URL whose fragment carries
