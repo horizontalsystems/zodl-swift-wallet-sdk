@@ -27,6 +27,29 @@ final class GiftCardCancellationTests: ZcashTestCase {
         try await fixture.redeemer.cleanup()
     }
 
+    // Removing cancellation forwarding at host entry must allow a cancelled claim through.
+    func testCancellationAfterHostEntryBeforeNativeCreationPreventsSubmission() async throws {
+        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+        _ = try await fixture.redeemer.check()
+        let entered = XCTestExpectation(description: "host reached backend before native admission")
+        let gate = GiftCardOperationGate()
+        fixture.backend.createProposedTransactionsProposalUskOvkPolicyClosure = { _, _, _ in
+            entered.fulfill()
+            await gate.wait()
+            try GiftCardTransactionCreationContext.admission?.beginNativeCreation()
+            return [Data(repeating: 0xA1, count: 32)]
+        }
+        let redemption = Task {
+            try await fixture.redeemer.redeem(to: fixture.card.fundingAddress, memo: nil, recordIn: nil)
+        }
+        await fulfillment(of: [entered], timeout: 5)
+        redemption.cancel()
+        await gate.open()
+        await assertCancellation(redemption)
+        XCTAssertEqual(fixture.service.submitSpendTransactionModeCallsCount, 0)
+        try await fixture.redeemer.cleanup()
+    }
+
     func testCancelledQueuedRedemptionDoesNotCreateOrSubmit() async throws {
         let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
         _ = try await fixture.redeemer.check()
@@ -95,6 +118,127 @@ final class GiftCardCancellationTests: ZcashTestCase {
         let following = try await fixture.redeemer.check()
         XCTAssertEqual(following.state, .ready)
         try await fixture.redeemer.cleanup()
+    }
+
+    func testCancellationAfterNativeAdmissionStillSubmitsAndRecords() async throws {
+        try await assertCancellationAfterAdmission(at: .nativeCreation)
+    }
+
+    func testCancellationDuringPostNativeLookupStillSubmitsAndRecords() async throws {
+        try await assertCancellationAfterAdmission(at: .lookup)
+    }
+
+    func testCancellationDuringSubmissionStillRecordsAcceptedReceipt() async throws {
+        try await assertCancellationAfterAdmission(at: .submission)
+    }
+
+    func testCancellationDuringRecordingStillCompletesReceipt() async throws {
+        try await assertCancellationAfterAdmission(at: .recording)
+    }
+
+    private enum CompletionStage {
+        case nativeCreation
+        case lookup
+        case submission
+        case recording
+    }
+
+    private func assertCancellationAfterAdmission(at stage: CompletionStage) async throws {
+        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+        let destination = try GiftCardDestinationFixture.make(storageDirectory: testTempDirectory, slipstream: true)
+        _ = try await fixture.redeemer.check()
+        let entered = XCTestExpectation(description: "owned completion reached cancellation gate")
+        let gate = GiftCardOperationGate()
+        fixture.backend.createProposedTransactionsProposalUskOvkPolicyClosure = { _, _, _ in
+            try GiftCardTransactionCreationContext.admission?.beginNativeCreation()
+            if stage == .nativeCreation {
+                entered.fulfill()
+                await gate.wait()
+            }
+            return [Data(repeating: 0xA1, count: 32)]
+        }
+        if stage == .lookup {
+            fixture.backend.getTransactionTxIdClosure = { id in
+                entered.fulfill()
+                await gate.wait()
+                try Task.checkCancellation()
+                return TransactionData(txId: id, raw: Data([1]), expiryHeight: 3_000_100)
+            }
+        }
+        if stage == .submission {
+            fixture.service.submitSpendTransactionModeClosure = { _, _ in
+                entered.fulfill()
+                await gate.wait()
+                try Task.checkCancellation()
+                return SendResponse()
+            }
+        }
+        if stage == .recording {
+            destination.backend.decryptAndStoreTransactionTxBytesMinedHeightClosure = { _, _ in
+                entered.fulfill()
+                await gate.wait()
+                try Task.checkCancellation()
+                return Data(repeating: 0xA1, count: 32)
+            }
+        }
+        let redemption = Task {
+            try await fixture.redeemer.redeem(to: fixture.card.fundingAddress, memo: nil, recordIn: destination.synchronizer)
+        }
+        await fulfillment(of: [entered], timeout: 5)
+        redemption.cancel()
+        // Lookup runs again during receipt recording, after the open gate no longer matters.
+        if stage == .lookup {
+            fixture.backend.getTransactionTxIdClosure = { id in
+                try Task.checkCancellation()
+                return TransactionData(txId: id, raw: Data([1]), expiryHeight: 3_000_100)
+            }
+        }
+        await gate.open()
+        let result = try await redemption.value
+        XCTAssertEqual(result.results, [.success(txId: Data(repeating: 0xA1, count: 32))])
+        XCTAssertTrue(result.recordedInDestination)
+        XCTAssertEqual(result.fee, Zatoshi(10_000))
+        XCTAssertEqual(result.amount, Zatoshi(40_000))
+        XCTAssertEqual(fixture.backend.createProposedTransactionsProposalUskOvkPolicyCallsCount, 1)
+        XCTAssertEqual(fixture.service.submitSpendTransactionModeCallsCount, 1)
+        XCTAssertEqual(destination.backend.setTransactionTrustTxIdTrustedCallsCount, 1)
+        try await fixture.redeemer.cleanup()
+        try await fixture.redeemer.cleanup()
+        XCTAssertEqual(fixture.backend.createProposedTransactionsProposalUskOvkPolicyCallsCount, 1)
+        XCTAssertEqual(fixture.service.submitSpendTransactionModeCallsCount, 1)
+    }
+
+    func testCleanupWaitsForAdmittedClaimBeforeWipe() async throws {
+        let clock = GiftCardCleanupTestClock()
+        defer { clock.dispose() }
+        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory, cleanupTiming: clock.timing)
+        _ = try await fixture.redeemer.check()
+        let entered = XCTestExpectation(description: "native creation admitted")
+        let gate = GiftCardOperationGate()
+        fixture.backend.createProposedTransactionsProposalUskOvkPolicyClosure = { _, _, _ in
+            try GiftCardTransactionCreationContext.admission?.beginNativeCreation()
+            entered.fulfill()
+            await gate.wait()
+            return [Data(repeating: 0xA1, count: 32)]
+        }
+        let redemption = Task {
+            try await fixture.redeemer.redeem(to: fixture.card.fundingAddress, memo: nil, recordIn: nil)
+        }
+        await fulfillment(of: [entered], timeout: 5)
+        let deadline = clock.expectSleep(at: 30_000_000_000)
+        let cleanup = Task { try await fixture.redeemer.cleanup() }
+        await fulfillment(of: [deadline], timeout: 5)
+        let beforeCompletion = await fixture.engine.calls
+        XCTAssertFalse(beforeCompletion.contains("stop"))
+        await gate.open()
+        let result = try await redemption.value
+        XCTAssertEqual(result.results, [.success(txId: Data(repeating: 0xA1, count: 32))])
+        try await cleanup.value
+        let afterCompletion = await fixture.engine.calls
+        XCTAssertTrue(afterCompletion.contains("stop"))
+        let root = testTempDirectory.appendingPathComponent(fixture.card.synchronizerAlias.description)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+        XCTAssertEqual(fixture.service.submitSpendTransactionModeCallsCount, 1)
     }
 
     private func assertCancellation(_ task: Task<GiftCardRedeemer.Redemption, Error>) async {

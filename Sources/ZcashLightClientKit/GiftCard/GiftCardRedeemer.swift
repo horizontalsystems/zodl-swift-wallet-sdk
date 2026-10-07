@@ -422,8 +422,13 @@ public actor GiftCardRedeemer {
     ///   ``ZcashError/giftCardRecipientRequiresOrchard`` for a unified address without an Orchard
     ///   receiver, and the proposal and creation errors of `Synchronizer.proposeSendMax(accountUUID:recipient:memo:mode:)`
     ///   and `Synchronizer.createProposedTransactions(proposal:spendingKey:ovkPolicy:)`. The
-    ///   destination's errors are never thrown. Cancellation observed before native creation throws
-    ///   `CancellationError`; creation already underway cannot be rolled back.
+    ///   destination's errors are never thrown. Empty completion throws
+    ///   ``ZcashError/giftCardRedemptionIncomplete``.
+    ///
+    /// Cancellation prevents creation until final native admission on the wallet database executor.
+    /// After admission, this call owns creation, submission and accepted receipt recording through
+    /// completion, even when the caller cancels. Cleanup joins that work before deleting the wallet.
+    /// A later stream error is rethrown after accepted receipts are attempted in the destination.
     public func redeem(to recipient: UnifiedAddress, memo: Memo?, recordIn destination: Synchronizer?) async throws -> Redemption {
         try await serialized { redeemer, admission in
             try await redeemer.performRedeem(to: recipient, memo: memo, recordIn: destination, admission: admission)
@@ -550,7 +555,28 @@ public actor GiftCardRedeemer {
 
         // Preparatory awaits may ignore cancellation. Check before creation can store a claim.
         try Task.checkCancellation()
-        admission.markNativeAdmission()
+        let creationAdmission = GiftCardTransactionCreationAdmission()
+        // Replacement forwards cancellation already requested during preparation or handoff.
+        admission.installCancellation { creationAdmission.cancelBeforeCreation() }
+        return try await withTaskCancellationHandler {
+            let completion = Task {
+                try await GiftCardTransactionCreationContext.$admission.withValue(creationAdmission) {
+                    try await self.completeRedemption(proposal: proposal, spendingKey: spendingKey, recordIn: destination)
+                }
+            }
+            // This task owns creation, submission and recording. Caller cancellation only closes
+            // native admission, and the serialized queue joins completion before teardown.
+            return try await completion.value
+        } onCancel: {
+            creationAdmission.cancelBeforeCreation()
+        }
+    }
+
+    private func completeRedemption(
+        proposal: Proposal,
+        spendingKey: UnifiedSpendingKey,
+        recordIn destination: Synchronizer?
+    ) async throws -> Redemption {
         let stream = try await synchronizer.createProposedTransactions(
             proposal: proposal,
             spendingKey: spendingKey,
@@ -558,8 +584,14 @@ public actor GiftCardRedeemer {
         )
 
         var results: [TransactionSubmitResult] = []
-        for try await result in stream {
-            results.append(result)
+        var streamError: Error?
+        do {
+            for try await result in stream {
+                results.append(result)
+            }
+        } catch {
+            // Accepted receipts still belong in the destination even if a later iteration fails.
+            streamError = error
         }
 
         var recorded = false
@@ -578,6 +610,8 @@ public actor GiftCardRedeemer {
                 )
             }
         }
+        if let streamError { throw streamError }
+        guard !results.isEmpty else { throw ZcashError.giftCardRedemptionIncomplete }
         let sweep = GiftCardStatus.Sweep(proposal: proposal)
         return Redemption(results: results, recordedInDestination: recorded, fee: sweep.fee, amount: sweep.amount)
     }
@@ -749,21 +783,23 @@ extension GiftCardRedeemer {
         logger: Logger
     ) async -> Bool {
         var recordedAny = false
+        var recordedAll = true
         for result in results {
             guard case .success(let txId) = result else { continue }
             do {
                 guard let raw = try await rawTransaction(txId) else {
                     logger.warn("Gift card: the claim transaction is not in the card wallet; the destination will learn about it from the chain")
-                    return false
+                    recordedAll = false
+                    continue
                 }
                 try await destination.recordTrustedTransaction(raw, txId: try TxId([UInt8](txId)))
                 recordedAny = true
             } catch {
                 logger.warn("Gift card: recording the claim in the destination wallet failed: \(error.localizedDescription)")
-                return false
+                recordedAll = false
             }
         }
-        return recordedAny
+        return recordedAny && recordedAll
     }
 
     /// Waits for terminal completion, even when the caller is cancelled. A pending wipe must

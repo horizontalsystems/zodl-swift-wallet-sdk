@@ -1170,6 +1170,10 @@ enum ZcashErrorDefinition {
     // sourcery: code="ZGIFT0011"
     case giftCardCleanupTimedOut
 
+    /// The gift claim completed without any submission result. No successful redemption was reported.
+    // sourcery: code="ZGIFT0012"
+    case giftCardRedemptionIncomplete
+
     // MARK: - Models
 
     /// Attempt to init TxId with input that is not 32 bytes.

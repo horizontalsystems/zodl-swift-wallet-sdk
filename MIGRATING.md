@@ -39,6 +39,20 @@ skips these wallets. Once cleanup is requested, ownership also survives dropping
 was never checked. These changes add no redemption or submission retries.
 
 
+Gift redemption cancellation has a precise boundary: cancellation before native creation begins on
+the wallet database executor prevents creation and throws `CancellationError`. After admission,
+`redeem(to:memo:recordIn:)` finishes creation, submission, and accepted receipt recording before
+returning, even when its caller is cancelled. Cleanup joins that completion before wiping. Keep
+awaiting the redemption's outcome before changing the UI or retrying a claim. Ordinary synchronizer
+transaction cancellation is unchanged.
+
+A claim with no submission results now throws `ZcashError.giftCardRedemptionIncomplete`
+(`ZGIFT0012`); update exhaustive error switches. Accepted results remain accepted when destination
+recording fails: `recordedInDestination` is `false`, and every accepted receipt is still attempted.
+If a later stream iteration throws, earlier accepted receipts are attempted before that error is
+rethrown. These changes add no claim or submission retries.
+
+
 ## `TxId` validates its length — `init(_: [UInt8])` throws
 
 `TxId.init(_ id: [UInt8])` now throws `ZcashError.txIdNot32Bytes` for anything but 32 bytes,

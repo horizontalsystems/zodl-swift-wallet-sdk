@@ -325,3 +325,41 @@ actor GiftCardCleanupTestGate {
         ready.forEach { $0.resume() }
     }
 }
+
+/// Real destination hosts, with only their Rust storage boundary replaced for offline claims.
+struct GiftCardDestinationFixture {
+    let synchronizer: Synchronizer
+    let backend: ZcashRustBackendWeldingMock
+
+    static func make(storageDirectory: URL, slipstream: Bool) throws -> GiftCardDestinationFixture {
+        let root = storageDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let container = DIContainer()
+        container.isTestEnvironment = true
+        let backend = ZcashRustBackendWeldingMock()
+        backend.decryptAndStoreTransactionTxBytesMinedHeightReturnValue = Data(repeating: 0xA1, count: 32)
+        backend.setTransactionTrustTxIdTrustedClosure = { _, _ in }
+        container.mock(type: ZcashRustBackendWelding.self, isSingleton: true) { _ in backend }
+        container.mock(type: LightWalletService.self, isSingleton: true) { _ in LightWalletServiceMock() }
+        container.mock(type: TransactionRepository.self, isSingleton: true) { _ in TransactionRepositoryMock() }
+        let initializer = Initializer(
+            container: container,
+            cacheDbURL: nil,
+            fsBlockDbRoot: root.appendingPathComponent("blocks"),
+            generalStorageURL: root.appendingPathComponent("general"),
+            dataDbURL: root.appendingPathComponent("data.db"),
+            torDirURL: root.appendingPathComponent("tor"),
+            endpoint: LightWalletEndpoint(address: "127.0.0.1", port: 1, secure: false),
+            network: ZcashNetworkBuilder.network(for: .testnet),
+            spendParamsURL: root.appendingPathComponent("spend.params"),
+            outputParamsURL: root.appendingPathComponent("output.params"),
+            saplingParamsSourceURL: SaplingParamsSourceURL.tests,
+            loggingPolicy: .noLogging,
+            isTorEnabled: false,
+            isExchangeRateEnabled: false
+        )
+        let synchronizer: Synchronizer = slipstream
+            ? SlipstreamSynchronizer(initializer: initializer)
+            : SDKSynchronizer(initializer: initializer)
+        return GiftCardDestinationFixture(synchronizer: synchronizer, backend: backend)
+    }
+}

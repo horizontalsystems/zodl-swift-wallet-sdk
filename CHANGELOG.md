@@ -10,6 +10,14 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `NetworkActivationHeights.nu7` sets the NU7 activation height of a custom or regtest network.
   A `nil` height means "not activated".
+
+- Gift-card redemption now remains cancellable until native transaction creation begins on the
+  wallet database executor. Once admitted, the SDK finishes creation, submission, and destination
+  receipt recording even if the caller cancels, and cleanup waits for that completion. Accepted
+  receipts are attempted even after a later submission-stream error or another receipt's recording
+  failure. A claim that completes without a submission result throws `giftCardRedemptionIncomplete`
+  (`ZGIFT0012`).
+
 - `GiftCardRedeemer` now always uses Slipstream for its isolated wallet and retains teardown
   ownership until successful wipe and root deletion. Cleanup cancellation detaches the caller;
   its 30-second monotonic budget includes queued work and throws `giftCardCleanupTimedOut`

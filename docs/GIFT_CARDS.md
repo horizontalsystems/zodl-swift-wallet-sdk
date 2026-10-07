@@ -157,11 +157,15 @@ discovers the claim as an ordinary untrusted receive with the ten-confirmation w
 - Calls on a redeemer run one at a time, in order. Cancelling the task awaiting `check()` stops
   the wait (throws `CancellationError`); the card wallet keeps syncing until `cleanup()`.
 - A cancelled queued `check()` or `redeem(to:memo:recordIn:)` throws `CancellationError`
-  when its turn arrives. Cancellation is checked again after redemption preparation and on the
-  database executor immediately before native claim creation. Cancellation observed at these
-  checkpoints prevents storing or submitting a claim. Once synchronous native creation starts,
-  it cannot be cancelled or rolled back; cancellation does not establish whether the claim was
-  created or submitted, so recheck the card before retrying.
+  before preparation or creation. Cancellation during redemption preparation, or while creation
+  waits for the wallet database executor, prevents native creation. The point of no return is the
+  final native admission immediately before synchronous transaction construction.
+- After native admission, redemption owns creation, submission, and accepted receipt recording.
+  It returns the resulting outcome even if its caller cancels. Await that outcome before retrying
+  a claim. An error on a later submission-stream iteration is rethrown only after attempting to
+  record earlier accepted receipts. Every accepted receipt is attempted even if recording another
+  fails; a recording failure preserves submission results and sets `recordedInDestination` to
+  `false`. Completion with no submission results throws `giftCardRedemptionIncomplete` (`ZGIFT0012`).
 - `cleanup()` closes admission to new checks and redemptions immediately, cancels preparation
   that has not reached native claim admission, and joins earlier work before wiping. A successful
   return means the engine was safely wiped, the existing host Tor runtime was closed, all remaining
@@ -211,6 +215,7 @@ none of them carries any part of the link.
 | `giftCardLinkInvalid` (`ZGIFT0010`) | Any other malformed link. |
 | `giftCardNetworkMismatch` (`ZGIFT0001`) | The card, or the redeem address, is for another network. |
 | `giftCardRedeemerAlreadyActive` (`ZGIFT0002`) | The card has an active redeemer or retained teardown ownership. |
+| `giftCardRedemptionIncomplete` (`ZGIFT0012`) | The claim completed without a submission result. |
 | `giftCardCleanupTimedOut` (`ZGIFT0011`) | This caller waited 30 seconds; cleanup continues and the card remains in use. |
 | `giftCardRedeemerNotReady` (`ZGIFT0003`) | `redeem(to:)` before `check()`. |
 | `giftCardNothingToRedeem` (`ZGIFT0004`) | Nothing spendable: empty, still pending, or dust (the fee would take everything). |
