@@ -31,13 +31,15 @@ final class GiftCardSlipstreamPreparationTests: ZcashTestCase {
         source.use(state, forBirthday: 3_000_000)
         fixture.initializer.container.mock(type: CheckpointSource.self, isSingleton: true) { _ in source }
         let anchor = fixture.anchor
+        let endpoint = fixture.initializer.endpoint
+        let network = fixture.initializer.network
         fixture.initializer.slipstreamAnchorSource = { isRestore, birthday, fallback in
             await anchor.resolve(
                 isRestore: isRestore,
                 birthday: birthday,
                 fallbackCheckpointHeight: fallback,
-                endpoint: fixture.initializer.endpoint,
-                network: fixture.initializer.network,
+                endpoint: endpoint,
+                network: network,
                 torDirPath: nil
             )
         }

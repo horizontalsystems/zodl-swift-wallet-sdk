@@ -64,9 +64,11 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `fee` is `nil` and `redeemable` is `.zero` in every other state),
   `redeem(to:memo:)` (sends the whole spendable balance, with an optional memo, minus the ZIP 317
   fee to a `UnifiedAddress` and returns the `TransactionSubmitResult`s), and `cleanup()` (stops the
-  temporary wallet and deletes all of its files). `isTorEnabled` routes the card wallet's birthday
-  lookup, sync and claim submission over Tor; pass the main wallet's setting, since with `false`
-  the server sees the device's IP address with the card and its claim. The redeeming transaction
+  temporary wallet and deletes all of its files). `isTorEnabled` protects the card wallet's
+  identifying metadata requests, including birthday lookup, and claim submission over Tor, with
+  no direct fallback. Slipstream bulk block requests remain direct. Pass the main wallet's
+  setting; with `false`, identifying requests expose the device's IP address with the card and
+  its claim. The redeeming transaction
   discards the outgoing viewing key, so the card's key — which the card's issuer can rederive —
   does not reveal the recipient. Sapling parameters are unnecessary only when the actual proposal
   has no Sapling inputs or outputs; Orchard recipient validation does not change input selection.

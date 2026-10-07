@@ -14,9 +14,14 @@ final class GiftCardCleanupCoordinator: @unchecked Sendable {
     /// All fields are protected by the coordinator's lock, including registration races.
     private final class Waiter {
         let id = UUID()
+        let expiresAt: UInt64
         var continuation: CheckedContinuation<Void, Error>?
         var result: Result<Void, Error>?
         var timer: Task<Void, Never>?
+
+        init(expiresAt: UInt64) {
+            self.expiresAt = expiresAt
+        }
     }
 
     private struct Delivery {
@@ -68,7 +73,7 @@ final class GiftCardCleanupCoordinator: @unchecked Sendable {
         let admittedAt = admittedAt ?? timing.now()
         let deadline = admittedAt.addingReportingOverflow(30_000_000_000)
         let expiresAt = deadline.overflow ? UInt64.max : deadline.partialValue
-        let waiter = Waiter()
+        let waiter = Waiter(expiresAt: expiresAt)
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 var delivery: Delivery?
@@ -76,6 +81,8 @@ final class GiftCardCleanupCoordinator: @unchecked Sendable {
                     waiter.continuation = continuation
                     if let result = waiter.result {
                         delivery = takeDelivery(for: waiter, result: result)
+                    } else if timing.now() >= waiter.expiresAt {
+                        delivery = takeDelivery(for: waiter, result: .failure(GiftCardCleanupWaitError.timedOut))
                     } else if case .completed = phase {
                         delivery = takeDelivery(for: waiter, result: .success(()))
                     } else {
@@ -85,7 +92,7 @@ final class GiftCardCleanupCoordinator: @unchecked Sendable {
                 }
                 delivery?.resume()
                 if let attempt { launch(attempt) }
-                scheduleDeadline(for: waiter, at: expiresAt)
+                scheduleDeadline(for: waiter)
             }
         } onCancel: {
             self.finish(waiter, with: .failure(CancellationError()))
@@ -172,12 +179,12 @@ final class GiftCardCleanupCoordinator: @unchecked Sendable {
         if !installed { task.cancel() }
     }
 
-    private func scheduleDeadline(for waiter: Waiter, at deadline: UInt64) {
+    private func scheduleDeadline(for waiter: Waiter) {
         let isPending = withLock { waiter.result == nil }
         guard isPending else { return }
         let timer = Task {
             do {
-                try await timing.sleepUntil(deadline)
+                try await timing.sleepUntil(waiter.expiresAt)
                 finish(waiter, with: .failure(GiftCardCleanupWaitError.timedOut))
             } catch {
                 // Completion or caller cancellation disposed of this waiter timer.
@@ -212,7 +219,14 @@ final class GiftCardCleanupCoordinator: @unchecked Sendable {
     }
 
     private func takeAllDeliveries(with result: Result<Void, Error>) -> [Delivery] {
-        let deliveries = waiters.values.compactMap { takeDelivery(for: $0, result: result) }
+        // Elapsed time selects pending outcomes even if the deadline task has not run yet.
+        let instant = timing.now()
+        let deliveries = waiters.values.compactMap { waiter in
+            let selected: Result<Void, Error> = instant >= waiter.expiresAt
+                ? .failure(GiftCardCleanupWaitError.timedOut)
+                : result
+            return takeDelivery(for: waiter, result: selected)
+        }
         waiters = [:]
         return deliveries
     }

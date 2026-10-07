@@ -268,6 +268,158 @@ final class GiftCardCleanupCoordinatorTests: ZcashTestCase {
         try await waitFor(clock.expectNoPendingSleeps())
     }
 
+    // Catches granting a new budget after public entry already consumed the full deadline.
+    func testExpiredAdmissionTimesOutBeforeOwnedTeardownFinishes() async throws {
+        let clock = GiftCardCleanupTestClock()
+        defer { clock.dispose() }
+        clock.advance(to: 31_000_000_000, deliveringSleeps: false)
+        let gate = GiftCardCleanupTestGate()
+        defer { Task { await gate.open() } }
+        let returned = XCTestExpectation(description: "expired admission returns without waiting for teardown")
+        let finished = XCTestExpectation(description: "owned teardown finishes after caller returns")
+        let wipes = CoordinatorProbe()
+        let coordinator = GiftCardCleanupCoordinator(
+            timing: clock.timing,
+            wipe: {
+                wipes.increment()
+                await gate.wait()
+            },
+            removeRoot: {},
+            didFinish: { finished.fulfill() }
+        )
+        let caller = Task {
+            defer { returned.fulfill() }
+            try await coordinator.cleanup(after: nil, admittedAt: 0)
+        }
+        let result = await XCTWaiter.fulfillment(of: [returned], timeout: 5)
+        XCTAssertEqual(result, .completed, "Elapsed admission must select timeout without timer delivery or teardown completion")
+        // Release the owned attempt even when the unchanged implementation failed the assertion.
+        await gate.open()
+        do {
+            try await caller.value
+            XCTFail("Admission beyond 30 seconds must time out")
+        } catch { XCTAssertTrue(error is GiftCardCleanupWaitError) }
+        try await waitFor(finished)
+        try await coordinator.cleanup(after: nil)
+        XCTAssertEqual(wipes.count, 1, "A fresh completed call must remain idempotent")
+        try await waitFor(clock.expectNoPendingSleeps())
+    }
+
+    // Catches another caller's completed teardown bypassing an older admission's elapsed deadline.
+    func testExpiredAdmissionStillTimesOutAfterAnotherCallerCompletedCleanup() async throws {
+        let clock = GiftCardCleanupTestClock()
+        defer { clock.dispose() }
+        let wipes = CoordinatorProbe()
+        let coordinator = GiftCardCleanupCoordinator(
+            timing: clock.timing,
+            wipe: { wipes.increment() },
+            removeRoot: {},
+            didFinish: {}
+        )
+        try await coordinator.cleanup(after: nil)
+        clock.advance(to: 31_000_000_000, deliveringSleeps: false)
+        do {
+            try await coordinator.cleanup(after: nil, admittedAt: 0)
+            XCTFail("An earlier expired admission must time out even when another caller finished teardown")
+        } catch { XCTAssertTrue(error is GiftCardCleanupWaitError) }
+        try await coordinator.cleanup(after: nil)
+        XCTAssertEqual(wipes.count, 1, "Fresh completed calls remain idempotent")
+        try await waitFor(clock.expectNoPendingSleeps())
+    }
+
+    // Catches late success beating timeout when the timer's delivery is delayed.
+    func testSuccessAfterDeadlineTimesOutWithTimerDeliveryHeld() async throws {
+        try await verifyCompletionWithTimerHeld(at: 31_000_000_000, fails: false)
+    }
+
+    // Catches late failure beating timeout when the timer's delivery is delayed.
+    func testFailureAfterDeadlineTimesOutWithTimerDeliveryHeld() async throws {
+        try await verifyCompletionWithTimerHeld(at: 31_000_000_000, fails: true)
+    }
+
+    // Catches incorrectly replacing an in-budget success with timeout.
+    func testSuccessBeforeDeadlineWithTimerDeliveryHeld() async throws {
+        try await verifyCompletionWithTimerHeld(at: 29_000_000_000, fails: false)
+    }
+
+    // Catches incorrectly replacing an in-budget failure with timeout.
+    func testFailureBeforeDeadlineWithTimerDeliveryHeld() async throws {
+        try await verifyCompletionWithTimerHeld(at: 29_000_000_000, fails: true)
+    }
+
+    // Catches elapsed-time arbitration overwriting an already selected cancellation.
+    func testSelectedCancellationSurvivesLateSuccessWithTimerDeliveryHeld() async throws {
+        let clock = GiftCardCleanupTestClock()
+        defer { clock.dispose() }
+        let gate = GiftCardCleanupTestGate()
+        defer { Task { await gate.open() } }
+        let finished = XCTestExpectation(description: "owned teardown completes")
+        let coordinator = GiftCardCleanupCoordinator(
+            timing: clock.timing,
+            wipe: { await gate.wait() },
+            removeRoot: {},
+            didFinish: { finished.fulfill() }
+        )
+        let caller = Task { try await coordinator.cleanup(after: nil) }
+        try await waitFor(clock.expectSleep(at: 30_000_000_000))
+        caller.cancel()
+        do {
+            try await caller.value
+            XCTFail("Cancellation must return independently of teardown")
+        } catch { XCTAssertTrue(error is CancellationError) }
+        clock.advance(to: 31_000_000_000, deliveringSleeps: false)
+        await gate.open()
+        try await waitFor(finished)
+        try await coordinator.cleanup(after: nil)
+        try await waitFor(clock.expectNoPendingSleeps())
+    }
+
+    private func verifyCompletionWithTimerHeld(at instant: UInt64, fails: Bool) async throws {
+        let clock = GiftCardCleanupTestClock()
+        defer { clock.dispose() }
+        let gate = GiftCardCleanupTestGate()
+        defer { Task { await gate.open() } }
+        let attempts = CoordinatorProbe()
+        let finishes = CoordinatorProbe()
+        let coordinator = GiftCardCleanupCoordinator(
+            timing: clock.timing,
+            wipe: {
+                let attempt = attempts.increment()
+                await gate.wait()
+                if fails && attempt == 1 { throw CoordinatorTestError.refused }
+            },
+            removeRoot: {},
+            didFinish: { finishes.increment() }
+        )
+        let caller = Task { try await coordinator.cleanup(after: nil) }
+        try await waitFor(clock.expectSleep(at: 30_000_000_000))
+        clock.advance(to: instant, deliveringSleeps: false)
+        await gate.open()
+        do {
+            try await caller.value
+            if instant > 30_000_000_000 {
+                XCTFail("Completion after expiry must time out even while timer delivery is held")
+            } else {
+                XCTAssertFalse(fails, "In-budget failure must reach the caller")
+            }
+        } catch {
+            if instant > 30_000_000_000 {
+                XCTAssertTrue(error is GiftCardCleanupWaitError, "Expiry must beat late wipe failure")
+            } else {
+                XCTAssertEqual(error as? CoordinatorTestError, .refused)
+                XCTAssertTrue(fails)
+            }
+        }
+        if fails {
+            // Join retry registration before a fresh caller prompts it, preserving serial recovery.
+            try await waitFor(clock.expectSleep(at: instant + 1_000_000_000))
+        }
+        try await coordinator.cleanup(after: nil)
+        XCTAssertEqual(attempts.count, fails ? 2 : 1)
+        XCTAssertEqual(finishes.count, 1)
+        try await waitFor(clock.expectNoPendingSleeps())
+    }
+
     // Catches double-resume in simultaneous timeout/success and abandoned timer tasks.
     func testSuccessAtDeadlineDisposesWaiterTimer() async throws {
         let clock = GiftCardCleanupTestClock()

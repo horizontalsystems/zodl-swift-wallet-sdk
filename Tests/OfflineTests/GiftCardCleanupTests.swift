@@ -520,8 +520,9 @@ final class GiftCardCleanupTests: ZcashTestCase {
             torClient: tor
         )
         let serviceEntered = XCTestExpectation(description: "card service disposal entered after wipe")
+        let engine = fixture.engine
         fixture.service.closeConnectionsClosure = {
-            let calls = await fixture.engine.calls
+            let calls = await engine.calls
             XCTAssertTrue(calls.contains("stop:done"))
             XCTAssertTrue(calls.contains("close"))
             serviceEntered.fulfill()

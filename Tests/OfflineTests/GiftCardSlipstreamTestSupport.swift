@@ -202,6 +202,7 @@ final class GiftCardCleanupTestClock: @unchecked Sendable {
     private let lock = NSLock()
     private var disposed = false
     private var instant: UInt64 = 0
+    private var deliversElapsedSleeps = true
     private var sleeps: [UUID: Sleep] = [:]
     private var registrationCounts: [UInt64: Int] = [:]
     private var observers: [Observer] = []
@@ -248,10 +249,12 @@ final class GiftCardCleanupTestClock: @unchecked Sendable {
         notifyEmpty()
     }
 
-    func advance(to instant: UInt64) {
+    func advance(to instant: UInt64, deliveringSleeps: Bool = true) {
         let ready: [Sleep] = withLock {
             precondition(instant >= self.instant)
             self.instant = instant
+            deliversElapsedSleeps = deliveringSleeps
+            guard deliveringSleeps else { return [] }
             let ready = sleeps.filter { $0.value.deadline <= instant }
             for id in ready.keys { sleeps.removeValue(forKey: id) }
             return Array(ready.values)
@@ -269,7 +272,7 @@ final class GiftCardCleanupTestClock: @unchecked Sendable {
                     registrationCounts[deadline, default: 0] += 1
                     if disposed || registration.cancelled || Task.isCancelled {
                         result = .failure(CancellationError())
-                    } else if deadline <= instant {
+                    } else if deadline <= instant && deliversElapsedSleeps {
                         result = .success(())
                     } else {
                         sleeps[registration.id] = Sleep(deadline: deadline, continuation: continuation)
