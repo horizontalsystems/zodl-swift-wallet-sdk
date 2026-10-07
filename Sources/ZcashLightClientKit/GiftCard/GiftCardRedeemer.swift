@@ -94,7 +94,8 @@ public struct GiftCardStatus: Equatable {
 ///
 /// - The SDK does not stop two synchronizers from sharing an alias, so this type does: only one
 ///   redeemer per card may be alive in the process at a time. Creating a second one throws
-///   ``ZcashError/giftCardRedeemerAlreadyActive`` until the first is cleaned up or released.
+///   ``ZcashError/giftCardRedeemerAlreadyActive`` until the first is cleaned up, or its asynchronous
+///   teardown after release finishes. Teardown retains the alias while writers and native resources drain.
 /// - Calls on one redeemer are serialized in the order they are made; a ``redeem(to:)`` issued
 ///   while ``check()`` is syncing runs after it.
 /// - Both wallets share the SDK's global database executor, so every wallet-database call of
@@ -109,6 +110,7 @@ public struct GiftCardStatus: Equatable {
 /// - Releasing a redeemer without ``cleanup()`` (or a crash, or the app being killed) leaves its
 ///   files behind until a redeemer for the same card is created and cleaned up. They hold the
 ///   card's keys and the claim's recipient, so call ``removeLeftoverWallets(in:)`` at launch.
+///   During asynchronous teardown after release, leftover cleanup leaves that wallet protected.
 /// - After a redeem whose submission failed, the card wallet considers the notes spent until the
 ///   transaction expires, so a second ``redeem(to:)`` on the same redeemer finds nothing to
 ///   spend. Clean up and create a new redeemer to retry; the notes are spent at most once on
@@ -264,10 +266,20 @@ public actor GiftCardRedeemer {
     }
 
     deinit {
-        // A redeemer released without `cleanup()` must not leave its wallet syncing, nor keep the
-        // card from being redeemed again. Its files stay behind; see the type's documentation.
-        synchronizer.stop()
-        GiftCardRedeemerRegistry.release(alias, owner: owner)
+        guard !isCleanedUp else { return }
+        // Transfer the resource and alias owners without retaining deinitializing self.
+        // Files stay behind, protected from replacement and leftover cleanup until
+        // processor writers and card-owned native resources have finished.
+        Task { [synchronizer, alias, owner] in
+            await synchronizer.stopAndWait()
+            do {
+                try await synchronizer.closeGiftCardResources()
+            } catch {
+                // Keep the alias reserved if resource teardown could not finish.
+                return
+            }
+            GiftCardRedeemerRegistry.release(alias, owner: owner)
+        }
     }
 
     /// Creates (on first use) and syncs the card wallet, then reports what the card holds.

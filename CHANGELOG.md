@@ -128,8 +128,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   closing its root runtime and deleting the directory. Cleanup retains the card alias throughout,
   even when its caller is cancelled. Early wipe validation failure and terminal storage errors use
   the same drain before directory fallback. Concurrent wipes complete every caller once. Stalled
-  work can keep cleanup pending indefinitely; directory deletion errors reach the caller. Public
-  signatures are unchanged. (MOB-2138)
+  work can keep cleanup pending indefinitely; directory deletion errors reach the caller. Standalone
+  awaited stop and direct wipe also join downloaders admitted by a cancelling action. Releasing a
+  redeemer without cleanup retains its alias until writers and native resources finish; its files
+  remain behind for leftover cleanup. Public signatures are unchanged. (MOB-2138)
 
 - `GiftCardRedeemer.check()` and the `redeem` overloads now throw `CancellationError` for
   cancelled queued calls before running them. Cancellation observed after redemption preparation

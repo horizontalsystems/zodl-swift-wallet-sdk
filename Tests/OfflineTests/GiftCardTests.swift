@@ -425,29 +425,47 @@ final class GiftCardTests: ZcashTestCase {
         try await next.cleanup()
     }
 
-    func testReleasingARedeemerFreesTheCard() throws {
+    func testReleasingARedeemerFreesTheCardAfterTeardown() async throws {
         let card = try GiftCard(link: Self.zodlTestnetLink)
         let network = ZcashNetworkBuilder.network(for: .testnet)
-
+        let storageDirectory = try XCTUnwrap(testTempDirectory)
         var redeemer: GiftCardRedeemer? = try GiftCardRedeemer(
             card: card,
             network: network,
             endpoint: LightWalletEndpointBuilder.default,
             isTorEnabled: false,
-            storageDirectory: testTempDirectory
+            storageDirectory: storageDirectory
         )
         XCTAssertNotNil(redeemer)
         redeemer = nil
 
-        XCTAssertNoThrow(
-            try GiftCardRedeemer(
-                card: card,
-                network: network,
-                endpoint: LightWalletEndpointBuilder.default,
-                isTorEnabled: false,
-                storageDirectory: testTempDirectory
-            )
-        )
+        let admitted = XCTestExpectation(description: "card becomes available after deinit teardown")
+        let replacement = Task { () throws -> GiftCardRedeemer in
+            while true {
+                try Task.checkCancellation()
+                do {
+                    let next = try GiftCardRedeemer(
+                        card: card,
+                        network: network,
+                        endpoint: LightWalletEndpointBuilder.default,
+                        isTorEnabled: false,
+                        storageDirectory: storageDirectory
+                    )
+                    admitted.fulfill()
+                    return next
+                } catch ZcashError.giftCardRedeemerAlreadyActive {
+                    await Task.yield()
+                }
+            }
+        }
+        let result = await XCTWaiter.fulfillment(of: [admitted], timeout: 5)
+        XCTAssertEqual(result, .completed)
+        guard result == .completed else {
+            replacement.cancel()
+            return
+        }
+        let next = try await replacement.value
+        try await next.cleanup()
     }
 
     // MARK: - Recording the claim in the destination wallet (ZIP 315)

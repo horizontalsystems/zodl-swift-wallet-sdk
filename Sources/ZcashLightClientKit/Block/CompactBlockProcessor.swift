@@ -355,6 +355,10 @@ extension CompactBlockProcessor {
             _ = await mempool?.result
             await poll?.value
             await rewind?.value
+            // A suspended action can admit a downloader after the initial stop pass.
+            // Captured owners can no longer admit work once joined, so drain their
+            // final action-owned writers before reporting quiescence or wiping.
+            await stopAllActions()
             backoffTimer?.invalidate()
             backoffTimer = nil
             retryAttempts = 0

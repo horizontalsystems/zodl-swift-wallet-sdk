@@ -21,8 +21,11 @@ final class AwaitableStopSynchronizerTests: ZcashTestCase {
         let trace = StopTrace()
         let sync = try makeClassic(trace: trace)
         await sync.stopAndWait()
+        let firstStops = trace.events.filter { $0 == "stop:done" }.count
+        XCTAssertGreaterThan(firstStops, 0)
         await sync.stopAndWait()
-        XCTAssertEqual(trace.events, ["stop", "stop:done", "stop", "stop:done"])
+        XCTAssertGreaterThan(trace.events.filter { $0 == "stop:done" }.count, firstStops)
+        assertEveryClassicStopFinished(trace)
         XCTAssertEqual(sync.latestState.internalSyncStatus, .unprepared)
     }
 
@@ -36,7 +39,7 @@ final class AwaitableStopSynchronizerTests: ZcashTestCase {
             let chainTipUpdated = await sync.sdkFlags.chainTipUpdated
             XCTAssertFalse(chainTipUpdated)
         }
-        XCTAssertEqual(trace.events, ["stop", "stop:done", "stop", "stop:done"])
+        assertEveryClassicStopFinished(trace)
     }
 
     func testClassicLegacyStopReturnsWhileOneProcessorStopIsHeld() async throws {
@@ -55,7 +58,8 @@ final class AwaitableStopSynchronizerTests: ZcashTestCase {
         XCTAssertFalse(trace.events.contains("stop:done"))
         gate.open()
         await fulfillment(of: [bodyFinished], timeout: 5)
-        XCTAssertEqual(trace.events.filter { $0 == "stop" }.count, 1)
+        await sync.stopAndWait()
+        assertEveryClassicStopFinished(trace)
     }
 
     func testSlipstreamStopAndWaitCompletesAfterEngineStop() async throws {
@@ -167,8 +171,18 @@ final class AwaitableStopSynchronizerTests: ZcashTestCase {
         gate.open()
         await operation.value
         await fulfillment(of: [bodyFinished], timeout: 5)
-        XCTAssertEqual(trace.events, ["stop", "release", "stop:done", "return"])
+        let events = trace.events
+        XCTAssertLessThan(try XCTUnwrap(events.firstIndex(of: "release")), try XCTUnwrap(events.firstIndex(of: "stop:done")))
+        XCTAssertEqual(events.last, "return")
+        assertEveryClassicStopFinished(trace)
         XCTAssertFalse(statuses.contains(.stopped), "an idle processor need not publish a stopped event")
+    }
+
+    private func assertEveryClassicStopFinished(_ trace: StopTrace) {
+        let events = trace.events
+        let stops = events.filter { $0 == "stop" }.count
+        XCTAssertGreaterThan(stops, 0)
+        XCTAssertEqual(stops, events.filter { $0 == "stop:done" }.count)
     }
 
     private func makeClassic(
@@ -179,11 +193,12 @@ final class AwaitableStopSynchronizerTests: ZcashTestCase {
     ) throws -> SDKSynchronizer {
         let downloader = BlockDownloaderMock()
         downloader.stopDownloadClosure = {
+            let firstStop = !trace.events.contains("stop")
             trace.append("stop")
-            entered?.fulfill()
+            if firstStop { entered?.fulfill() }
             await gate?.wait()
             trace.append("stop:done")
-            bodyFinished?.fulfill()
+            if firstStop { bodyFinished?.fulfill() }
         }
         mockContainer.mock(type: BlockDownloader.self, isSingleton: true) { _ in downloader }
         mockContainer.mock(type: ZcashRustBackendWelding.self, isSingleton: true) { _ in ZcashRustBackendWeldingMock() }

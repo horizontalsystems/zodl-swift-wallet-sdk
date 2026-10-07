@@ -4,6 +4,120 @@ import XCTest
 @testable import ZcashLightClientKit
 
 final class CompactBlockProcessorCleanupTests: ZcashTestCase {
+    func testAwaitedStopJoinsDownloaderAdmittedByCancelledDownloadAction() async throws {
+        try await assertLateDownloadIsDrained(wipe: false)
+    }
+
+    func testDirectWipeJoinsDownloaderAdmittedByCancelledDownloadAction() async throws {
+        try await assertLateDownloadIsDrained(wipe: true)
+    }
+
+    private func assertLateDownloadIsDrained(wipe: Bool) async throws {
+        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+        let processor = fixture.synchronizer.blockProcessor
+        let actionEntered = XCTestExpectation(description: "real download action suspended before admission")
+        let drainEntered = XCTestExpectation(description: "initial action stop completed without a downloader")
+        let writerEntered = XCTestExpectation(description: "prefetch storage writer held after requested batch")
+        let runFinished = XCTestExpectation(description: "cancelled real download action returned normally")
+        let earlyCompletion = XCTestExpectation(description: "teardown returned before prefetch writer exit")
+        earlyCompletion.isInverted = true
+        let actionGate = GiftCardOperationGate()
+        let writerGate = GiftCardOperationGate()
+        let batchReady = GiftCardOperationGate()
+        let events = CleanupEvents()
+        fixture.service.blockStreamStartHeightEndHeightModeClosure = { start, end, _ in
+            AsyncThrowingStream { continuation in
+                for height in start...end {
+                    continuation.yield(ZcashCompactBlock(
+                        height: height,
+                        data: Data(),
+                        meta: ZcashCompactBlock.Meta(hash: Data(), time: 0, saplingOutputs: 0, orchardOutputs: 0)
+                    ))
+                }
+                continuation.finish()
+            }
+        }
+        fixture.storage.writeBlocksClosure = { blocks in
+            // The real action requests 1...101, while the downloader prefetches to 301.
+            if blocks.first?.height == 102 {
+                events.append("writer:entered")
+                writerEntered.fulfill()
+                await batchReady.open()
+                await writerGate.wait()
+                events.append("writer:exited")
+            }
+        }
+        fixture.storage.clearClosure = {
+            XCTAssertTrue(events.events.contains("writer:exited"), "wipe must join the late prefetch writer")
+            events.append("clear")
+        }
+        let logger = LoggerMock()
+        logger.debugFileFunctionLineClosure = { _, _, _, _ in }
+        logger.errorFileFunctionLineClosure = { _, _, _, _ in }
+        let realDownloader = BlockDownloaderImpl(
+            service: fixture.service,
+            downloaderService: BlockDownloaderServiceImpl(service: fixture.service, storage: fixture.storage),
+            storage: fixture.storage,
+            metrics: SDKMetricsImpl(),
+            logger: logger
+        )
+        let downloader = LateActionDownloader(
+            downloader: realDownloader,
+            admission: actionGate,
+            batchReady: batchReady,
+            events: events,
+            actionEntered: actionEntered,
+            drainEntered: drainEntered
+        )
+        fixture.container.mock(type: BlockDownloader.self, isSingleton: true) { _ in downloader }
+        await processor.updateService(fixture.container)
+        await processor.updateEventClosure(identifier: "late-download") { event in
+            if case .startedSyncing = event {
+                await processor.context.update(lastScannedHeight: 1)
+                await processor.context.update(syncControlData: SyncControlData(
+                    latestBlockHeight: 401, latestScannedHeight: 1, firstUnenhancedHeight: nil
+                ))
+                await processor.context.update(state: .download)
+            }
+            if case .stopped = event { runFinished.fulfill() }
+        }
+        await processor.start()
+        await fulfillment(of: [actionEntered], timeout: 5)
+        let completed = XCTestExpectation(description: "teardown completed after writer exit")
+        var subscription: AnyCancellable?
+        let operation: Task<Void, Never>?
+        if wipe {
+            subscription = fixture.synchronizer.wipe().sink(receiveCompletion: { result in
+                if case .failure = result { XCTFail("direct wipe must succeed") }
+                events.append("completed")
+                earlyCompletion.fulfill()
+                completed.fulfill()
+            }, receiveValue: { })
+            operation = nil
+        } else {
+            operation = Task {
+                await fixture.synchronizer.stopAndWait()
+                events.append("completed")
+                earlyCompletion.fulfill()
+                completed.fulfill()
+            }
+        }
+        await fulfillment(of: [drainEntered], timeout: 5)
+        await actionGate.open()
+        await fulfillment(of: [writerEntered, runFinished], timeout: 5)
+        // The run has returned normally after its batch; only the later writer remains held.
+        XCTAssertTrue(events.events.contains("action:batch-complete"))
+        await fulfillment(of: [earlyCompletion], timeout: 0.1)
+        XCTAssertFalse(events.events.contains("clear"))
+        await writerGate.open()
+        await fulfillment(of: [completed], timeout: 5)
+        await operation?.value
+        let trace = events.events
+        XCTAssertLessThan(try XCTUnwrap(trace.firstIndex(of: "writer:exited")), try XCTUnwrap(trace.firstIndex(of: "completed")))
+        withExtendedLifetime(subscription) { }
+        try await fixture.redeemer.cleanup()
+    }
+
     func testCleanupCompletesWhenCancelledFinalActionReturnsNormally() async throws {
         let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
         _ = try await fixture.redeemer.check()
@@ -632,4 +746,56 @@ final class CleanupEvents: @unchecked Sendable {
             return true
         }
     }
+}
+
+/// Holds the real action at downloader setup, forwarding actual admission, batch waits and joins.
+private final class LateActionDownloader: BlockDownloader {
+    let downloader: BlockDownloaderImpl
+    let admission: GiftCardOperationGate
+    let batchReady: GiftCardOperationGate
+    let events: CleanupEvents
+    let actionEntered: XCTestExpectation
+    let drainEntered: XCTestExpectation
+
+    init(
+        downloader: BlockDownloaderImpl,
+        admission: GiftCardOperationGate,
+        batchReady: GiftCardOperationGate,
+        events: CleanupEvents,
+        actionEntered: XCTestExpectation,
+        drainEntered: XCTestExpectation
+    ) {
+        self.downloader = downloader
+        self.admission = admission
+        self.batchReady = batchReady
+        self.events = events
+        self.actionEntered = actionEntered
+        self.drainEntered = drainEntered
+    }
+
+    func setSyncRange(_ range: CompactBlockRange, batchSize: Int) async throws {
+        events.append("action:entered")
+        actionEntered.fulfill()
+        await admission.wait()
+        try await downloader.setSyncRange(range, batchSize: batchSize)
+    }
+
+    func stopDownload() async {
+        await downloader.stopDownload()
+        if events.events.contains("action:entered"), events.appendOnce("drain:entered") { drainEntered.fulfill() }
+    }
+
+    func waitUntilRequestedBlocksAreDownloaded(in range: CompactBlockRange) async throws {
+        await batchReady.wait()
+        try await downloader.waitUntilRequestedBlocksAreDownloaded(in: range)
+        events.append("action:batch-complete")
+    }
+
+    func setDownloadLimit(_ limit: BlockHeight) async { await downloader.setDownloadLimit(limit) }
+    func startDownload(maxBlockBufferSize: Int) async { await downloader.startDownload(maxBlockBufferSize: maxBlockBufferSize) }
+    func update(latestDownloadedBlockHeight: BlockHeight, force: Bool) async {
+        await downloader.update(latestDownloadedBlockHeight: latestDownloadedBlockHeight, force: force)
+    }
+    func latestDownloadedBlockHeight() async -> BlockHeight { await downloader.latestDownloadedBlockHeight() }
+    func rewind(latestDownloadedBlockHeight: BlockHeight?) async { await downloader.rewind(latestDownloadedBlockHeight: latestDownloadedBlockHeight) }
 }

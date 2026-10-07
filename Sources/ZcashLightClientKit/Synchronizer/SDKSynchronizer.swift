@@ -294,7 +294,7 @@ public class SDKSynchronizer: AwaitableStopSynchronizer {
     }
 
     /// Card-only final resource release. The redeemer has serialized and drained
-    /// every card operation and awaited wipe before calling this helper.
+    /// every card operation before calling this helper.
     func closeGiftCardResources() async throws {
         // Tor's service cache drops native connection owners synchronously. The
         // direct gRPC service's detached NIO shutdown is not an awaited drain.
