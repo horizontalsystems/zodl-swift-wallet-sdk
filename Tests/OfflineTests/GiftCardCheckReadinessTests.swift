@@ -380,6 +380,64 @@ final class GiftCardCheckReadinessTests: ZcashTestCase {
         }
     }
 
+    // Subscribing after the actor decision loses a terminal event and starts the failed attempt.
+    func testTerminalStallDuringStartDecisionFailsWithoutStarting() async throws {
+        let harness = Harness()
+        defer { harness.clock.dispose() }
+        let gate = GiftCardCleanupTestGate()
+        let selected = XCTestExpectation(description: "start decision suspended")
+        let caller = Task {
+            try await harness.waiter.wait(
+                stateStream: harness.states.eraseToAnyPublisher(),
+                eventStream: harness.events.eraseToAnyPublisher(),
+                shouldStart: {
+                    selected.fulfill()
+                    await gate.wait()
+                    return true
+                },
+                start: {
+                    XCTFail("An observed terminal stall must prevent restart")
+                    harness.states.send(self.state(tip: 100, scanned: 100, value: 50_000))
+                }
+            )
+        }
+        defer { caller.cancel() }
+        await fulfillment(of: [selected], timeout: 5)
+        harness.events.send(.syncStalled(attempt: 3, gaveUp: true))
+        await gate.open()
+        await assertError(caller, code: ZcashError.giftCardCheckSyncStalled.code)
+    }
+
+    // Cancellation must dispose the event listener even while the actor decision is held.
+    func testCancellationDuringStartDecisionDoesNotStart() async throws {
+        let harness = Harness()
+        defer { harness.clock.dispose() }
+        let gate = GiftCardCleanupTestGate()
+        let selected = XCTestExpectation(description: "start decision suspended")
+        let disposed = XCTestExpectation(description: "decision event listener cancelled")
+        let caller = Task {
+            try await harness.waiter.wait(
+                stateStream: harness.states.eraseToAnyPublisher(),
+                eventStream: harness.events.handleEvents(receiveCancel: { disposed.fulfill() }).eraseToAnyPublisher(),
+                shouldStart: {
+                    selected.fulfill()
+                    await gate.wait()
+                    return true
+                },
+                start: { XCTFail("A cancelled decision must never admit a restart") }
+            )
+        }
+        defer { caller.cancel() }
+        await fulfillment(of: [selected], timeout: 5)
+        caller.cancel()
+        await fulfillment(of: [disposed], timeout: 5)
+        await gate.open()
+        do {
+            _ = try await caller.value
+            XCTFail("Cancelled decision must throw")
+        } catch is CancellationError { }
+    }
+
     func testPolicyDefaultsAreExact() {
         let direct = GiftCardCheckPolicy.live(isTorEnabled: false)
         let tor = GiftCardCheckPolicy.live(isTorEnabled: true)

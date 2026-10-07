@@ -346,7 +346,9 @@ public actor GiftCardRedeemer {
     /// Funded balances return immediately. Zero must remain coherent for 15 seconds direct or
     /// 30 seconds with Tor; syncing, lost coverage, a missing account or a changed tip resets it.
     /// A disconnected wallet may recover for 60 seconds direct or 120 seconds with Tor. A terminal
-    /// sync stall fails the check. These failures leave the balance unknown.
+    /// sync stall fails the check. These failures leave the balance unknown. A later explicit
+    /// check restarts a pass whose stall recovery gave up, with a fresh recovery budget.
+    /// Repeated checks reuse healthy syncing or up-to-date passes.
     /// The caller has a 600-second monotonic budget from method entry, including queued time and
     /// preparation. Cancellation or
     /// expiry requests cancellation of unfinished work and returns without waiting for that work
@@ -502,19 +504,17 @@ public actor GiftCardRedeemer {
         let accountUUID = try await prepareIfNeeded(operation: operation)
         try operation.requireActive()
 
-        let start: (() async throws -> Void)?
-        switch synchronizer.latestState.syncStatus {
-        case .upToDate, .syncing:
-            start = nil
-        case .unprepared, .stopped, .error:
-            start = {
+        let waiter = GiftCardCheckStateWaiter(accountUUID: accountUUID, policy: checkPolicy, timing: checkTiming)
+        let balance = try await waiter.wait(
+            stateStream: synchronizer.stateStream,
+            eventStream: synchronizer.eventStream,
+            shouldStart: { await self.synchronizer.shouldStartForGiftCardCheck() },
+            start: {
                 try operation.requireActive()
                 try await self.synchronizer.start(retry: true)
                 try operation.requireActive()
             }
-        }
-        let waiter = GiftCardCheckStateWaiter(accountUUID: accountUUID, policy: checkPolicy, timing: checkTiming)
-        let balance = try await waiter.wait(stateStream: synchronizer.stateStream, eventStream: synchronizer.eventStream, start: start)
+        )
         try operation.requireActive()
         var sweep: GiftCardStatus.Sweep?
         if balance.shieldedSpendableValue > .zero {

@@ -999,6 +999,18 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         }
     }
 
+    /// An explicit check gives an exhausted pass a fresh start while reusing healthy work.
+    func shouldStartForGiftCardCheck() -> Bool {
+        switch latestState.syncStatus {
+        case .syncing:
+            return stallGaveUpReported
+        case .upToDate:
+            return false
+        case .unprepared, .stopped, .error:
+            return true
+        }
+    }
+
     /// [MOB-1850] Clears the per-handle stall-recovery budget. Called from
     /// `resetStallWatchdog(resetRecoveryBudget:)` in the watchdog extension, which cannot reach
     /// these `private` counters itself.

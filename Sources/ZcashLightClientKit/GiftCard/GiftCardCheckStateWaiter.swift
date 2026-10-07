@@ -51,20 +51,37 @@ final class GiftCardCheckStateWaiter: @unchecked Sendable {
         eventStream: AnyPublisher<SynchronizerEvent, Never>,
         start: (() async throws -> Void)?
     ) async throws -> AccountBalance {
+        try await wait(
+            stateStream: stateStream,
+            eventStream: eventStream,
+            shouldStart: { start != nil },
+            start: { try await start?() }
+        )
+    }
+
+    func wait(
+        stateStream: AnyPublisher<SynchronizerState, Never>,
+        eventStream: AnyPublisher<SynchronizerEvent, Never>,
+        shouldStart: () async -> Bool,
+        start: () async throws -> Void
+    ) async throws -> AccountBalance {
         try await withTaskCancellationHandler {
-            withLock { startInProgress = start != nil }
-            // Events are never suppressed: a terminal event during restart belongs to this wait.
+            // Observe terminal events before the actor hop that selects a restart.
             install(eventStream.sink { [weak self] event in
                 if case .syncStalled(_, true) = event {
                     self?.finish(.failure(ZcashError.giftCardCheckSyncStalled))
                 }
             })
-            withLock { suppressReplay = start != nil }
+            let needsStart = await shouldStart()
+            withLock {
+                startInProgress = needsStart
+                suppressReplay = needsStart
+            }
             install(stateStream.sink { [weak self] state in self?.receive(state) })
             // Slipstream's CurrentValueSubject replays synchronously during subscription. A
             // stream without replay must not lose its first new value after subscription.
             withLock { suppressReplay = false }
-            if let start, withLock({ result == nil }) {
+            if needsStart, withLock({ result == nil }) {
                 do { try await start() } catch { finish(.failure(error)) }
             }
             apply(withLock {
