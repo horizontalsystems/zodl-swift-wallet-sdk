@@ -284,6 +284,7 @@ struct GiftCardCancellationFixture {
     let backend: ZcashRustBackendWeldingMock
     let service: LightWalletServiceMock
     let engine: GatedFakeSlipstreamEngine
+    let repository: TransactionRepositoryMock
     let initializer: Initializer
     let anchor: GiftCardAnchorCapture
 
@@ -416,6 +417,7 @@ struct GiftCardCancellationFixture {
             backend: backend,
             service: service,
             engine: engine,
+            repository: repository,
             initializer: capturedInitializer,
             anchor: anchor
         )

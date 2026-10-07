@@ -5,6 +5,153 @@ import XCTest
 @testable import ZcashLightClientKit
 
 final class GiftCardCleanupTests: ZcashTestCase {
+    func testCleanupWaitsForGiftSlipstreamStartToFinish() async throws {
+        try await assertCleanupWaitsForActivePass(.starting)
+    }
+
+    func testCleanupWaitsForActiveGiftSlipstreamToStopQuiescently() async throws {
+        try await assertCleanupWaitsForActivePass(.syncing)
+    }
+
+    private enum ActivePassPhase: Equatable {
+        case starting
+        case syncing
+    }
+
+    private func assertCleanupWaitsForActivePass(_ phase: ActivePassPhase) async throws {
+        let clock = GiftCardCleanupTestClock()
+        defer { clock.dispose() }
+        let fixture = try await GiftCardCancellationFixture.make(
+            storageDirectory: testTempDirectory,
+            cleanupTiming: clock.timing
+        )
+        defer {
+            fixture.engine.startGate.open()
+            fixture.engine.stopGate.open()
+        }
+        fixture.repository.findForResubmissionUpToReturnValue = []
+        await fixture.engine.setSnapshotOnStart(SlipstreamSnapshot.testSyncing(progressPermille: 100, chainTip: 3_000_010))
+        let entered = XCTestExpectation(description: "gift Slipstream reached active \(phase) phase")
+        switch phase {
+        case .starting:
+            fixture.engine.startGate.close()
+            await fixture.engine.onCall("start") { entered.fulfill() }
+        case .syncing:
+            fixture.engine.stopGate.close()
+            await fixture.engine.onCall("start:done") { entered.fulfill() }
+        }
+        let root = testTempDirectory.appendingPathComponent(fixture.card.synchronizerAlias.description)
+        let marker = root.appendingPathComponent("active-pass-marker")
+        let check = Task { try await fixture.redeemer.check() }
+        defer { check.cancel() }
+        await fulfillment(of: [entered], timeout: 5)
+        try Data([1]).write(to: marker)
+        let stopEntered = XCTestExpectation(description: "gift cleanup reached engine stop")
+        if phase == .syncing {
+            await fixture.engine.onCall("stop") { stopEntered.fulfill() }
+        }
+        let deadline = clock.expectSleep(at: 30_000_000_000)
+        let cleanup = startCleanup(fixture.redeemer)
+        if phase == .syncing {
+            await fulfillment(of: [stopEntered, deadline], timeout: 5)
+        } else {
+            await fulfillment(of: [deadline], timeout: 5)
+        }
+        clock.advance(to: 30_000_000_000)
+        do {
+            try await cleanup.value
+            XCTFail("Cleanup must wait for the active pass beyond this caller's budget")
+        } catch {
+            XCTAssertEqual(error as? ZcashError, .giftCardCleanupTimedOut)
+        }
+        let callsBeforeRelease = await fixture.engine.calls
+        XCTAssertFalse(callsBeforeRelease.contains("close"))
+        if phase == .starting {
+            XCTAssertFalse(callsBeforeRelease.contains("stop"))
+        } else {
+            XCTAssertFalse(callsBeforeRelease.contains("stop:done"))
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+        assertAlreadyActive(card: fixture.card)
+        XCTAssertEqual(try GiftCardRedeemer.removeLeftoverWallets(in: testTempDirectory), 0)
+
+        fixture.engine.startGate.open()
+        fixture.engine.stopGate.open()
+        _ = try? await check.value
+        try await waitForRelease(card: fixture.card)
+        try await fixture.redeemer.cleanup()
+        let calls = await fixture.engine.calls
+        XCTAssertEqual(calls.filter { $0 == "stop" }.count, 1)
+        XCTAssertEqual(calls.filter { $0 == "close" }.count, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+        let replacement = try makeReplacement(card: fixture.card)
+        withExtendedLifetime(replacement) {}
+    }
+
+    func testCleanupJoinsCancelledBackgroundResubmissionBeforeClosingWallet() async throws {
+        let clock = GiftCardCleanupTestClock()
+        defer { clock.dispose() }
+        let gate = GiftCardCleanupTestGate()
+        let fixture = try await GiftCardCancellationFixture.make(
+            storageDirectory: testTempDirectory,
+            cleanupTiming: clock.timing
+        )
+        do {
+            _ = try await fixture.redeemer.check()
+            let root = testTempDirectory.appendingPathComponent(fixture.card.synchronizerAlias.description)
+            let marker = root.appendingPathComponent("resubmission-marker")
+            try Data([1]).write(to: marker)
+            let reading = XCTestExpectation(description: "background resubmission entered repository read")
+            let cancelled = XCTestExpectation(description: "wipe cancelled background resubmission")
+            fixture.repository.findForResubmissionUpToClosure = { _ in
+                await withTaskCancellationHandler {
+                    reading.fulfill()
+                    await gate.wait()
+                    return []
+                } onCancel: {
+                    cancelled.fulfill()
+                }
+            }
+
+            await fixture.synchronizer.maybeRunTxResubmission(
+                state: 1,
+                chainTip: 3_000_010,
+                isCancelled: false
+            )
+            await fulfillment(of: [reading], timeout: 5)
+            let cleanup = startCleanup(fixture.redeemer)
+            await fulfillment(of: [cancelled, clock.expectSleep(at: 30_000_000_000)], timeout: 5)
+            clock.advance(to: 30_000_000_000)
+            do {
+                try await cleanup.value
+                XCTFail("The caller budget must expire while the owned wipe waits for resubmission")
+            } catch {
+                XCTAssertEqual(error as? ZcashError, .giftCardCleanupTimedOut)
+            }
+
+            let callsDuringRead = await fixture.engine.calls
+            XCTAssertFalse(callsDuringRead.contains("stop"))
+            XCTAssertFalse(callsDuringRead.contains("close"))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+            assertAlreadyActive(card: fixture.card)
+            XCTAssertEqual(try GiftCardRedeemer.removeLeftoverWallets(in: testTempDirectory), 0)
+
+            await gate.open()
+            try await waitForRelease(card: fixture.card)
+            try await fixture.redeemer.cleanup()
+            let calls = await fixture.engine.calls
+            XCTAssertEqual(calls.filter { $0 == "stop" }.count, 1)
+            XCTAssertEqual(calls.filter { $0 == "close" }.count, 1)
+            XCTAssertEqual(fixture.repository.findForResubmissionUpToCallsCount, 1)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+            let replacement = try makeReplacement(card: fixture.card)
+            withExtendedLifetime(replacement) {}
+        } catch {
+            await gate.open()
+            throw error
+        }
+    }
+
     func testNonQuiescentCleanupProtectsWalletAndAlias() async throws {
         let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
         _ = try await fixture.redeemer.check()
