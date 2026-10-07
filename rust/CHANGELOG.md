@@ -66,6 +66,12 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Device identity: `zcashlc_ledger_device_identity_apdu(network_id)`,
     `zcashlc_ledger_parse_device_identity` returning the `tpk0-…` string (free with
     `zcashlc_string_free`), and `zcashlc_ledger_validate_device_identity`.
+    `zcashlc_ledger_check_account_zero_identity(network_id, ufvk, identity)` returns `true` when
+    the transparent item of `ufvk`, the exported key of ZIP 32 account 0, derives the public key
+    that `identity` hashes. It returns `false` with kind `4` (device mismatch) when it does not,
+    kind `9` (malformed reply) when `ufvk` has no transparent item, and kind `10` (invalid input)
+    when an input does not parse. The key of any other account never derives the identity, so the
+    check applies to account 0 only.
   - Viewing key export: `zcashlc_ledger_ufvk_export_new(network_id, account_index)` returns an
     opaque `FfiLedgerUfvkExport` driven by `_next_apdu`, `_waits_for_user` and `_process_response`,
     which returns `FfiLedgerUfvkExportStep` (`status` is one of the

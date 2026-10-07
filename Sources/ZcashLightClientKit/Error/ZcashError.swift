@@ -1093,8 +1093,11 @@ public enum ZcashError: Equatable, Error {
     /// - `reason` names the app version and the version the operation needs; it carries no transaction data.
     /// ZLEDG0003
     case ledgerAppTooOld(_ reason: String)
-    /// The connected Ledger device is not the one this account was paired with.
-    /// Nothing of the transaction was sent to it. Connect the paired device, or pair this one.
+    /// The connected Ledger device does not match the account.
+    /// - During signing: the device is not the one the account was paired with. Nothing of the transaction was sent to it.
+    ///   Connect the paired device, or pair this one.
+    /// - During `LedgerDevice.pairAccount` for ZIP 32 account 0: the exported viewing key does not derive the device identity.
+    ///   Do not import the key. For other accounts, pairing does not do this check.
     /// ZLEDG0004
     case ledgerDeviceMismatch
     /// The connected Ledger device runs a different Zcash app version than the one the signing session was built for.
@@ -1472,7 +1475,7 @@ public enum ZcashError: Equatable, Error {
         case .ledgerUserRejected: return "The user declined on the Ledger device."
         case .ledgerWrongApp: return "The Ledger device is not running the Zcash app."
         case .ledgerAppTooOld: return "The Zcash app on the Ledger device is too old for this operation."
-        case .ledgerDeviceMismatch: return "The connected Ledger device is not the one this account was paired with."
+        case .ledgerDeviceMismatch: return "The connected Ledger device does not match the account."
         case .ledgerCapsMismatch: return "The connected Ledger device runs a different Zcash app version than the one the signing session was built for."
         case .ledgerDerivationBudgetExhausted: return "The Zcash app on the Ledger device has used up its key derivations for this run; close and reopen the app on the device."
         case .ledgerDeviceRefused: return "The Ledger device refused the command."

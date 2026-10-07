@@ -7,6 +7,7 @@
 //! - one-shot commands: the app version (`GET_FIRMWARE_VERSION`), the device identity (a silent
 //!   `GET_WALLET_PUBLIC_KEY`), and the unified-address display (`GET_SHIELD_ADDR`);
 //! - the unified full viewing key export (`GET_VK`), as an opaque [`FfiLedgerUfvkExport`] handle;
+//! - the pairing check: [`zcashlc_ledger_check_account_zero_identity`];
 //! - BLE framing: the MTU handshake, [`zcashlc_ledger_ble_frames`], and an opaque
 //!   [`FfiLedgerBleDeframer`] handle;
 //! - the PCZT signing ceremony, as an opaque [`FfiLedgerSignSession`] handle built from the wallet
@@ -56,8 +57,9 @@ use transparent::{
     address::TransparentAddress,
     keys::{AccountPubKey, NonHardenedChildIndex, TransparentKeyScope},
 };
-use zcash_address::unified::Encoding as _;
+use zcash_address::unified::{self, Encoding as _};
 use zcash_client_backend::data_api::{Account as _, WalletRead, wallet::SignerView};
+use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_protocol::consensus::Parameters as _;
 use zeroize::Zeroize;
 use zip32::AccountId;
@@ -88,8 +90,8 @@ pub enum LedgerErrorKind {
     /// The Zcash app on the device is too old for what was asked: it predates the PCZT
     /// instructions, or the Ironwood pool a V6 transaction needs.
     AppTooOld = 3,
-    /// The connected device is not the Ledger the account was paired with, or its identity changed
-    /// across a pairing export.
+    /// The connected device is not the Ledger the account was paired with, or the exported viewing
+    /// key of account 0 does not derive the identity of the device that exported it.
     DeviceMismatch = 4,
     /// The connected device runs another app version than the one the session was built for.
     CapsMismatch = 5,
@@ -827,6 +829,102 @@ pub unsafe extern "C" fn zcashlc_ledger_parse_unified_address(
             .into_raw())
     });
     crate::unwrap_exc_or_null(res)
+}
+
+// ---------------------------------------------------------------------------
+// Pairing checks
+// ---------------------------------------------------------------------------
+
+/// Decodes a unified full viewing key passed across the FFI, for the Ledger network `network`.
+///
+/// The error never repeats the value.
+fn parse_ufvk(
+    ufvk: *const c_char,
+    network: pczt_ledger::Network,
+) -> Result<UnifiedFullViewingKey, LedgerError> {
+    if ufvk.is_null() {
+        return Err(LedgerError::invalid_input(
+            "no unified full viewing key was supplied",
+        ));
+    }
+    let encoded = unsafe { CStr::from_ptr(ufvk) }
+        .to_str()
+        .map_err(|_| LedgerError::invalid_input("the unified full viewing key is not UTF-8"))?;
+    let (found, _revision, container) = unified::Ufvk::decode(encoded)
+        .map_err(|_| LedgerError::invalid_input("the value is not a unified full viewing key"))?;
+    if found != network.network_type() {
+        return Err(LedgerError::invalid_input(
+            "the unified full viewing key is for another network",
+        ));
+    }
+    UnifiedFullViewingKey::parse(&container).map_err(|_| {
+        LedgerError::invalid_input("the unified full viewing key holds an invalid item")
+    })
+}
+
+/// The device identity that the transparent key in `ufvk` derives, when `ufvk` belongs to ZIP 32
+/// account 0.
+///
+/// The identity is the hash of the public key at `m/44'/coin'/0'/0/0`. That is account 0's
+/// external transparent key at index 0, so only the key of account 0 derives it.
+fn account_zero_identity(ufvk: &UnifiedFullViewingKey) -> Result<DeviceIdentity, LedgerError> {
+    // The Zcash app always exports a P2PKH item next to the Orchard item, so a key without one
+    // is not what the device sent.
+    let account_key = ufvk.p2pkh().ok_or_else(|| {
+        LedgerError::new(
+            LedgerErrorKind::MalformedReply,
+            "the exported viewing key has no transparent item",
+        )
+    })?;
+    let pubkey = account_key
+        .derive_address_pubkey(TransparentKeyScope::EXTERNAL, NonHardenedChildIndex::ZERO)
+        .map_err(|_| {
+            LedgerError::new(
+                LedgerErrorKind::MalformedReply,
+                "the exported transparent key does not derive its first address",
+            )
+        })?;
+    Ok(DeviceIdentity::from_compressed_pubkey(&pubkey.serialize()))
+}
+
+/// Checks that the unified full viewing key `ufvk` of ZIP 32 account 0 belongs to the device whose
+/// identity is `identity`.
+///
+/// The check derives the public key at `m/44'/coin'/0'/0/0` from the transparent item of `ufvk`,
+/// hashes it into a device identity, and compares that with `identity`. Use it only for account 0:
+/// the key of any other account never derives the identity.
+///
+/// Returns `true` when the two match. Returns `false` with the last error set otherwise:
+/// [`LedgerErrorKind::DeviceMismatch`] when the identities differ,
+/// [`LedgerErrorKind::MalformedReply`] when `ufvk` has no transparent item, and
+/// [`LedgerErrorKind::InvalidInput`] when `ufvk` or `identity` does not parse or `ufvk` is for
+/// another network. No error repeats a value.
+///
+/// # Safety
+///
+/// - `ufvk` must be a non-null pointer to a null-terminated string.
+/// - `identity` must be a non-null pointer to a null-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zcashlc_ledger_check_account_zero_identity(
+    network_id: u32,
+    ufvk: *const c_char,
+    identity: *const c_char,
+) -> bool {
+    let res = catch_panic(|| {
+        let network = ledger_network(network_id)?;
+        let expected = parse_identity(identity)?;
+        let ufvk = parse_ufvk(ufvk, network)?;
+        if account_zero_identity(&ufvk)? == expected {
+            Ok(true)
+        } else {
+            Err(LedgerError::new(
+                LedgerErrorKind::DeviceMismatch,
+                "the exported viewing key does not belong to the device that was identified",
+            )
+            .into())
+        }
+    });
+    crate::unwrap_exc_or(res, false)
 }
 
 // ---------------------------------------------------------------------------

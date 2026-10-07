@@ -296,12 +296,15 @@ fn the_address_display_command_bounds_its_indices() {
 /// The device encodes in revision 0 (`pczt_ledger::pairing::DEVICE_UNIFIED_REVISION`), unlike
 /// `zcash_keys`'s own `encode`, which is revision 2 unconditionally.
 fn testnet_ufvk() -> String {
-    let usk = UnifiedSpendingKey::from_seed(
-        &zcash_protocol::consensus::TEST_NETWORK,
-        &[7u8; 32],
-        AccountId::ZERO,
-    )
-    .expect("a spending key derives");
+    device_ufvk(&[7u8; 32], AccountId::ZERO, true)
+}
+
+/// The revision 0 testnet key the device exports for `account` of `seed`, with or without its
+/// P2PKH item.
+fn device_ufvk(seed: &[u8], account: AccountId, with_transparent: bool) -> String {
+    let usk =
+        UnifiedSpendingKey::from_seed(&zcash_protocol::consensus::TEST_NETWORK, seed, account)
+            .expect("a spending key derives");
     let ufvk = usk.to_unified_full_viewing_key();
 
     let items = [
@@ -309,7 +312,7 @@ fn testnet_ufvk() -> String {
             .map(|fvk| Uitem::Data(Fvk::Orchard(fvk.to_bytes()))),
         ufvk.sapling()
             .map(|dfvk| Uitem::Data(Fvk::Sapling(dfvk.to_bytes()))),
-        ufvk.p2pkh().map(|pubkey| {
+        ufvk.p2pkh().filter(|_| with_transparent).map(|pubkey| {
             Uitem::Data(Fvk::P2pkh(
                 pubkey
                     .serialize()
@@ -398,6 +401,122 @@ fn a_declined_viewing_key_export_cannot_be_reissued() {
     assert_eq!(take_error().kind, LedgerErrorKind::Internal as u32);
 
     unsafe { zcashlc_ledger_free_ufvk_export(export) };
+}
+
+// ---------------------------------------------------------------------------
+// Pairing checks
+// ---------------------------------------------------------------------------
+
+const PAIRING_SEED: [u8; 32] = [7u8; 32];
+
+/// The identity a device holding `seed` answers, built the way the device builds it: from the
+/// secret key at `m/44'/1'/0'/0/0`, through a `GET_WALLET_PUBLIC_KEY` reply.
+fn device_identity_of_seed(seed: &[u8]) -> CString {
+    let secret = transparent::keys::AccountPrivKey::from_seed(
+        &zcash_protocol::consensus::TEST_NETWORK,
+        seed,
+        AccountId::ZERO,
+    )
+    .expect("an account key derives")
+    .derive_external_secret_key(NonHardenedChildIndex::ZERO)
+    .expect("the first external key derives");
+    let reply = wallet_public_key_reply(&secp256k1::PublicKey::from_secret_key(&secret));
+    let identity = unsafe { zcashlc_ledger_parse_device_identity(reply.as_ptr(), reply.len()) };
+    assert!(!identity.is_null());
+    unsafe { CString::from_raw(identity) }
+}
+
+fn check_identity(network_id: u32, ufvk: &str, identity: &CStr) -> bool {
+    let ufvk = CString::new(ufvk).expect("no NUL");
+    unsafe {
+        zcashlc_ledger_check_account_zero_identity(network_id, ufvk.as_ptr(), identity.as_ptr())
+    }
+}
+
+#[test]
+fn the_account_zero_key_derives_the_identity_of_its_device() {
+    let identity = device_identity_of_seed(&PAIRING_SEED);
+    // A pinned vector, so a change to the identity derivation cannot pass unnoticed.
+    assert_eq!(
+        identity.to_str().expect("ASCII"),
+        "tpk0-0664357ce23cfc75503e4b9f963dd88756bb0708657298d038a90fa757f01c5d"
+    );
+
+    assert!(check_identity(
+        crate::NETWORK_ID_TESTNET,
+        &testnet_ufvk(),
+        &identity
+    ));
+    assert!(
+        zcashlc_ledger_take_last_error().is_null(),
+        "a match sets no error"
+    );
+}
+
+#[test]
+fn a_key_from_another_seed_or_account_does_not_derive_the_identity() {
+    let identity = device_identity_of_seed(&PAIRING_SEED);
+
+    let other_seed = device_ufvk(&[8u8; 32], AccountId::ZERO, true);
+    assert!(!check_identity(
+        crate::NETWORK_ID_TESTNET,
+        &other_seed,
+        &identity
+    ));
+    let error = take_error();
+    assert_eq!(error.kind, LedgerErrorKind::DeviceMismatch as u32);
+    assert!(!error.reason.contains("tpk0"), "{}", error.reason);
+
+    // The identity is a key of account 0; the key of account 1 of the same seed never derives it.
+    let account_one = device_ufvk(&PAIRING_SEED, AccountId::try_from(1).expect("valid"), true);
+    assert!(!check_identity(
+        crate::NETWORK_ID_TESTNET,
+        &account_one,
+        &identity
+    ));
+    assert_eq!(take_error().kind, LedgerErrorKind::DeviceMismatch as u32);
+}
+
+#[test]
+fn a_key_without_a_transparent_item_is_refused() {
+    let identity = device_identity_of_seed(&PAIRING_SEED);
+    let shielded_only = device_ufvk(&PAIRING_SEED, AccountId::ZERO, false);
+
+    assert!(!check_identity(
+        crate::NETWORK_ID_TESTNET,
+        &shielded_only,
+        &identity
+    ));
+    assert_eq!(take_error().kind, LedgerErrorKind::MalformedReply as u32);
+}
+
+#[test]
+fn the_identity_check_refuses_inputs_that_do_not_parse() {
+    let identity = device_identity_of_seed(&PAIRING_SEED);
+
+    // A testnet key checked on mainnet.
+    assert!(!check_identity(
+        crate::NETWORK_ID_MAINNET,
+        &testnet_ufvk(),
+        &identity
+    ));
+    assert_eq!(take_error().kind, LedgerErrorKind::InvalidInput as u32);
+
+    assert!(!check_identity(
+        crate::NETWORK_ID_TESTNET,
+        "not a key",
+        &identity
+    ));
+    let error = take_error();
+    assert_eq!(error.kind, LedgerErrorKind::InvalidInput as u32);
+    assert!(!error.reason.contains("not a key"), "{}", error.reason);
+
+    assert!(!check_identity(
+        crate::NETWORK_ID_TESTNET,
+        &testnet_ufvk(),
+        c"tpk0-short"
+    ));
+    assert_eq!(take_error().kind, LedgerErrorKind::InvalidInput as u32);
 }
 
 // ---------------------------------------------------------------------------

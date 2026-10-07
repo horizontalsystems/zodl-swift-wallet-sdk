@@ -96,8 +96,15 @@ let accountUUID = try await synchronizer.importAccount(
 `pairAccount` reads the app version (and refuses an app that cannot sign), reads the device's
 identity, and asks the user to approve the viewing key export on the device. The identity is
 read once, before the export: the Zcash app leaves a status screen up after the export and drops
-the next command until the user dismisses it, and a transport speaks to exactly one peripheral,
-so the device that answered the probe is the device that exported the key.
+the next command until the user dismisses it.
+
+For ZIP 32 account 0, the identity is the hash of the account's first external transparent key.
+`pairAccount` derives that key from the transparent item of the exported viewing key, and refuses
+the pairing with `ZcashError.ledgerDeviceMismatch` when its hash is not the identity the device
+gave (or with `ledgerMalformedReply` when the key has no transparent item; the Zcash app always
+exports one). That ties the key's transparent item, and so the stored binding, to the device's seed.
+It says nothing about the key's Orchard item, which the identity does not derive. The key of any other
+account does not derive the identity at all, so `pairAccount` does not check it against the identity.
 
 The app-version and identity reads before the export answer at once on a healthy link, so each gets
 `readTimeout` (`LedgerDevice.defaultReadTimeout`, the engine's normal timeout, by default; pass
@@ -224,7 +231,7 @@ that clears (a locked device), and after a transport failure on a new connection
 | `ledgerAppOpenRejected` | The user declined opening the Zcash app on the device; restartable. |
 | `ledgerAppTooOld` | Update the Zcash app. |
 | `ledgerDerivationBudgetExhausted` | The Zcash app ran out of key derivations for this run: close and reopen it on the device. Restartable. |
-| `ledgerDeviceMismatch` | Connect the paired device. |
+| `ledgerDeviceMismatch` | During signing: connect the paired device. During pairing of account 0: the exported key does not belong to the identified device; do not import it. |
 | `ledgerCapsMismatch` | The app version changed during the ceremony: try again. |
 | `ledgerDeviceRefused(statusWord, isTransient)` | Any other refusal; `isTransient` for a condition that clears, such as a locked device. |
 | `ledgerTransactionNotSignable` | A device rule or limit refuses the transaction; nothing was sent. |

@@ -129,6 +129,26 @@ enum ZcashLedgerBackend {
         }
     }
 
+    /// Throws unless the transparent item of `ufvk`, the exported key of ZIP 32 account 0, derives
+    /// `identity`. The key of any other account never derives it.
+    ///
+    /// - Throws: A `.deviceMismatch` failure when the identities differ, and a `.malformedReply`
+    ///   failure when `ufvk` has no transparent item.
+    static func checkAccountZeroIdentity(
+        ufvk: UnifiedFullViewingKey,
+        identity: LedgerDeviceIdentity,
+        networkType: NetworkType
+    ) throws {
+        let matches = zcashlc_ledger_check_account_zero_identity(
+            networkType.networkId,
+            [CChar](ufvk.stringEncoded.utf8CString),
+            [CChar](identity.stringEncoded.utf8CString)
+        )
+        guard matches else {
+            throw LedgerFFIError.takeLast(fallback: "`checkAccountZeroIdentity` failed with unknown error")
+        }
+    }
+
     static func unifiedAddressAPDU(
         networkType: NetworkType,
         accountIndex: Zip32AccountIndex,

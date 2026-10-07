@@ -140,6 +140,16 @@ enum LedgerReplies {
         ].joined()
     )
 
+    /// The testnet key at `m/44'/1'/0'/0/0` of `Environment.seedBytes`, uncompressed: what a device
+    /// holding that seed answers the identity probe with.
+    static let seedIdentityPoint = Data(
+        hex: [
+            "04",
+            "feaa290589a20f795f302ba03847b0a6c9c2b571d75d80bc4ebb02382d0549da",
+            "739e9df5fc227480857ddf7a91181ef7321cc325efd6e148c6784551fb9c5935"
+        ].joined()
+    )
+
     /// A `GET_WALLET_PUBLIC_KEY` reply: `pk_len ‖ pk ‖ addr_len ‖ addr ‖ chain_code`.
     static func walletPublicKey(_ publicKey: Data) -> Data {
         let address = Data("tmFakeLedgerFirstAddress".utf8)
@@ -186,19 +196,20 @@ private func noReconnect() -> @Sendable () async throws -> any LedgerAPDUTranspo
 // MARK: - Pairing
 
 final class LedgerDeviceTests: XCTestCase {
-    private func testnetUFVK() throws -> UnifiedFullViewingKey {
+    private func testnetUFVK(accountIndex: UInt32 = 0) throws -> UnifiedFullViewingKey {
         let tool = DerivationTool(networkType: .testnet)
-        let usk = try tool.deriveUnifiedSpendingKey(seed: Environment.seedBytes, accountIndex: Zip32AccountIndex(0))
+        let usk = try tool.deriveUnifiedSpendingKey(seed: Environment.seedBytes, accountIndex: Zip32AccountIndex(accountIndex))
         return try tool.deriveUnifiedFullViewingKey(from: usk)
     }
 
     /// A device on app 3.9.3 that exports `ufvk` and answers the identity probe with `identityKey(n)`
-    /// for its n-th probe.
+    /// for its n-th probe. By default it answers with the identity of `Environment.seedBytes`, the seed
+    /// of `testnetUFVK()`.
     private func device(
         ufvk: String,
         version: Data = LedgerReplies.firmwareVersion(3, 9, 3),
         vkReply: Data? = nil,
-        identityKey: @escaping @Sendable (Int) -> Data = { _ in LedgerReplies.generatorPoint }
+        identityKey: @escaping @Sendable (Int) -> Data = { _ in LedgerReplies.seedIdentityPoint }
     ) -> ScriptedLedgerTransport {
         let chunks = LedgerReplies.viewingKeyChunks(ufvk)
         return ScriptedLedgerTransport { apdu, history in
@@ -260,7 +271,7 @@ final class LedgerDeviceTests: XCTestCase {
         // app leaves a status screen up after the export and drops the next command — so the binding
         // must carry the identity the first probe answered.
         let transport = device(ufvk: ufvk.stringEncoded) { probe in
-            probe == 0 ? LedgerReplies.generatorPoint : LedgerReplies.doubledGeneratorPoint
+            probe == 0 ? LedgerReplies.seedIdentityPoint : LedgerReplies.doubledGeneratorPoint
         }
         let ledger = LedgerDevice(transport: transport, networkType: .testnet)
 
@@ -270,6 +281,36 @@ final class LedgerDeviceTests: XCTestCase {
         let referencePairing = try await reference.pairAccount(zip32AccountIndex: Zip32AccountIndex(0))
         XCTAssertEqual(pairing.binding.deviceIdentity, referencePairing.binding.deviceIdentity)
         XCTAssertEqual(pairing.ufvk, referencePairing.ufvk)
+    }
+
+    func testPairAccountRefusesAnAccountZeroKeyThatDoesNotDeriveTheDeviceIdentity() async throws {
+        let ufvk = try testnetUFVK()
+        // The identity of another seed: the exported key does not belong to the identified device.
+        let transport = device(ufvk: ufvk.stringEncoded) { _ in LedgerReplies.generatorPoint }
+        let ledger = LedgerDevice(transport: transport, networkType: .testnet)
+
+        do {
+            _ = try await ledger.pairAccount(zip32AccountIndex: Zip32AccountIndex(0))
+            XCTFail("A key that does not derive the device identity must be refused")
+        } catch let error as ZcashError {
+            XCTAssertEqual(error, .ledgerDeviceMismatch)
+            XCTAssertEqual(error.ledgerIsRestartable, false)
+        }
+
+        let closeCount = await transport.closeCount
+        XCTAssertEqual(closeCount, 0, "every exchange succeeded, so the caller closes the connection")
+    }
+
+    func testPairAccountDoesNotCheckTheIdentityOfAnotherAccount() async throws {
+        // The key of account 1 never derives the identity, so pairing it cannot check the identity.
+        let ufvk = try testnetUFVK(accountIndex: 1)
+        let transport = device(ufvk: ufvk.stringEncoded) { _ in LedgerReplies.generatorPoint }
+        let ledger = LedgerDevice(transport: transport, networkType: .testnet)
+
+        let pairing = try await ledger.pairAccount(zip32AccountIndex: Zip32AccountIndex(1))
+
+        XCTAssertEqual(pairing.ufvk, ufvk)
+        XCTAssertEqual(pairing.binding.zip32AccountIndex, Zip32AccountIndex(1))
     }
 
     func testPairAccountRefusesAnAppThatCannotSign() async throws {

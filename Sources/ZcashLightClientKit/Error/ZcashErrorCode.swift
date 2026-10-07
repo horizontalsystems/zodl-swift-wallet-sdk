@@ -605,7 +605,7 @@ public enum ZcashErrorCode: String {
     case ledgerWrongApp = "ZLEDG0002"
     /// The Zcash app on the Ledger device is too old for this operation.
     case ledgerAppTooOld = "ZLEDG0003"
-    /// The connected Ledger device is not the one this account was paired with.
+    /// The connected Ledger device does not match the account.
     case ledgerDeviceMismatch = "ZLEDG0004"
     /// The connected Ledger device runs a different Zcash app version than the one the signing session was built for.
     case ledgerCapsMismatch = "ZLEDG0005"

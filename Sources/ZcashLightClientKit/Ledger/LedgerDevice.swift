@@ -23,8 +23,8 @@ import Foundation
 /// succeeded or failed — unlike `LedgerZcashApp.ensureZcashAppOpen(transport:reconnect:)`, which closes
 /// a replacement transport itself when the call fails, `pairAccount` closes a transport its `reconnect`
 /// produced only when an exchange on it fails. A failure after the reads answered (the version check,
-/// the viewing key parse) leaves it open on ``transport``, and the caller closes it then, as it would
-/// its own. ``transport`` is the one this device currently
+/// the viewing key parse, the identity check) leaves it open on ``transport``, and the caller closes it
+/// then, as it would its own. ``transport`` is the one this device currently
 /// talks over; once `pairAccount` has reconnected, it is the reconnected one, and later calls use it.
 ///
 /// Nothing here changes `transport` in response to `ensureZcashAppOpen`: that call may close the
@@ -77,9 +77,18 @@ public actor LedgerDevice {
     /// Exports the unified full viewing key of one account, for the wallet to import.
     ///
     /// The device asks the user to approve the export; no timeout applies while it waits. The
-    /// device's identity is read once, before the export, and the pairing is refused unless the
-    /// export comes back from that same device, so that the key and the binding can never come from
-    /// two different devices; nothing is read after the export.
+    /// device's identity is read once, before the export. Nothing is read after the export.
+    ///
+    /// For account 0, the identity is the hash of the account's first external transparent key. This
+    /// method derives that key from the transparent item of the exported viewing key, and refuses
+    /// the pairing with ``ZcashError/ledgerDeviceMismatch`` when its hash is not the identity the
+    /// device gave. That ties the key's transparent item, and so the binding, to the device's seed.
+    /// It says nothing about the key's Orchard item, which the identity does not derive: to check
+    /// that one, call ``displayUnifiedAddress(ufvk:zip32AccountIndex:transparentAddressIndex:)``,
+    /// which refuses a device address that the key's Orchard item does not derive.
+    ///
+    /// For any other account, the viewing key does not derive the identity, and this method does not
+    /// check the key against it at all.
     ///
     /// The app-version and identity reads before the export each have `readTimeout`; nothing waits on
     /// the user there, so a device that does not answer within it is stalled. When one of them fails
@@ -108,6 +117,9 @@ public actor LedgerDevice {
     ///     it, or it deadlocks.
     /// - Throws: ``ZcashError/ledgerAppTooOld(_:)`` when the app cannot sign transactions for this SDK,
     ///   ``ZcashError/ledgerUserRejected`` when the user declines the export,
+    ///   ``ZcashError/ledgerDeviceMismatch`` when the exported key of account 0 does not derive the
+    ///   device's identity, ``ZcashError/ledgerMalformedReply(_:)`` when the exported key of account 0
+    ///   has no transparent item,
     ///   ``ZcashError/ledgerDerivationBudgetExhausted`` when the user must reopen the Zcash app first,
     ///   ``ZcashError/ledgerBluetoothConnectionFailed(_:)`` when a retry's own `reconnect` does not
     ///   finish within `readTimeout`.
@@ -126,6 +138,11 @@ public actor LedgerDevice {
                 ufvk = try UnifiedFullViewingKey(encoding: encodedUFVK, network: networkType)
             } catch {
                 throw ZcashError.ledgerMalformedReply("the exported viewing key is not a unified full viewing key for this network")
+            }
+
+            // Only the key of account 0 derives the identity; see the method documentation.
+            if zip32AccountIndex.index == 0 {
+                try ZcashLedgerBackend.checkAccountZeroIdentity(ufvk: ufvk, identity: identity, networkType: networkType)
             }
 
             return LedgerAccountPairing(

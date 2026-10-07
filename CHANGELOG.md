@@ -46,7 +46,11 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the app version) and `displayUnifiedAddress(zip32AccountIndex:transparentAddressIndex:)`.
   `pairAccount` asks the user to approve the export on the device, refuses an app that cannot sign,
   and reads the device's identity once, before the export (the Zcash app leaves a status screen up
-  after the export and drops the next command, so a second probe never gets its reply). The
+  after the export and drops the next command, so a second probe never gets its reply). For ZIP 32
+  account 0, `pairAccount` derives the identity from the transparent item of the exported key and
+  refuses the pairing with `ZcashError.ledgerDeviceMismatch` when it is not the identity the device
+  gave, or with `ledgerMalformedReply` when the key has no transparent item. The key of any other
+  account does not derive the identity, so `pairAccount` does not check it for those accounts. The
   app-version and identity reads before the export take `readTimeout` (`LedgerDevice.defaultReadTimeout`,
   the engine's normal timeout, by default; `LedgerDevice.defaultPairingReadTimeout`, 10 seconds,
   detects a stalled device early).

@@ -1206,8 +1206,11 @@ enum ZcashErrorDefinition {
     /// - `reason` names the app version and the version the operation needs; it carries no transaction data.
     // sourcery: code="ZLEDG0003"
     case ledgerAppTooOld(_ reason: String)
-    /// The connected Ledger device is not the one this account was paired with.
-    /// Nothing of the transaction was sent to it. Connect the paired device, or pair this one.
+    /// The connected Ledger device does not match the account.
+    /// - During signing: the device is not the one the account was paired with. Nothing of the transaction was sent to it.
+    ///   Connect the paired device, or pair this one.
+    /// - During `LedgerDevice.pairAccount` for ZIP 32 account 0: the exported viewing key does not derive the device identity.
+    ///   Do not import the key. For other accounts, pairing does not do this check.
     // sourcery: code="ZLEDG0004"
     case ledgerDeviceMismatch
     /// The connected Ledger device runs a different Zcash app version than the one the signing session was built for.
