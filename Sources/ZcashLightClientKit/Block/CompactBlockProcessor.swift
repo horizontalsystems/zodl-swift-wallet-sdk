@@ -22,6 +22,7 @@ actor CompactBlockProcessor {
     private(set) var syncTask: Task<Void, Error>?
     private var mempoolDetectionTask: Task<Void, Error>?
     private var pollTask: Task<Void, Never>?
+    private var rewindTask: Task<Void, Never>?
     private var drainTask: Task<Void, Never>?
     private var wipeTask: Task<Void, Never>?
     private var wipeContexts: [AfterSyncHooksManager.WipeContext] = []
@@ -269,7 +270,7 @@ actor CompactBlockProcessor {
 
 extension CompactBlockProcessor {
     func start(retry: Bool = false) async {
-        guard drainTask == nil, wipeTask == nil else { return }
+        guard drainTask == nil, wipeTask == nil, rewindTask == nil else { return }
         let admission = admissionGeneration
         if retry {
             self.retryAttempts = 0
@@ -279,7 +280,8 @@ extension CompactBlockProcessor {
         }
 
         let canStart = await canStartSync()
-        guard admission == admissionGeneration, drainTask == nil, wipeTask == nil, !Task.isCancelled else { return }
+        guard admission == admissionGeneration, drainTask == nil, wipeTask == nil,
+              rewindTask == nil, !Task.isCancelled else { return }
         guard canStart else {
             if await isIdle() {
                 logger.warn("max retry attempts reached on \(await context.state) state")
@@ -293,7 +295,8 @@ extension CompactBlockProcessor {
 
         // canStartSync suspends. A completed teardown must also invalidate starts
         // that were waiting before it reserved admission.
-        guard admission == admissionGeneration, drainTask == nil, wipeTask == nil, syncTask == nil else { return }
+        guard admission == admissionGeneration, drainTask == nil, wipeTask == nil,
+              rewindTask == nil, syncTask == nil else { return }
         syncGeneration = admission
         syncTask = Task(priority: .userInitiated) {
             await run(generation: admission)
@@ -333,13 +336,14 @@ extension CompactBlockProcessor {
         }
     }
 
-    /// Reserve before any suspension, capturing sync, mempool and poll owners while admission is closed.
+    /// Reserve before any suspension, capturing every admitted processor owner while admission is closed.
     private func reserveDrain() -> Task<Void, Never> {
         if let drainTask { return drainTask }
         admissionGeneration &+= 1
         let sync = syncTask
         let mempool = mempoolDetectionTask
         let poll = pollTask
+        let rewind = rewindTask
         sync?.cancel()
         mempool?.cancel()
         poll?.cancel()
@@ -350,6 +354,7 @@ extension CompactBlockProcessor {
             _ = await sync?.result
             _ = await mempool?.result
             await poll?.value
+            await rewind?.value
             backoffTimer?.invalidate()
             backoffTimer = nil
             retryAttempts = 0
@@ -387,18 +392,40 @@ extension CompactBlockProcessor {
     /// - Note: If this is called while sync is in progress then the sync process is stopped first and then rewind is executed.
     func rewind(context: AfterSyncHooksManager.RewindContext) async throws {
         logger.debug("Starting rewind")
+        // Admission is actor-local and reserved before the first suspension.
+        // In particular, checking idle must not open a stale post-wipe admission.
         if wipeTask != nil {
             await context.completion(.failure(ZcashError.synchronizerNotPrepared))
-        } else if drainTask != nil {
-            afterSyncHooksManager.insert(hook: .rewind(context))
-        } else if await isIdle() {
-            logger.debug("Sync doesn't run. Executing rewind.")
-            try await doRewind(context: context)
-        } else {
-            logger.debug("Stopping sync because of rewind")
-            afterSyncHooksManager.insert(hook: .rewind(context))
-            await stop()
+            return
         }
+        afterSyncHooksManager.insert(hook: .rewind(context))
+        if drainTask != nil || rewindTask != nil { return }
+        if syncTask != nil {
+            // A run callback cannot await a task that would join that same run.
+            await stop()
+        } else {
+            await reserveIdleRewinds().value
+        }
+    }
+
+    private func reserveIdleRewinds() -> Task<Void, Never> {
+        if let rewindTask { return rewindTask }
+        admissionGeneration &+= 1
+        backoffTimer?.invalidate()
+        backoffTimer = nil
+        let task = Task {
+            while drainTask == nil, wipeTask == nil, !afterSyncHooksManager.isEmpty {
+                let hooks = afterSyncHooksManager
+                afterSyncHooksManager = AfterSyncHooksManager()
+                for rewind in hooks.rewindContexts() { try? await doRewind(context: rewind) }
+            }
+            // Any pending contexts after teardown admission belong to its owner.
+            // Retain this task through timer restoration and all terminal callbacks.
+            if drainTask == nil, wipeTask == nil { await setTimer() }
+            rewindTask = nil
+        }
+        rewindTask = task
+        return task
     }
 
     private func doRewind(context: AfterSyncHooksManager.RewindContext) async throws {
@@ -790,11 +817,22 @@ extension CompactBlockProcessor {
                     await resetContext()
                 } else {
                     await handleSyncFailure(action: action, error: error)
+                    // A failed-event callback can queue rewind and request stop.
+                    // Settle that cancellation before releasing the run owner.
+                    if Task.isCancelled {
+                        restartAfterCancellation = (try? await syncTaskWasCancelled()) ?? false
+                    }
                     break
                 }
             }
         }
 
+        // Every terminal callback may admit another rewind. Retain this run
+        // until those contexts settle, or leave them for the external drain
+        // that already captured and is joining this exact run.
+        if drainTask == nil, wipeTask == nil, !afterSyncHooksManager.isEmpty {
+            restartAfterCancellation = (try? await handleAfterSyncHooks()) ?? false
+        }
         logger.debug("Run ended")
         if syncGeneration == generation {
             syncTask = nil
@@ -935,19 +973,19 @@ extension CompactBlockProcessor {
     }
 
     private func handleAfterSyncHooks() async throws -> Bool {
-        let afterSyncHooksManager = self.afterSyncHooksManager
-        self.afterSyncHooksManager = AfterSyncHooksManager()
-
-        let rewinds = afterSyncHooksManager.rewindContexts()
-        if !rewinds.isEmpty {
+        var anotherSync = false
+        var rewound = false
+        while drainTask == nil, wipeTask == nil, !afterSyncHooksManager.isEmpty {
+            let hooks = afterSyncHooksManager
+            afterSyncHooksManager = AfterSyncHooksManager()
+            let rewinds = hooks.rewindContexts()
+            rewound = rewound || !rewinds.isEmpty
+            anotherSync = anotherSync || hooks.shouldExecuteAnotherSyncHook()
             for rewind in rewinds { try await doRewind(context: rewind) }
-            return false
-        } else if afterSyncHooksManager.shouldExecuteAnotherSyncHook() {
-            logger.debug("Starting new sync.")
-            return true
-        } else {
-            return false
         }
+        // An external stop supersedes automatic starts, including ones queued
+        // while a rewind's completion callback was suspended.
+        return anotherSync && !rewound && drainTask == nil && wipeTask == nil
     }
 }
 

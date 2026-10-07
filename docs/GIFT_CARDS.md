@@ -114,7 +114,7 @@ discovers the claim as an ordinary untrusted receive with the ten-confirmation w
   `AwaitableStopSynchronizer`, the optional capability both SDK implementations support. Await
   `stopAndWait()` before starting work that needs the stop operation to finish; synchronous
   `stop()` only requests it. The classic synchronizer joins processor-owned sync, mempool,
-  polling and action work before returning; queued automatic restarts are superseded by this stop.
+  rewind, polling and action work before returning; queued automatic restarts are superseded by this stop.
   Slipstream completes its queued teardown and earlier lifecycle work, but its engine can return a
   non-quiescent stop. Both complete even when no new stopped state is emitted, including idle or
   unprepared paths. Keep ownership of the pause so other app lifecycle paths do not start the main wallet

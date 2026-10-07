@@ -267,7 +267,7 @@ public class SDKSynchronizer: AwaitableStopSynchronizer {
         }
     }
 
-    /// Stops the synchronizer and joins its processor-owned sync, mempool and action work.
+    /// Stops the synchronizer and joins its processor-owned sync, mempool, rewind, poll and action work.
     /// Caller cancellation does not interrupt the owned drain.
     public func stopAndWait() async {
         await stopTask().value

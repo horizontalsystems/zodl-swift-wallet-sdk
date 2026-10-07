@@ -16,7 +16,7 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   earlier queued lifecycle work in Slipstream. Idle and unprepared calls complete without waiting
   for a new state-stream event. Existing `Synchronizer` conformers need no new requirement, and
   `stop()` still returns immediately. The classic synchronizer joins processor-owned sync,
-  mempool, polling and action work and supersedes queued automatic restarts. Slipstream can still
+  mempool, rewind, polling and action work and supersedes queued automatic restarts. Slipstream can still
   report a non-quiescent stop. Coordinate subsequent starts when pausing the main wallet for a gift claim.
 - `GiftCard` reads a gift card link with `GiftCard(link:)`: any `https` URL whose fragment carries
   a `v=1` card (`#v=1&key=…&height=…`, as `https://gift.zodl.com/` issues) or the legacy JSON
@@ -123,7 +123,7 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `recordedInDestination == false`, rather than reporting a receive that was never stored.
   The accepted submission remains unaffected. (MOB-2138)
 
-- `GiftCardRedeemer.cleanup()` now joins the temporary wallet's sync, mempool, polling and action
+- `GiftCardRedeemer.cleanup()` now joins the temporary wallet's sync, mempool, rewind, polling and action
   writers before wipe, then releases cached Tor connections and card-owned isolated clients before
   closing its root runtime and deleting the directory. Cleanup retains the card alias throughout,
   even when its caller is cancelled. Early wipe validation failure and terminal storage errors use

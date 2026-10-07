@@ -325,6 +325,202 @@ final class CompactBlockProcessorCleanupTests: ZcashTestCase {
         try await fixture.redeemer.cleanup()
     }
 
+    func testIdleBackendRewindIsJoinedBeforeCleanupCanWipeOrRemoveRoot() async throws {
+        try await assertIdleRewindIsJoined(holdStorage: false)
+    }
+
+    func testIdleStorageRewindIsJoinedBeforeCleanupCanWipeOrRemoveRoot() async throws {
+        try await assertIdleRewindIsJoined(holdStorage: true)
+    }
+
+    func testRewindQueuedByOrdinaryFailureCallbackCompletesWithoutAnotherOperation() async throws {
+        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+        let processor = fixture.synchronizer.blockProcessor
+        let queued = XCTestExpectation(description: "ordinary failure queued rewind")
+        let completed = XCTestExpectation(description: "queued rewind completed")
+        let events = CleanupEvents()
+        fixture.service.getInfoModeThrowableError = ZcashError.synchronizerNotPrepared
+        fixture.backend.rewindToHeightHeightClosure = { .success($0) }
+        fixture.storage.rewindToClosure = { _ in events.append("storage:rewind") }
+        await processor.updateEventClosure(identifier: "failed-rewind") { event in
+            if case .failed = event {
+                try? await processor.rewind(context: AfterSyncHooksManager.RewindContext(height: 3_000_000, completion: { result in
+                    if case .failure = result { XCTFail("queued rewind should complete successfully") }
+                    events.append("completion")
+                    completed.fulfill()
+                }))
+                queued.fulfill()
+            }
+        }
+        await processor.start()
+        await fulfillment(of: [queued], timeout: 5)
+        let result = await XCTWaiter.fulfillment(of: [completed], timeout: 5)
+        XCTAssertEqual(result, .completed)
+        // Cleanup follows the bounded observation; it cannot supply the missing
+        // completion that this regression requires from the ordinary-error exit.
+        XCTAssertEqual(events.events, ["storage:rewind", "completion"])
+        try await fixture.redeemer.cleanup()
+    }
+
+    func testPublicRewindDuringSuspendedOrdinaryFailureCallbackCompletesWithoutAnotherOperation() async throws {
+        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+        let processor = fixture.synchronizer.blockProcessor
+        let failed = XCTestExpectation(description: "ordinary failure callback held")
+        let completed = XCTestExpectation(description: "public rewind completed")
+        let gate = GiftCardOperationGate()
+        let events = CleanupEvents()
+        fixture.service.getInfoModeThrowableError = ZcashError.synchronizerNotPrepared
+        fixture.backend.rewindToHeightHeightClosure = { .success($0) }
+        fixture.storage.rewindToClosure = { _ in events.append("storage:rewind") }
+        await processor.updateEventClosure(identifier: "failed-held") { event in
+            if case .failed = event {
+                failed.fulfill()
+                await gate.wait()
+            }
+        }
+        await processor.start()
+        await fulfillment(of: [failed], timeout: 5)
+        let admitted = XCTestExpectation(description: "public rewind stop admitted")
+        fixture.downloader.stopDownloadClosure = {
+            if events.appendOnce("stop") { admitted.fulfill() }
+        }
+        let subscription = fixture.synchronizer.rewind(.height(blockheight: 3_000_000)).sink(receiveCompletion: { result in
+            if case .failure = result { XCTFail("public rewind should succeed") }
+            events.append("completion")
+            completed.fulfill()
+        }, receiveValue: { })
+        // Ensure the public publisher task has actually queued its rewind before
+        // releasing failure. Its request-only stop reaches the downloader seam.
+        await fulfillment(of: [admitted], timeout: 5)
+        await gate.open()
+        let result = await XCTWaiter.fulfillment(of: [completed], timeout: 5)
+        XCTAssertEqual(result, .completed)
+        XCTAssertEqual(events.events.filter { $0 == "completion" }.count, 1)
+        withExtendedLifetime(subscription) { }
+        try await fixture.redeemer.cleanup()
+    }
+
+    func testRewindRacingWipeCannotAdmitWriterOrResetLaterStart() async throws {
+        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+        let processor = fixture.synchronizer.blockProcessor
+        let entered = XCTestExpectation(description: "wipe holds storage")
+        let wiped = XCTestExpectation(description: "wipe terminal")
+        let rejected = XCTestExpectation(description: "racing rewind rejected")
+        let gate = GiftCardOperationGate()
+        let events = CleanupEvents()
+        fixture.storage.clearClosure = {
+            if events.appendOnce("clear") { entered.fulfill() }
+            await gate.wait()
+        }
+        fixture.backend.rewindToHeightHeightClosure = { height in
+            events.append("stale:backend")
+            return .success(height)
+        }
+        fixture.storage.rewindToClosure = { _ in events.append("stale:storage") }
+        try await processor.wipe(context: AfterSyncHooksManager.WipeContext(prewipe: { }, completion: { _ in wiped.fulfill() }))
+        await fulfillment(of: [entered], timeout: 5)
+        try await processor.rewind(context: AfterSyncHooksManager.RewindContext(height: 3_000_000, completion: { result in
+            switch result {
+            case .failure(let error): XCTAssertEqual(error as? ZcashError, .synchronizerNotPrepared)
+            case .success: XCTFail("wipe must reject new rewind admission")
+            }
+            rejected.fulfill()
+        }))
+        await fulfillment(of: [rejected], timeout: 5)
+        XCTAssertFalse(events.events.contains("stale:backend"))
+        XCTAssertFalse(events.events.contains("stale:storage"))
+        await gate.open()
+        await fulfillment(of: [wiped], timeout: 5)
+        await processor.stopAndWait()
+        await routeToFinalAction(processor)
+        await processor.start()
+        let fresh = await processor.syncTask
+        _ = try await fresh?.value
+        let state = await processor.context.state
+        XCTAssertEqual(state, .finished)
+        XCTAssertFalse(events.events.contains("stale:backend"))
+        XCTAssertFalse(events.events.contains("stale:storage"))
+        fixture.storage.clearClosure = { }
+        try await fixture.redeemer.cleanup()
+    }
+
+    private func assertIdleRewindIsJoined(holdStorage: Bool) async throws {
+        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+        _ = try await fixture.redeemer.check()
+        let processor = fixture.synchronizer.blockProcessor
+        let entered = XCTestExpectation(description: "idle rewind writer held")
+        let admitted = XCTestExpectation(description: "external drain admitted")
+        let rewindFinished = XCTestExpectation(description: "rewind terminal")
+        let stopFinished = XCTestExpectation(description: "external stop terminal")
+        let cleanupFinished = XCTestExpectation(description: "cleanup terminal")
+        let prematureStop = XCTestExpectation(description: "stop returned before writer released")
+        prematureStop.isInverted = true
+        let gate = GiftCardOperationGate()
+        let events = CleanupEvents()
+        fixture.backend.rewindToHeightHeightClosure = { height in
+            events.append("backend:entered")
+            if !holdStorage {
+                entered.fulfill()
+                await gate.wait()
+            }
+            events.append("backend:done")
+            return .success(height)
+        }
+        fixture.storage.rewindToClosure = { _ in
+            events.append("storage:entered")
+            if holdStorage {
+                entered.fulfill()
+                await gate.wait()
+            }
+            events.append("writer:done")
+        }
+        fixture.repository.closeDBConnectionClosure = {
+            XCTAssertTrue(events.events.contains("writer:done"))
+            events.append("prewipe")
+        }
+        fixture.storage.clearClosure = {
+            XCTAssertTrue(events.events.contains("writer:done"))
+            events.append("clear")
+        }
+        let rewind = Task {
+            try await processor.rewind(context: AfterSyncHooksManager.RewindContext(height: 3_000_000, completion: { result in
+                if case .failure = result { XCTFail("already admitted rewind should complete safely") }
+                events.append("rewind:done")
+                rewindFinished.fulfill()
+            }))
+        }
+        await fulfillment(of: [entered], timeout: 5)
+        // Cancelling the public waiter must not remove the independently owned
+        // rewind writer from the subsequent drain's ownership.
+        rewind.cancel()
+        fixture.downloader.stopDownloadClosure = {
+            if events.appendOnce("stop") { admitted.fulfill() }
+        }
+        let stop = Task {
+            await processor.stopAndWait()
+            if !events.events.contains("released") { prematureStop.fulfill() }
+            stopFinished.fulfill()
+        }
+        await fulfillment(of: [admitted], timeout: 5)
+        let cleanup = Task {
+            defer { cleanupFinished.fulfill() }
+            try await fixture.redeemer.cleanup()
+        }
+        await fulfillment(of: [prematureStop], timeout: 0.1)
+        XCTAssertFalse(events.events.contains("prewipe"))
+        XCTAssertFalse(events.events.contains("clear"))
+        let root = testTempDirectory.appendingPathComponent(fixture.card.synchronizerAlias.description)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.path))
+        events.append("released")
+        await gate.open()
+        await fulfillment(of: [rewindFinished, stopFinished, cleanupFinished], timeout: 5)
+        try await rewind.value
+        await stop.value
+        try await cleanup.value
+        XCTAssertEqual(events.events.filter { $0 == "rewind:done" }.count, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+    }
+
     private func assertIdleWipeWaitsForMempool(wipeFails: Bool) async throws {
         let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
         _ = try await fixture.redeemer.check()
