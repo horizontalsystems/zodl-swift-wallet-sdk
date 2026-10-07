@@ -295,6 +295,9 @@ public actor GiftCardRedeemer {
             timing: cleanupTiming,
             wipe: {
                 try await Self.awaitCompletion(of: synchronizer.wipe())
+                // The transaction encoder retains grouped service connections after the
+                // Slipstream engine stops. Dispose them while the card's Tor root still exists.
+                await initializer.lightWalletService.closeConnections()
                 // This host runtime is separate from the engine's Tor directory. Closing an
                 // existing client never creates a runtime or sends traffic.
                 try await initializer.container.resolve(TorClient.self).close()

@@ -26,9 +26,10 @@ no Sapling inputs or outputs.
 birthday/restore metadata, identifying sync requests, and claim submission; bulk blocks remain
 on Slipstream's direct route, with no direct fallback for failed protected requests.
 
-`cleanup()` closes new work admission immediately. Success means safe wipe, host runtime disposal,
-root deletion, and alias release have all completed. Its per-caller 30-second monotonic budget
-includes preceding queued work. Cancellation returns `CancellationError`; timeout throws the new
+`cleanup()` closes new work admission immediately. Success means safe wipe, card service connection
+disposal, host runtime disposal, root deletion, and alias release have all completed. Its per-caller
+30-second monotonic budget includes preceding queued work. Cancellation returns
+`CancellationError`; timeout throws the new
 `ZcashError.giftCardCleanupTimedOut` (`ZGIFT0011`). Update exhaustive `ZcashError` switches.
 Neither outcome cancels owned teardown or makes the card reusable. Keep the UI in a cleanup/pending
 state until cleanup succeeds; do not force-delete the root or assume a replacement can be created.

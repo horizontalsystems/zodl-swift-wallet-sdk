@@ -221,12 +221,30 @@ final class GiftCardCleanupTests: ZcashTestCase {
     func testUnusedCancelledCleanupRetainsOwnershipAfterRedeemerIsDropped() async throws {
         let clock = GiftCardCleanupTestClock()
         defer { clock.dispose() }
+        let native = TorHTTPGetNative(
+            get: { _, _, _, _, _, _ in
+                XCTFail("Unused cleanup must not send traffic")
+                return nil
+            },
+            isolateRuntime: { _ in
+                XCTFail("Unused cleanup must not isolate a runtime")
+                return nil
+            },
+            freeRuntime: { _ in XCTFail("Unused cleanup must not free a runtime it never opened") },
+            createRuntime: { _, _ in
+                XCTFail("Unused cleanup must not create a runtime")
+                return nil
+            }
+        )
+        let tor = TorClient(torDir: testTempDirectory.appendingPathComponent("unused-card-tor"), httpGetNative: native)
         var fixture: GiftCardCancellationFixture? = try await GiftCardCancellationFixture.make(
             storageDirectory: testTempDirectory,
-            cleanupTiming: clock.timing
+            cleanupTiming: clock.timing,
+            torClient: tor
         )
         let card = try XCTUnwrap(fixture).card
         let engine = try XCTUnwrap(fixture).engine
+        let service = try XCTUnwrap(fixture).service
         let root = testTempDirectory.appendingPathComponent(card.synchronizerAlias.description)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let marker = root.appendingPathComponent("unused-wallet-marker")
@@ -256,6 +274,8 @@ final class GiftCardCleanupTests: ZcashTestCase {
         try Data([2]).write(to: replacementMarker)
         let calls = await engine.calls
         XCTAssertEqual(calls.filter { $0 == "close" }.count, 1)
+        XCTAssertEqual(service.closeConnectionsCallsCount, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: testTempDirectory.appendingPathComponent("unused-card-tor").path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: replacementMarker.path))
         assertAlreadyActive(card: card)
         withExtendedLifetime(replacement) {}
@@ -468,7 +488,11 @@ final class GiftCardCleanupTests: ZcashTestCase {
         withExtendedLifetime(replacement) {}
     }
 
-    func testHostTorRuntimeClosesAfterSafeWipeBeforeRootRemoval() async throws {
+    func testServiceConnectionsCloseAfterSafeWipeBeforeHostRuntimeAndRootRemoval() async throws {
+        let clock = GiftCardCleanupTestClock()
+        defer { clock.dispose() }
+        let serviceGate = GiftCardCleanupTestGate()
+        defer { Task { await serviceGate.open() } }
         let runtimes = TorTestRuntimes()
         let card = try GiftCard(link: GiftCardTests.zodlTestnetLink)
         let root = testTempDirectory.appendingPathComponent(card.synchronizerAlias.description)
@@ -490,15 +514,54 @@ final class GiftCardCleanupTests: ZcashTestCase {
             }
         )
         let tor = TorClient(runtimePtr: runtimes.parent, torDir: root.appendingPathComponent("tor"), httpGetNative: native)
-        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory, torClient: tor)
+        let fixture = try await GiftCardCancellationFixture.make(
+            storageDirectory: testTempDirectory,
+            cleanupTiming: clock.timing,
+            torClient: tor
+        )
+        let serviceEntered = XCTestExpectation(description: "card service disposal entered after wipe")
+        fixture.service.closeConnectionsClosure = {
+            let calls = await fixture.engine.calls
+            XCTAssertTrue(calls.contains("stop:done"))
+            XCTAssertTrue(calls.contains("close"))
+            serviceEntered.fulfill()
+            await serviceGate.wait()
+        }
         _ = try await fixture.redeemer.check()
         try Data([1]).write(to: marker)
         fixture.engine.stopQuiescent = false
         do { try await fixture.redeemer.cleanup() } catch {}
+        XCTAssertEqual(fixture.service.closeConnectionsCallsCount, 0, "Refused wipe must preserve service connections")
         XCTAssertTrue(runtimes.isAlive(runtimes.parent), "Refused wipe must preserve the host runtime")
         fixture.engine.stopQuiescent = true
+        let cleanup = startCleanup(fixture.redeemer)
+        await fulfillment(of: [serviceEntered, clock.expectSleep(at: 30_000_000_000)], timeout: 5)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+        XCTAssertTrue(runtimes.isAlive(runtimes.parent))
+        assertAlreadyActive(card: card)
+        XCTAssertEqual(try GiftCardRedeemer.removeLeftoverWallets(in: testTempDirectory), 0)
+        let cancelled = startCleanup(fixture.redeemer)
+        cancelled.cancel()
+        do {
+            try await cancelled.value
+            XCTFail("Cancelling a waiter must leave service disposal owned")
+        } catch is CancellationError {
+        }
+        clock.advance(to: 30_000_000_000)
+        do {
+            try await cleanup.value
+            XCTFail("The cleanup waiter must time out while service disposal is held")
+        } catch {
+            XCTAssertEqual(error as? ZcashError, .giftCardCleanupTimedOut)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+        XCTAssertTrue(runtimes.isAlive(runtimes.parent))
+        assertAlreadyActive(card: card)
+        await serviceGate.open()
+        try await waitForRelease(card: card)
         try await fixture.redeemer.cleanup()
         await fulfillment(of: [disposed], timeout: 5)
+        XCTAssertEqual(fixture.service.closeConnectionsCallsCount, 1)
         XCTAssertFalse(runtimes.isAlive(runtimes.parent))
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
     }

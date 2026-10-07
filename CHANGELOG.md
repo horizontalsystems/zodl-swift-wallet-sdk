@@ -24,8 +24,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`ZGIFT0011`) on expiry while cleanup continues. Wipe/storage failures preserve the wallet's
   alias and retry teardown with capped exponential delay, including after the redeemer is dropped.
   Requested cleanup retains ownership even when the redeemer was never checked.
-  Existing host Tor runtimes close after safe wipe and before root deletion. Older gift-card
-  restores preserve the latest bundled recovery fallback independently of their exact birthday.
+  Card service connections and existing host Tor runtimes close after safe wipe and before root
+  deletion. Older gift-card restores preserve the latest bundled recovery fallback independently
+  of their exact birthday.
 
 - `AwaitableStopSynchronizer.stopAndWait()` lets clients of `SDKSynchronizer` and
   `SlipstreamSynchronizer` wait until the synchronizer's stop operation finishes, including

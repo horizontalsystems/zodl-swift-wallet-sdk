@@ -340,6 +340,7 @@ struct GiftCardCancellationFixture {
         backend.createProposedTransactionsProposalUskOvkPolicyReturnValue = [Data(repeating: 0xA1, count: 32)]
         backend.getTransactionTxIdReturnValue = TransactionData(txId: Data(repeating: 0xA1, count: 32), raw: Data([1]), expiryHeight: 3_000_100)
         let service = LightWalletServiceMock()
+        service.closeConnectionsClosure = {}
         service.getTreeStateModeClosure = { _, _ in throw LightWalletServiceError.timeOut }
         service.submitSpendTransactionModeReturnValue = SendResponse()
         let repository = TransactionRepositoryMock()

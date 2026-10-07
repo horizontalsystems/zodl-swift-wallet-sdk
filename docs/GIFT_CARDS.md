@@ -168,8 +168,9 @@ discovers the claim as an ordinary untrusted receive with the ten-confirmation w
   `false`. Completion with no submission results throws `giftCardRedemptionIncomplete` (`ZGIFT0012`).
 - `cleanup()` closes admission to new checks and redemptions immediately, cancels preparation
   that has not reached native claim admission, and joins earlier work before wiping. A successful
-  return means the engine was safely wiped, the existing host Tor runtime was closed, all remaining
-  wallet files were deleted, and another redeemer can claim the card.
+  return means the engine was safely wiped, its card service connections and existing host Tor
+  runtime were closed, all remaining wallet files were deleted, and another redeemer can claim the
+  card.
 - Each cleanup caller has a 30-second monotonic budget starting at admission, including time queued
   behind earlier work. Cancellation returns `CancellationError`; expiration throws
   `giftCardCleanupTimedOut` (`ZGIFT0011`). Both detach only that caller's wait: owned teardown keeps
