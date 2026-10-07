@@ -20,9 +20,7 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Every unified address, unified full viewing key and unified incoming viewing key string the SDK
   returns is ZIP 316 revision 0, with every receiver or item it carries. Revision 2 is used only
   for a value revision 0 cannot represent (one with expiry metadata, a P2SH viewing-key item, or
-  only transparent items). Decoding still accepts both revisions. A row
-  `zcash_client_sqlite` writes for itself, such as `v_tx_outputs.to_address`, can still be
-  revision 2, so it does not necessarily string-compare with an address the SDK returns.
+  only transparent items). Decoding still accepts both revisions.
 - Coinholder voting is built on `zcash_voting` 5.1.1-rc.3 as it stands at the head of
   valargroup/zcash_voting#373, the pull request that moves its librustzcash backend to the NU7
   pre-release crates. No release carries that change yet, so the Rust core takes the crate, and
