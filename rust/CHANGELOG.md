@@ -319,6 +319,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `zcashlc_set_custom_network` takes a trailing `nu7` activation height. As for the other
+  heights, a negative value means "not activated on this network".
 - `zcashlc_slipstream_snapshot` reports `tip_fresh = 1` only once the run that refreshed the
   chain tip has also completed a ChainTip-priority scan range (`spendable_hint = 1`) or reached
   Done, so a host that lifts a spendable-balance mask on `tip_fresh` never uncovers the transient

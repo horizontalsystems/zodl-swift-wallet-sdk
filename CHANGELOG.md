@@ -6,6 +6,11 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 # Unreleased
 
+## Added
+
+- `NetworkActivationHeights.nu7` sets the NU7 activation height of a custom or regtest network.
+  A `nil` height means "not activated".
+
 ## Changed
 
 ### NU7 pre-release crates

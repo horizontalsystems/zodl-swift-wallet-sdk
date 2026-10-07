@@ -4836,6 +4836,7 @@ pub extern "C" fn zcashlc_set_custom_network(
     nu6_1: i64,
     nu6_2: i64,
     nu6_3: i64,
+    nu7: i64,
 ) -> bool {
     fn height(value: i64) -> Option<BlockHeight> {
         u32::try_from(value).ok().map(BlockHeight::from_u32)
@@ -4856,12 +4857,7 @@ pub extern "C" fn zcashlc_set_custom_network(
         nu6_1: height(nu6_1),
         nu6_2: height(nu6_2),
         nu6_3: height(nu6_3),
-        // No FFI parameter supplies this: `zcashlc_set_custom_network`'s argument list
-        // predates NU7, and the Swift caller has no height to pass. `None` ("not
-        // activated") is what every other upgrade here gets when the caller has no
-        // value for it, and is the only choice that leaves this function's behavior
-        // exactly as it was before NU7 existed.
-        nu7: None,
+        nu7: height(nu7),
     };
 
     match CUSTOM_PARAMS.write() {
@@ -4974,6 +4970,45 @@ mod tests {
             TEST_ANCHOR_RETENTION_INTERVAL,
         );
         assert_eq!(TEST_ANCHOR_RETENTION_INTERVAL.block_count().get(), 12);
+    }
+
+    /// The NU7 height a host passes to `zcashlc_set_custom_network` selects the NU7 branch from
+    /// that height, and a negative height leaves NU7 not activated.
+    #[test]
+    fn the_custom_network_takes_its_nu7_height_from_the_ffi() {
+        let _custom_network = lock_custom_network();
+
+        assert!(zcashlc_set_custom_network(
+            NETWORK_ID_REGTEST,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            100,
+            300,
+        ));
+        let params = parse_network(NETWORK_ID_REGTEST).unwrap();
+        assert_eq!(
+            params.activation_height(NetworkUpgrade::Nu7),
+            Some(BlockHeight::from_u32(300))
+        );
+        assert_eq!(
+            BranchId::for_height(&params, BlockHeight::from_u32(299)),
+            BranchId::Nu6_3
+        );
+        assert_eq!(
+            BranchId::for_height(&params, BlockHeight::from_u32(300)),
+            BranchId::Nu7
+        );
+
+        zcashlc_set_custom_network(NETWORK_ID_REGTEST, 1, 1, 1, 1, 1, 1, 1, 1, 1, 100, -1);
+        let params = parse_network(NETWORK_ID_REGTEST).unwrap();
+        assert_eq!(params.activation_height(NetworkUpgrade::Nu7), None);
     }
 
     /// A custom-parameter network is a test deployment even when it borrows mainnet's address

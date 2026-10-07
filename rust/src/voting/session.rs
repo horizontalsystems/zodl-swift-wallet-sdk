@@ -1329,7 +1329,7 @@ mod tests {
         // synthetic snapshot, so the two schedules disagree there.
         assert!(crate::zcashlc_set_custom_network(
             1, 347_500, 419_200, 653_600, 903_000, 1_046_400, 1_687_104, 2_726_400, 3_146_400,
-            3_364_600, 10_000_000,
+            3_364_600, 10_000_000, -1,
         ));
 
         let store = open_memory_store(crate::NETWORK_ID_REGTEST, "w");

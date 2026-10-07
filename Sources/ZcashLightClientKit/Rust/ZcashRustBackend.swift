@@ -179,7 +179,8 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
             height(heights.nu6),
             height(heights.nu6_1),
             height(heights.nu6_2),
-            height(heights.nu6_3)
+            height(heights.nu6_3),
+            height(heights.nu7)
         )
     }
 
