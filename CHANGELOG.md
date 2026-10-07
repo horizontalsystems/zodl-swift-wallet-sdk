@@ -10,6 +10,13 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `NetworkActivationHeights.nu7` sets the NU7 activation height of a custom or regtest network.
   A `nil` height means "not activated".
+- `GiftCardRedeemer` now always uses Slipstream for its isolated wallet and retains teardown
+  ownership until successful wipe and root deletion. Cleanup cancellation detaches the caller;
+  its 30-second monotonic budget includes queued work and throws `giftCardCleanupTimedOut`
+  (`ZGIFT0011`) on expiry while cleanup continues. Wipe/storage failures preserve the wallet's
+  alias and retry teardown with capped exponential delay, including after the redeemer is dropped.
+  Existing host Tor runtimes close after safe wipe and before root deletion. Older gift-card
+  restores preserve the latest bundled recovery fallback independently of their exact birthday.
 
 - `AwaitableStopSynchronizer.stopAndWait()` lets clients of `SDKSynchronizer` and
   `SlipstreamSynchronizer` wait until the synchronizer's stop operation finishes, including

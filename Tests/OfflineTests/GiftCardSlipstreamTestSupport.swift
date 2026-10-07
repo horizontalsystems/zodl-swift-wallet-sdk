@@ -41,7 +41,7 @@ actor GiftCardAnchorCapture {
     }
 }
 
-private actor GiftCardFixtureAccountState {
+actor GiftCardFixtureAccountState {
     let account: Account
     private var created = false
 

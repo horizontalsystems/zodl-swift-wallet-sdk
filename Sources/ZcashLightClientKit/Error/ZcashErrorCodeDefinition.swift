@@ -1166,6 +1166,10 @@ enum ZcashErrorDefinition {
     // sourcery: code="ZGIFT0013"
     case giftCardRecipientRequiresOrchard
 
+    /// Cleanup is still continuing and the gift card remains in use. Wait for cleanup to finish before creating another redeemer.
+    // sourcery: code="ZGIFT0011"
+    case giftCardCleanupTimedOut
+
     // MARK: - Models
 
     /// Attempt to init TxId with input that is not 32 bytes.

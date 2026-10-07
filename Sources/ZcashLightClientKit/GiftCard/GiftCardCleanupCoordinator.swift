@@ -64,8 +64,8 @@ final class GiftCardCleanupCoordinator: @unchecked Sendable {
         if let attempt { launch(attempt) }
     }
 
-    func cleanup(after predecessor: Task<Void, Never>?) async throws {
-        let admittedAt = timing.now()
+    func cleanup(after predecessor: Task<Void, Never>?, admittedAt: UInt64? = nil) async throws {
+        let admittedAt = admittedAt ?? timing.now()
         let deadline = admittedAt.addingReportingOverflow(30_000_000_000)
         let expiresAt = deadline.overflow ? UInt64.max : deadline.partialValue
         let waiter = Waiter()

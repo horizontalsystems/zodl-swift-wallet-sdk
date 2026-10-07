@@ -19,6 +19,25 @@ changes can change that outcome. Input selection is unchanged, so an Orchard rec
 does not guarantee that Sapling parameters will be unnecessary: the actual proposal must have
 no Sapling inputs or outputs.
 
+## Gift-card Slipstream wallets and bounded cleanup
+
+`GiftCardRedeemer` now always uses `SlipstreamSynchronizer`. Its public initializer, status,
+`Redemption.fee`, and `Redemption.amount` remain source-compatible. Configured Tor carries
+birthday/restore metadata, identifying sync requests, and claim submission; bulk blocks remain
+on Slipstream's direct route, with no direct fallback for failed protected requests.
+
+`cleanup()` closes new work admission immediately. Success means safe wipe, host runtime disposal,
+root deletion, and alias release have all completed. Its per-caller 30-second monotonic budget
+includes preceding queued work. Cancellation returns `CancellationError`; timeout throws the new
+`ZcashError.giftCardCleanupTimedOut` (`ZGIFT0011`). Update exhaustive `ZcashError` switches.
+Neither outcome cancels owned teardown or makes the card reusable. Keep the UI in a cleanup/pending
+state until cleanup succeeds; do not force-delete the root or assume a replacement can be created.
+
+Wipe/storage failures keep ownership and are retried automatically with capped exponential delay.
+Dropping a used redeemer also transfers cleanup to retained process ownership; leftover sweeping
+skips these wallets. These changes add no redemption or submission retries.
+
+
 ## `TxId` validates its length — `init(_: [UInt8])` throws
 
 `TxId.init(_ id: [UInt8])` now throws `ZcashError.txIdNot32Bytes` for anything but 32 bytes,

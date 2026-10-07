@@ -1,8 +1,140 @@
 import XCTest
+
 @testable import TestUtils
 @testable import ZcashLightClientKit
 
 final class GiftCardSlipstreamPreparationTests: ZcashTestCase {
+    func testOlderGiftExactBirthdayKeepsIndependentLatestRecoveryFallback() async throws {
+        let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+        fixture.service.getTreeStateModeClosure = nil
+        var exact = TreeState()
+        exact.height = 2_999_999
+        exact.hash = "00"
+        exact.time = 1
+        exact.saplingTree = "00"
+        fixture.service.getTreeStateModeReturnValue = exact
+        _ = try await fixture.redeemer.check()
+        let calls = await fixture.anchor.calls
+        XCTAssertEqual(calls.first?.birthday, 2_999_999)
+        XCTAssertEqual(calls.first?.fallbackCheckpointHeight, 4_460_000)
+        XCTAssertEqual(fixture.backend.createAccountSeedTreeStateRecoverUntilNameKeySourceReceivedArguments?.treeState.height, 2_999_999)
+        try await fixture.redeemer.cleanup()
+    }
+
+    func testInitializerUsesLatestKnownCheckpointIndependentlyOfBirthdayLookup() async throws {
+        let fixture = try await GiftCardSlipstreamFixture.make(storageDirectory: testTempDirectory, isTorEnabled: false)
+        let source = GiftCardCheckpointSource(bundled: CheckpointSourceFactory.fromBundle(for: .testnet))
+        var state = TreeState()
+        state.height = 2_999_999
+        state.hash = "00"
+        state.saplingTree = "00"
+        source.use(state, forBirthday: 3_000_000)
+        fixture.initializer.container.mock(type: CheckpointSource.self, isSingleton: true) { _ in source }
+        let anchor = fixture.anchor
+        fixture.initializer.slipstreamAnchorSource = { isRestore, birthday, fallback in
+            await anchor.resolve(
+                isRestore: isRestore,
+                birthday: birthday,
+                fallbackCheckpointHeight: fallback,
+                endpoint: fixture.initializer.endpoint,
+                network: fixture.initializer.network,
+                torDirPath: nil
+            )
+        }
+        await anchor.setResponse(SlipstreamRestoreAnchor(height: 4_460_000, treeState: nil))
+        _ = try await fixture.initializer.initialize(
+            with: fixture.card.seed.withBytes { $0 },
+            walletBirthday: 3_000_000,
+            name: "Gift card",
+            keySource: nil
+        )
+        let calls = await anchor.calls
+        XCTAssertEqual(calls.first?.fallbackCheckpointHeight, 4_460_000)
+        XCTAssertEqual(fixture.backend.createAccountSeedTreeStateRecoverUntilNameKeySourceReceivedArguments?.treeState.height, 2_999_999)
+        XCTAssertEqual(fixture.backend.createAccountSeedTreeStateRecoverUntilNameKeySourceReceivedArguments?.recoverUntil, 4_460_000)
+    }
+
+    func testGiftBirthdayFallbackAndRoutesUseRealHostRequests() async throws {
+        for isTorEnabled in [false, true] {
+            for responseHeight: UInt64? in [2_999_999, 3_000_000, nil] {
+                let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory, isTorEnabled: isTorEnabled)
+                if let responseHeight {
+                    fixture.service.getTreeStateModeClosure = nil
+                    var state = TreeState()
+                    state.height = responseHeight
+                    state.hash = "00"
+                    state.saplingTree = "00"
+                    fixture.service.getTreeStateModeReturnValue = state
+                }
+                _ = try await fixture.redeemer.check()
+                let request = try XCTUnwrap(fixture.service.getTreeStateModeReceivedArguments)
+                XCTAssertEqual(request.id.height, 2_999_999)
+                XCTAssertEqual(request.mode, isTorEnabled ? .uniqueTor : .direct)
+                let created = try XCTUnwrap(fixture.backend.createAccountSeedTreeStateRecoverUntilNameKeySourceReceivedArguments)
+                XCTAssertEqual(created.treeState.height, responseHeight == 2_999_999 ? 2_999_999 : 2_990_000)
+                let calls = await fixture.anchor.calls
+                XCTAssertEqual(calls.first?.fallbackCheckpointHeight, 4_460_000)
+                XCTAssertEqual(calls.first?.endpoint.host, "127.0.0.1")
+                if isTorEnabled {
+                    XCTAssertEqual(calls.first?.torDirPath, fixture.initializer.torDirURL.appendingPathComponent("slipstream").path)
+                } else {
+                    XCTAssertNil(calls.first?.torDirPath)
+                }
+                _ = try await fixture.redeemer.check()
+                XCTAssertEqual(fixture.service.getTreeStateModeCallsCount, 1)
+                XCTAssertEqual(fixture.backend.createAccountSeedTreeStateRecoverUntilNameKeySourceCallsCount, 1)
+                try await fixture.redeemer.cleanup()
+            }
+        }
+    }
+
+    func testGiftStatesAndFeeUseEngineBalancesAndRealProposal() async throws {
+        let cases: [GiftCardExpectedState] = [
+            GiftCardExpectedState(spendable: 50_000, pending: 0, state: .ready, fee: 10_000, redeemable: 40_000),
+            GiftCardExpectedState(spendable: 0, pending: 50_000, state: .pending, fee: nil, redeemable: 0),
+            GiftCardExpectedState(spendable: 10_000, pending: 0, state: .dust, fee: nil, redeemable: 0),
+            GiftCardExpectedState(spendable: 0, pending: 0, state: .empty, fee: nil, redeemable: 0)
+        ]
+        for expected in cases {
+            let spendable = expected.spendable
+            let pending = expected.pending
+            let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+            let balance = AccountBalance(
+                saplingBalance: .zero,
+                orchardBalance: PoolBalance(
+                    spendableValue: Zatoshi(spendable),
+                    changePendingConfirmation: .zero,
+                    valuePendingSpendability: Zatoshi(pending)
+                ),
+                unshielded: .zero
+            )
+            await fixture.engine.setNextWalletSummary(
+                WalletSummary(
+                    accountBalances: [TestsData.mockedAccountUUID: balance],
+                    chainTipHeight: 3_000_010,
+                    fullyScannedHeight: 3_000_010,
+                    recoveryProgress: nil,
+                    scanProgress: nil,
+                    nextSaplingSubtreeIndex: 0,
+                    nextOrchardSubtreeIndex: 0,
+                    nextIronwoodSubtreeIndex: 0
+                )
+            )
+            if expected.state == .dust {
+                fixture.backend.proposeSendMaxTransferAccountUUIDToMemoModeThrowableError = ZcashError.rustProposalInsufficientFunds(
+                    Zatoshi(10_000),
+                    Zatoshi(10_000)
+                )
+            }
+            let status = try await fixture.redeemer.check()
+            XCTAssertEqual(status.state, expected.state)
+            XCTAssertEqual(status.fee?.amount, expected.fee)
+            XCTAssertEqual(status.redeemable.amount, expected.redeemable)
+            XCTAssertEqual(status.total.amount, spendable + pending)
+            try await fixture.redeemer.cleanup()
+        }
+    }
+
     func testRestoreUsesInjectedAnchorWithoutNetwork() async throws {
         let fixture = try await GiftCardSlipstreamFixture.make(
             storageDirectory: testTempDirectory,
@@ -37,6 +169,22 @@ final class GiftCardSlipstreamPreparationTests: ZcashTestCase {
         XCTAssertEqual(created.recoverUntil, 4_460_000)
         XCTAssertEqual(fixture.synchronizer.latestState.accountsBalances[fixture.account.id], fixture.balance)
         XCTAssertEqual(fixture.synchronizer.latestState.latestBlockHeight, 3_000_010)
+        XCTAssertEqual(fixture.service.latestBlockHeightModeCallsCount, 0)
+        XCTAssertEqual(fixture.service.getTreeStateModeCallsCount, 0)
+    }
+
+    func testAbnormalNilNativeAnchorDoesNotUseLegacyNetworkOrInventRecoveryBound() async throws {
+        let fixture = try await GiftCardSlipstreamFixture.make(storageDirectory: testTempDirectory, isTorEnabled: false)
+        await fixture.anchor.setResponse(nil)
+        _ = try await fixture.synchronizer.prepare(
+            with: fixture.card.seed.withBytes { $0 },
+            walletBirthday: 3_000_000,
+            name: "Gift card",
+            keySource: nil
+        )
+        let created = try XCTUnwrap(fixture.backend.createAccountSeedTreeStateRecoverUntilNameKeySourceReceivedArguments)
+        XCTAssertNil(created.recoverUntil)
+        XCTAssertEqual(created.treeState.height, 3_000_000)
         XCTAssertEqual(fixture.service.latestBlockHeightModeCallsCount, 0)
         XCTAssertEqual(fixture.service.getTreeStateModeCallsCount, 0)
     }
@@ -110,4 +258,12 @@ final class GiftCardSlipstreamPreparationTests: ZcashTestCase {
         XCTAssertEqual(created.treeState.height, 4_460_000)
         XCTAssertEqual(created.recoverUntil, 4_460_001)
     }
+}
+
+private struct GiftCardExpectedState {
+    let spendable: Int64
+    let pending: Int64
+    let state: GiftCardStatus.State
+    let fee: Int64?
+    let redeemable: Int64
 }
