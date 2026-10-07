@@ -26,6 +26,15 @@ import Foundation
 
 // swiftlint:disable type_body_length
 
+typealias SlipstreamAnchorResolver = (
+    Bool,
+    BlockHeight,
+    BlockHeight,
+    LightWalletEndpoint,
+    ZcashNetwork,
+    String?
+) async -> SlipstreamRestoreAnchor?
+
 /// `Synchronizer` implementation that uses the Slipstream Rust engine for sync
 /// while delegating all data-model operations to the existing SDK components.
 /// This allows the two synchronizer implementations to share the same `data.db`.
@@ -45,6 +54,7 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
     // lifecycle interleavings this file guards against can be reproduced without an FFI handle.
     private let engine: any SlipstreamEngineControlling
     private nonisolated let torHTTPUptime: @Sendable () -> UInt64
+    private let restoreAnchor: SlipstreamAnchorResolver
 
     // ── Shared infrastructure ──────────────────────────────────────────────────
     // `private` reaches the same-file private extension (Swift 4+ file-scope rule).
@@ -396,10 +406,21 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         initializer: Initializer,
         alternateEndpoints: [LightWalletEndpoint],
         engine: any SlipstreamEngineControlling,
-        torHTTPUptime: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }
+        torHTTPUptime: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
+        restoreAnchor: @escaping SlipstreamAnchorResolver = { isRestore, birthday, fallbackCheckpoint, server, network, torDirPath in
+            await SlipstreamEngine.restoreAnchor(
+                isRestore: isRestore,
+                birthday: birthday,
+                fallbackCheckpointHeight: fallbackCheckpoint,
+                server: server,
+                network: network,
+                torDirPath: torDirPath
+            )
+        }
     ) {
         self.engine = engine
         self.torHTTPUptime = torHTTPUptime
+        self.restoreAnchor = restoreAnchor
         self.initializer = initializer
         self.currentEndpoint = initializer.endpoint
         self.transactionRepository = initializer.transactionRepository
@@ -462,14 +483,15 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         let anchorServer = currentEndpoint
         let anchorNetwork = initializer.network
         let anchorTorDir = await slipstreamTorDirPath()
+        let resolveAnchor = restoreAnchor
         initializer.slipstreamAnchorSource = { isRestore, birthday, fallbackCheckpoint in
-            await SlipstreamEngine.restoreAnchor(
-                isRestore: isRestore,
-                birthday: birthday,
-                fallbackCheckpointHeight: fallbackCheckpoint,
-                server: anchorServer,
-                network: anchorNetwork,
-                torDirPath: anchorTorDir
+            await resolveAnchor(
+                isRestore,
+                birthday,
+                fallbackCheckpoint,
+                anchorServer,
+                anchorNetwork,
+                anchorTorDir
             )
         }
         if case .seedRequired = try await initializer.initialize(
