@@ -8,45 +8,6 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Added
 
-- Gift-card checks accept balances only from a known positive tip with complete scan coverage
-  and the card account present. Empty balances settle for 15 seconds direct / 30 seconds with Tor,
-  resetting when readiness or the tip changes. Disconnects may recover for 60 seconds direct /
-  120 seconds with Tor; expiry throws `giftCardCheckDisconnected` (`ZGIFT0015`). Terminal sync
-  stalls throw `giftCardCheckSyncStalled` (`ZGIFT0016`). Both leave the card balance unknown.
-- `GiftCardRedeemer.check()` keeps its public call syntax and bounds each caller to 600 seconds
-  from method entry, including queued time and wallet preparation. Expiry throws the payload-free
-  `giftCardCheckTimedOut` (`ZGIFT0014`), and cancellation returns `CancellationError` without waiting
-  for non-cooperative preparation. Unfinished wallet work remains owned until it drains; cleanup
-  waits for it before wipe, root deletion, and alias release. Timeout means neither an empty card
-  nor completed cleanup. Later checks reuse a wallet whose native preparation finished after expiry.
-
-- `NetworkActivationHeights.nu7` sets the NU7 activation height of a custom or regtest network.
-  A `nil` height means "not activated".
-
-- Gift-card redemption now remains cancellable until native transaction creation begins on the
-  wallet database executor. Once admitted, the SDK finishes creation, submission, and destination
-  receipt recording even if the caller cancels, and cleanup waits for that completion. Accepted
-  receipts are attempted even after a later submission-stream error or another receipt's recording
-  failure. A claim that completes without a submission result throws `giftCardRedemptionIncomplete`
-  (`ZGIFT0012`).
-
-- `GiftCardRedeemer` now always uses Slipstream for its isolated wallet and retains teardown
-  ownership until successful wipe and root deletion. Cleanup cancellation detaches the caller;
-  its 30-second monotonic budget includes queued work and throws `giftCardCleanupTimedOut`
-  (`ZGIFT0011`) on expiry while cleanup continues. Wipe/storage failures preserve the wallet's
-  alias and retry teardown with capped exponential delay, including after the redeemer is dropped.
-  Requested cleanup retains ownership even when the redeemer was never checked.
-  Card service connections and existing host Tor runtimes close after safe wipe and before root
-  deletion. Older gift-card restores preserve the latest bundled recovery fallback independently
-  of their exact birthday.
-
-- `AwaitableStopSynchronizer.stopAndWait()` lets clients of `SDKSynchronizer` and
-  `SlipstreamSynchronizer` wait until the synchronizer's stop operation finishes, including
-  earlier queued lifecycle work in Slipstream. Idle and unprepared calls complete without waiting
-  for a new state-stream event. Existing `Synchronizer` conformers need no new requirement, and
-  `stop()` still returns immediately. The classic synchronizer joins processor-owned sync,
-  mempool, rewind, polling and action work and supersedes queued automatic restarts. Slipstream can still
-  report a non-quiescent stop. Coordinate subsequent starts when pausing the main wallet for a gift claim.
 - `GiftCard` reads a gift card link with `GiftCard(link:)`: any `https` URL whose fragment carries
   a `v=1` card (`#v=1&key=…&height=…`, as `https://gift.zodl.com/` issues) or the legacy JSON
   payment-link encoding at `/payment-links/open#vN=`; `GiftCard.Origin` names the encoding read
@@ -62,56 +23,107 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `giftCardLinkInvalid` (`ZGIFT0010`); none carries any part of the link. The card's seed is not
   exposed, takes no part in `==`, and is wiped from memory when the card is released;
   `description`, `debugDescription` and reflection of a `GiftCard` are redacted.
-- `GiftCardRedeemer` sweeps a card into the user's wallet through a temporary wallet that runs
-  beside the app's synchronizer:
-  `init(card:network:endpoint:isTorEnabled:storageDirectory:loggingPolicy:)`, then `check()` (syncs
-  the card wallet from its birthday and returns a `GiftCardStatus`: `.ready`, `.pending` while the
-  card's funds wait for their 10 confirmations, `.dust` when the fee would take all of its
-  spendable funds, or `.empty`, with `total`, `spendable` and `pending` amounts; a `.ready` status
-  also carries `fee`, the ZIP 317 fee a redemption pays for the card's actual notes, and
-  `redeemable`, what it sends to the recipient after that fee, both from the same send-max
-  preview proposal for an Orchard-capable recipient, so show `redeemable` rather than `spendable`
-  minus a guessed fee. The preview reflects current notes and chain height; later note or chain
-  changes can change the actual redemption's proposal-derived amount and fee;
-  `fee` is `nil` and `redeemable` is `.zero` in every other state),
-  `redeem(to:memo:)` (sends the whole spendable balance, with an optional memo, minus the ZIP 317
-  fee to a `UnifiedAddress` and returns the `TransactionSubmitResult`s), and `cleanup()` (stops the
-  temporary wallet and deletes all of its files). `isTorEnabled` protects the card wallet's
-  identifying metadata requests, including birthday lookup, and claim submission over Tor, with
-  no direct fallback. Slipstream bulk block requests remain direct. Pass the main wallet's
-  setting; with `false`, identifying requests expose the device's IP address with the card and
-  its claim. The redeeming transaction
-  discards the outgoing viewing key, so the card's key — which the card's issuer can rederive —
-  does not reveal the recipient. Sapling parameters are unnecessary only when the actual proposal
-  has no Sapling inputs or outputs; Orchard recipient validation does not change input selection.
-  `check()` downloads and scans the blocks since the card's birthday. Only one redeemer per card
-  may be alive at a time. New errors: `giftCardNetworkMismatch` (`ZGIFT0001`),
-  `giftCardRedeemerAlreadyActive` (`ZGIFT0002`), `giftCardRedeemerNotReady` (`ZGIFT0003`),
-  `giftCardNothingToRedeem` (`ZGIFT0004`, also thrown for a `.dust` card) and
-  `giftCardRedeemerCleanedUp` (`ZGIFT0005`).
-- `GiftCardRedeemer.removeLeftoverWallets(in:)` deletes the card wallets earlier redeemers left in
-  a storage directory (released without `cleanup()`, or cut short by a crash or a kill), and
-  returns how many it deleted. Such a wallet holds the card's keys and the claim's recipient, so
-  call it at launch. It never touches a redeemer alive in the process, nor anything that is not a
-  card wallet. `GiftCardRedeemer.defaultStorageDirectory` is the directory both use by default.
+- `GiftCardRedeemer` sweeps a card into the user's wallet through a temporary card wallet that runs
+  beside the app's synchronizer; `docs/GIFT_CARDS.md` describes the flow.
+  `init(card:network:endpoint:isTorEnabled:storageDirectory:loggingPolicy:)` touches neither the
+  disk nor the network; `check()`, `redeem(to:memo:)` or `redeem(to:memo:recordIn:)`, and
+  `cleanup()` follow, each described below. `card` is the card being redeemed, and `alias` is the
+  card wallet's synchronizer alias, which identifies the card but not its key and is safe to log.
+  The card wallet is a `SlipstreamSynchronizer` with its own alias and its own directory under
+  `storageDirectory` (`GiftCardRedeemer.defaultStorageDirectory` by default). It never touches the
+  main wallet's data, but the two share CPU and I/O, so checking a card can slow the main wallet's
+  sync. Only one redeemer per card may be alive in the process, including while an earlier one's
+  cleanup is still running: creating another throws `giftCardRedeemerAlreadyActive` (`ZGIFT0002`),
+  and a card for another network throws `giftCardNetworkMismatch` (`ZGIFT0001`). Calls on one
+  redeemer run one at a time in the order they are made, and a call cancelled while it waits
+  throws `CancellationError` without running. `isTorEnabled` sends the card wallet's identifying
+  requests (birthday and restore metadata, sync metadata and claim submission) over Tor, with no
+  direct fallback; Slipstream's bulk block requests remain direct. Pass the main wallet's setting:
+  with `false`, identifying requests expose the device's IP address together with the card and its
+  claim. `loggingPolicy` defaults to `.noLogging`, which keeps the transaction linking the card to
+  the user's address out of shared logs.
+- `GiftCardRedeemer.check()` creates and syncs the card wallet on first use and returns a
+  `GiftCardStatus`: `.ready`, `.pending` while the card's funds wait for their 10 confirmations,
+  `.dust` when the fee would take all of its spendable funds, or `.empty`, with `total`,
+  `spendable` and `pending` amounts. A `.ready` status also carries `fee`, the ZIP 317 fee a
+  redemption pays for the card's actual notes, and `redeemable`, what it sends to the recipient
+  after that fee, both from the same send-max preview proposal for an Orchard-capable recipient, so
+  show `redeemable` rather than `spendable` minus a guessed fee. The preview reflects current notes
+  and chain height; later note or chain changes can change the actual redemption's amount and fee.
+  `fee` is `nil` and `redeemable` is `.zero` in every other state. The card wallet starts from the
+  server's tree state for the block before the card's birthday, or from the bundled checkpoint
+  below it when the server does not provide that state, so the first check downloads and scans the
+  blocks since the card was funded. `check()` never reuses a wallet an earlier redeemer left
+  behind, and the card wallet keeps syncing after a check, so a later check reports the latest
+  balance without a new sync.
+  A balance counts only when the chain tip is known, scanning has covered it and the card account
+  exists: a funded balance returns at once, and an empty one must hold for 15 seconds direct or
+  30 seconds with Tor, restarting whenever readiness or the tip changes. A disconnected wallet may
+  recover for 60 seconds direct or 120 seconds with Tor before `giftCardCheckDisconnected`
+  (`ZGIFT0015`); a sync stall the wallet cannot recover from throws `giftCardCheckSyncStalled`
+  (`ZGIFT0016`), and the next check starts a fresh pass. Each caller waits at most 600 seconds
+  from the call, including queued time and wallet preparation, before `giftCardCheckTimedOut`
+  (`ZGIFT0014`); cancellation returns `CancellationError` without waiting for preparation to
+  finish. None of these outcomes means the card is empty or that cleanup has happened: the balance
+  is unknown, the wallet's unfinished work stays owned until it drains, and a later check reuses a
+  wallet whose preparation finished in the meantime. Sync errors are rethrown, and a cleaned-up
+  redeemer throws `giftCardRedeemerCleanedUp` (`ZGIFT0005`).
+- `GiftCardRedeemer.redeem(to:memo:)` sends the card's whole spendable balance, minus the ZIP 317
+  fee and with an optional memo, to a `UnifiedAddress` that has an Orchard receiver (other
+  receivers may be present), and returns the `TransactionSubmitResult`s. Value still waiting for
+  confirmations stays on the card. An address without an Orchard receiver throws
+  `giftCardRecipientRequiresOrchard` (`ZGIFT0013`) and one on another network
+  `giftCardNetworkMismatch`; a call before `check()` has prepared the wallet throws
+  `giftCardRedeemerNotReady` (`ZGIFT0003`), a card with nothing to sweep, `.dust` included,
+  `giftCardNothingToRedeem` (`ZGIFT0004`), and a claim that completes without any submission
+  result `giftCardRedemptionIncomplete` (`ZGIFT0012`). The claim discards the outgoing viewing
+  key, so the card's key, which the card's issuer can rederive, reveals neither the recipient nor
+  the amount. Sapling parameters are needed only when the actual proposal has Sapling inputs or
+  outputs; an Orchard recipient alone does not rule that out. A redemption can be cancelled until
+  native transaction creation begins; from then on it finishes creation, submission and recording
+  even if the caller cancels, and `cleanup()` waits for it. Creation already underway cannot be
+  rolled back, so check the card again before retrying after a cancellation that raced it. After a
+  submission fails, the card wallet treats the notes as spent until the transaction expires: clean
+  up and create a new redeemer to retry.
 - `GiftCardRedeemer.redeem(to:memo:recordIn:)` takes the user's own `Synchronizer` and, after the
-  sweep is accepted, stores the claim transaction in it as a trusted receive (ZIP 315):
-  the main wallet shows the incoming gift at once and can spend it after the default 3
-  confirmations. This works while the destination is stopped, and only with the
-  SDK's own synchronizers (`SDKSynchronizer`, `SlipstreamSynchronizer`). It returns a
-  `GiftCardRedeemer.Redemption` with the submission `results`, the `fee` paid, the `amount` sent to
-  the recipient, and `recordedInDestination`, which is
-  `false` — never an error — when the destination could not record the claim, including when the
-  claim does not involve the destination's wallet and so was not stored there; the funds are on
-  chain once mined. When trust was never recorded and the claim pays the destination wallet, normal
-  sync can discover it as an ordinary untrusted receive; an unrelated `recordIn:` wallet does not receive the claim. Anyone holding the card link,
-  including whoever minted the card, can sign a competing spend of its notes. A reorg after three
-  to nine claim confirmations could replace a claim already spent from; the shorter wait accepts
-  this residual risk for faster spendability. Externally funded card notes still need ten confirmations.
-  Recording again sets the claim trusted, without migrating historical claims or changing general
-  transfer policy. `redeem(to:memo:)` is unchanged and records nothing. A failure to record is logged with
-  `ZcashError.synchronizerTrustedTransactionIdMismatch` (`ZSYNCO0010`) or
-  `ZcashError.rustSetTransactionTrust` (`ZRUST0158`).
+  sweep is accepted, stores the claim transaction in it as a trusted receive (ZIP 315): the main
+  wallet shows the incoming gift at once and can spend it after the default 3 confirmations. This
+  works while the destination is stopped, and only with the SDK's own synchronizers
+  (`SDKSynchronizer`, `SlipstreamSynchronizer`). It returns a `GiftCardRedeemer.Redemption` with
+  the submission `results`, the `fee` paid, the `amount` sent to the recipient, and
+  `recordedInDestination`, which is `false` (never an error) when the destination could not record
+  the claim, including when the claim does not involve the destination's wallet and so was not
+  stored there; the funds are on chain once mined. Recording is attempted for every accepted
+  transaction, even after a later submission error or a failure to record another. When trust was
+  never recorded and the claim pays the destination wallet, normal sync can discover it as an
+  ordinary untrusted receive; an unrelated `recordIn:` wallet does not receive the claim. A failure
+  to record is logged with `ZcashError.synchronizerTrustedTransactionIdMismatch` (`ZSYNCO0010`) or
+  `ZcashError.rustSetTransactionTrust` (`ZRUST0158`). Anyone holding the card link, including
+  whoever minted the card, can sign a competing spend of its notes: a reorg after three to nine
+  claim confirmations could replace a claim already spent from, a residual risk the shorter wait
+  accepts for faster spendability. Externally funded card notes still need ten confirmations.
+  `redeem(to:memo:)` records nothing.
+- `GiftCardRedeemer.cleanup()` stops the card wallet, waits for its unfinished work, wipes it,
+  closes its service connections and Tor runtime, and deletes all of its files; a new redeemer can
+  then claim the card. Unredeemed funds stay on the card, since its key is in the link. Each caller
+  waits at most 30 seconds, including queued work, before `giftCardCleanupTimedOut` (`ZGIFT0011`),
+  and cancellation returns `CancellationError`. Neither stops the cleanup, which keeps the card
+  claimed until it succeeds, so keep the UI in a cleanup state rather than creating a replacement.
+  Wipe and storage failures reach the caller and are retried with capped exponential delay.
+  Releasing a redeemer that was checked, or whose cleanup was requested, finishes the teardown in
+  the background.
+- `GiftCardRedeemer.removeLeftoverWallets(in:)` deletes the card wallets that a crash or a killed
+  app left in a storage directory, and returns how many it deleted. Such a wallet holds the card's
+  keys and the claim's recipient, so call it at launch. It never touches a wallet whose redeemer or
+  teardown is alive in the process, nor anything that is not a card wallet.
+  `GiftCardRedeemer.defaultStorageDirectory` is the directory both use by default.
+- `AwaitableStopSynchronizer.stopAndWait()` lets clients of `SDKSynchronizer` and
+  `SlipstreamSynchronizer` wait until the synchronizer's stop operation finishes, including
+  earlier queued lifecycle work in Slipstream. Idle and unprepared calls complete without waiting
+  for a new state-stream event. Existing `Synchronizer` conformers need no new requirement, and
+  `stop()` still returns immediately. The classic synchronizer joins processor-owned sync,
+  mempool, rewind, polling and action work and supersedes queued automatic restarts. Slipstream can still
+  report a non-quiescent stop. Coordinate subsequent starts when pausing the main wallet for a gift claim.
 - `OvkPolicy` (`.sender`, `.discard`) and
   `Synchronizer.createProposedTransactions(proposal:spendingKey:ovkPolicy:)` /
   `Broadcaster.createProposedTransactions(proposal:spendingKey:ovkPolicy:)`. With `.discard` the
@@ -126,15 +138,15 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wallet that only spends Orchard or Ironwood funds never downloads the 50 MB of parameter files.
   A proposal that cannot be inspected throws `ZcashError.rustProposalRequiresSaplingParams`
   (`ZRUST0157`).
+- `NetworkActivationHeights.nu7` sets the NU7 activation height of a custom or regtest network.
+  A `nil` height means "not activated".
 
 ## Changed
 
-- Both `GiftCardRedeemer.redeem(to:memo:)` and `redeem(to:memo:recordIn:)` now reject unified
-  addresses without an Orchard receiver with `giftCardRecipientRequiresOrchard` (`ZGIFT0013`)
-  before proposing or creating a claim. Orchard-only and multi-receiver unified addresses that
-  include Orchard are accepted. Public signatures are unchanged. Exhaustive switches over
-  `ZcashError` or `ZcashErrorCode` must handle the new case; it carries no address or key data.
-
+- `ZcashError` and `ZcashErrorCode` gain the sixteen gift-card cases named above (`ZGIFT0001` to
+  `ZGIFT0016`), `synchronizerTrustedTransactionIdMismatch` (`ZSYNCO0010`),
+  `rustProposalRequiresSaplingParams` (`ZRUST0157`) and `rustSetTransactionTrust` (`ZRUST0158`).
+  An exhaustive `switch` over either stops compiling until they are handled; see `MIGRATING.md`.
 - `TxId.init(_ id: [UInt8])` now throws `ZcashError.txIdNot32Bytes` (`ZMODEL0001`) unless `id` is
   exactly 32 bytes, so call sites need `try`. `TxId.id` is now a `let`: assigning to it no longer
   compiles; create a new `TxId` instead.
@@ -159,57 +171,14 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Fixed
 
-- `GiftCardRedeemer.check()` starts syncing on the first check even when wallet preparation
-  reports an existing chain tip or scan progress, avoiding a check timeout. No caller changes are needed.
-
-- `GiftCardRedeemer.check()` retries a pass after terminal sync-stall recovery exhaustion by
-  starting a fresh pass with a new recovery budget. Repeated checks keep healthy syncing or
-  up-to-date passes. No caller changes are needed.
-
 - Explicit starts requested from rewind completion wait for retained rewind callbacks to finish,
   preserve retry intent and coalesce into one sync run. A later stop or wipe cancels that request.
-
 - `SDKSynchronizer.rewind(_:)` keeps stopped and never-started wallets stopped after success or failure.
   A stop requested during rewind also prevents automatic polling from restarting. Call `start()` explicitly to resume syncing.
-
 - Block download shutdown now waits for in-flight storage writes even when its caller is
-  cancelled. Cancellation during the final write no longer starts an extended download range.
-  No call-site changes are required. (MOB-2138)
-
-- Setting a transaction's trust status now fails if this wallet has not stored the transaction.
-  Gift claims sent to a recipient outside the `recordIn:` wallet report
-  `recordedInDestination == false`, rather than reporting a receive that was never stored.
-  The accepted submission remains unaffected. (MOB-2138)
-
-- `GiftCardRedeemer.cleanup()` now joins the temporary wallet's sync, mempool, rewind, polling and action
-  writers before wipe, then releases cached Tor connections and card-owned isolated clients before
-  closing its root runtime and deleting the directory. Cleanup retains the card alias throughout,
-  even when its caller is cancelled. Early wipe validation failure and terminal storage errors use
-  the same drain before directory fallback. Concurrent wipes complete every caller once. Stalled
-  work can keep cleanup pending indefinitely; directory deletion errors reach the caller. Standalone
-  awaited stop and direct wipe also join downloaders admitted by a cancelling action. Releasing a
-  redeemer without cleanup retains its alias until writers and native resources finish; its files
-  remain behind for leftover cleanup. Public signatures are unchanged. (MOB-2138)
-
-- `GiftCardRedeemer.check()` and the `redeem` overloads now throw `CancellationError` for
-  cancelled queued calls before running them. Cancellation observed after redemption preparation
-  or immediately before native claim creation also prevents creating and submitting a claim.
-  Synchronous native creation already underway cannot be rolled back; recheck the card before
-  retrying when cancellation races it. `cleanup()` still runs when its caller is cancelled.
-  Public signatures are unchanged; no call-site changes are needed. (MOB-2138)
-
-- Cleaning up a gift-card redeemer and later releasing it no longer frees the card's replacement
-  redeemer. The replacement remains protected from duplicate redeemers and leftover-wallet cleanup.
-- `GiftCardRedeemer` starts the card wallet from a checkpoint strictly before the birthday in the
-  link. It fetches the server's tree state for the preceding block; without a server, or when the
-  server answers with the state of another height, it selects the bundled checkpoint for the
-  preceding height. This avoids starting at the birthday block itself, which could omit a gift
-  received there. The server checkpoint still avoids rounding down to the bundled grid (up to
-  2,500 blocks on mainnet, 10,000 on testnet), so `check()` scans only blocks since the card was
-  funded.
-- `GiftCardRedeemer` never reuses a card wallet left behind by an earlier redeemer (a crash or a
-  killed app): the leftover directory is deleted before the wallet is created, so a stale birthday
-  or a half-finished claim cannot carry over. Rebuilding one costs seconds.
+  cancelled. Cancellation during the final write no longer starts an extended download range,
+  and `SDKSynchronizer.wipe()` waits for a block download that a cancelled sync action started
+  before it deletes anything. No call-site changes are required.
 
 ## Checkpoints
 
