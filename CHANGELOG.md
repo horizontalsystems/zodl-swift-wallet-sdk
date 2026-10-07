@@ -23,9 +23,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   task), whoever the caller is; every later call then throws the error that closed it, or
   `ZcashError.ledgerTransportClosed` after a cancellation or `close()`. Open a new connection then.
   `LedgerDevice`'s commands and signing also close the transport on any exchange that fails. During
-  those commands and signing, a task cancelled before its exchange starts, between commands or while
+  `LedgerDevice`'s commands, a task cancelled before its exchange starts, between commands or while
   queued behind another exchange on the same transport, leaves the transport open, except during the
   pause before resending a command the device refused with `0x6901`, where a cancellation closes it.
+  During signing, a cancelled task closes the transport at any point of the ceremony.
   `LedgerZcashApp.ensureZcashAppOpen` closes the caller's transport only when its link fails, and
   closes a transport its `reconnect` opened whenever the call fails; `LedgerZcashApp.currentApp`
   never closes the transport it is given.
@@ -37,8 +38,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`exchange(_:timeout:)`, `close()`), for custom transports and test doubles.
 - `LedgerExchangeNotStarted`, the error a transport's `exchange(_:timeout:)` throws to report that
   this exchange never sent anything, such as a caller cancelled while queued behind another exchange
-  on the same transport; the SDK's own commands normalize it to `CancellationError` without closing
-  the transport.
+  on the same transport; the SDK's own commands normalize it to `CancellationError`. `LedgerDevice`'s
+  commands then leave the transport open, and signing closes it, as on every cancellation.
 - `LedgerDevice(transport:networkType:)`: `appVersion()` (a `LedgerAppVersion`),
   `deviceIdentity()` (a `LedgerDeviceIdentity`),
   `pairAccount(zip32AccountIndex:readTimeout:reconnect:)` (a `LedgerAccountPairing` carrying the

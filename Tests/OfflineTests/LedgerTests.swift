@@ -952,8 +952,78 @@ final class LedgerSignerTests: XCTestCase {
             // Expected: the cancellation reaches the caller unchanged.
         }
 
+        // The failed exchange and the cancelled ceremony each close the transport; closing twice has
+        // no effect.
         let closeCount = await transport.closeCount
-        XCTAssertEqual(closeCount, 1)
+        XCTAssertGreaterThanOrEqual(closeCount, 1)
+    }
+
+    func testTheRunnerClosesTheTransportWhenCancelledBetweenExchanges() async throws {
+        let session = ScriptedSigningSession(
+            commands: [
+                command(0x40, stage: .identifyingDevice),
+                command(0x52, stage: .streaming),
+                command(0x53, stage: .streaming, acknowledged: 1)
+            ],
+            statuses: [.moreAPDUs, .moreAPDUs, .complete]
+        )
+        let (signer, _) = signer(session: session)
+        // The device answers the first streaming command, and the task is cancelled before the runner
+        // sends the next one: no exchange is in progress, but the device is in the middle of the
+        // ceremony.
+        let transport = ScriptedLedgerTransport { apdu, _ in
+            if apdu[1] == LedgerReplies.getFirmwareVersion {
+                return LedgerReplies.firmwareVersion(3, 9, 3)
+            }
+            if apdu[1] == 0x52 {
+                withUnsafeCurrentTask { task in task?.cancel() }
+            }
+            return LedgerReplies.status(0x9000)
+        }
+        let binding = try binding()
+        let accountUUID = self.accountUUID
+
+        let task = Task {
+            try await signer.sign(pczt: Data([1]), accountUUID: accountUUID, binding: binding, transport: transport, progress: nil)
+        }
+
+        do {
+            _ = try await task.value
+            XCTFail("A cancelled ceremony must fail")
+        } catch is CancellationError {
+            // Expected: the cancellation reaches the caller unchanged.
+        }
+
+        let instructions = await transport.instructions
+        XCTAssertEqual(instructions, [LedgerReplies.getFirmwareVersion, 0x40, 0x52], "nothing is sent after the cancellation")
+        let closeCount = await transport.closeCount
+        XCTAssertEqual(closeCount, 1, "the device is mid-ceremony, so the transport is closed")
+        XCTAssertEqual(session.finishCount, 0)
+    }
+
+    func testTheRunnerClosesTheTransportWhenCancelledBeforeTheFirstExchange() async throws {
+        let session = ScriptedSigningSession(commands: [command(0x40, stage: .identifyingDevice)], statuses: [.complete])
+        let (signer, _) = signer(session: session)
+        let transport = ScriptedLedgerTransport { _, _ in LedgerReplies.firmwareVersion(3, 9, 3) }
+        let binding = try binding()
+        let accountUUID = self.accountUUID
+
+        let task = Task {
+            withUnsafeCurrentTask { task in task?.cancel() }
+            return try await signer.sign(pczt: Data([1]), accountUUID: accountUUID, binding: binding, transport: transport, progress: nil)
+        }
+
+        do {
+            _ = try await task.value
+            XCTFail("A cancelled ceremony must fail")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        let received = await transport.received
+        XCTAssertTrue(received.isEmpty)
+        let closeCount = await transport.closeCount
+        XCTAssertEqual(closeCount, 1, "a cancelled ceremony always closes the transport")
     }
 
     func testASessionTheDeviceCannotBuildReportsTheStructuredError() async throws {

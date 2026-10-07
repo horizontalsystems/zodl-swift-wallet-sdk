@@ -436,8 +436,9 @@ public protocol Synchronizer: AnyObject {
     /// of the transaction is sent until both pass. The device then shows the transaction for the user
     /// to review; no timeout applies while it waits.
     ///
-    /// When an exchange fails on the transport, or the task is cancelled, the transport is closed: open
-    /// a new connection before trying again. Every other failure leaves it open.
+    /// When an exchange fails on the transport, or the task is cancelled at any point of the ceremony,
+    /// the transport is closed: open a new connection before trying again. Every other failure leaves
+    /// it open.
     ///
     /// - Parameters:
     ///   - pczt: The PCZT to sign.
