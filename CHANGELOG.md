@@ -6,6 +6,27 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 # Unreleased
 
+## Added
+
+- `NetworkActivationHeights.nu7` sets the NU7 activation height of a custom or regtest network.
+  A `nil` height means "not activated".
+
+## Changed
+
+### NU7 pre-release crates
+
+- The SDK now builds on the NU7 pre-release generation of the underlying Zcash Rust crates and the
+  `zodl-slipstream` 0.4.0-pre.1 engine.
+- Every unified address, unified full viewing key and unified incoming viewing key string the SDK
+  returns is ZIP 316 revision 0, with every receiver or item it carries. Revision 2 is used only
+  for a value revision 0 cannot represent (one with expiry metadata, a P2SH viewing-key item, or
+  only transparent items). Decoding still accepts both revisions.
+- Coinholder voting is built on `zcash_voting` 5.1.1-rc.3 as it stands at the head of
+  valargroup/zcash_voting#373, the pull request that moves its librustzcash backend to the NU7
+  pre-release crates. No release carries that change yet, so the Rust core takes the crate, and
+  the crates under it that the change also needs, from git revisions; they are replaced by the
+  releases once those exist. The voting API is unchanged.
+
 # 5.0.0 - 2026-09-23
 
 ## Added

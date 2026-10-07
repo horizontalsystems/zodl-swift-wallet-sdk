@@ -319,6 +319,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `zcashlc_set_custom_network` takes a trailing `nu7` activation height. As for the other
+  heights, a negative value means "not activated on this network".
 - `zcashlc_slipstream_snapshot` reports `tip_fresh = 1` only once the run that refreshed the
   chain tip has also completed a ChainTip-priority scan range (`spendable_hint = 1`) or reached
   Done, so a host that lifts a spendable-balance mask on `tip_fresh` never uncovers the transient
@@ -542,6 +544,21 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every live run drives at least once per open-lane pass, sync edge, and UI refresh; a read can
   therefore trail a just-mined broadcast by at most one such pass. Reads no longer contend with
   proving.
+- The crate now builds against the NU7 pre-release generation of the `librustzcash` crates and
+  the `zodl-slipstream` 0.4.0-pre.1 engine.
+- Every unified address, UFVK and UIVK string a `zcashlc_*` function returns is ZIP 316
+  revision 0, with every receiver or item the value carries, as before the NU7 move. Revision 2
+  is used only for a value revision 0 cannot represent (one with expiry metadata, a P2SH
+  viewing-key item, or only transparent items). Decoding accepts both revisions, unchanged.
+- `zcash_voting` moves from 5.1.0 to 5.1.1-rc.3 as it stands at the head of
+  valargroup/zcash_voting#373, which moves the crate's `lrz` backend to the NU7 pre-release
+  crates. No release carries that change yet, so `[patch.crates-io]` takes the crate from
+  `zodl-inc/zcash_voting@9bb3762`, and the crates under it that the change also needs from the
+  heads of their own pull requests: `voting-circuits`, `voting-crypto-deps` and `imt-tree`
+  (valargroup/voting-circuits#135), `pir-types` and `pir-client`
+  (valargroup/vote-nullifier-pir#173), and `zakura-wallet-lib`
+  (zakura-core/wallet-libraries#83). Each entry is replaced by the release that contains its
+  pull request. The `zcashlc_voting_*` C surface is unchanged.
 
 ### Removed
 - The step-by-step coinholder-voting C surface is gone: `zcash_voting` absorbed the
