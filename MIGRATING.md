@@ -1,5 +1,29 @@
 # Migrating from previous versions to _Unreleased_
 
+## Gift-card checks have a bounded caller wait
+
+`GiftCardRedeemer.check()` and its public initializer keep their existing call syntax. Each check
+caller now has a 600-second monotonic budget starting at method entry, including queued work and
+preparation. Cancellation throws `CancellationError` promptly even when native preparation does
+not cooperate. Expiry throws the new payload-free `ZcashError.giftCardCheckTimedOut` /
+`ZcashErrorCode.giftCardCheckTimedOut` (`ZGIFT0014`); add it to exhaustive switches, for example:
+
+```swift
+switch error {
+case .giftCardCheckTimedOut:
+    // Offer a later check or await cleanup; the card's balance is still unknown.
+    break
+default:
+    break
+}
+```
+
+Cancellation and timeout detach the caller and request work cancellation. Already admitted wallet
+work remains owned until it drains. `cleanup()` still joins that work before wiping, deleting the
+root, or releasing the alias, and keeps its separate 30-second caller budget. A check timeout does
+not establish that funds are absent or that cleanup has completed. A later check reuses a wallet
+whose native preparation finished after the earlier caller detached.
+
 ## Gift-card redemption requires an Orchard receiver
 
 Both `GiftCardRedeemer.redeem(to:memo:)` and `redeem(to:memo:recordIn:)` keep their signatures,

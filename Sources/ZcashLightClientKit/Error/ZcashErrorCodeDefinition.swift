@@ -1173,6 +1173,9 @@ enum ZcashErrorDefinition {
     /// The gift claim completed without any submission result. No successful redemption was reported.
     // sourcery: code="ZGIFT0012"
     case giftCardRedemptionIncomplete
+    /// The gift-card check did not finish in time. Cleanup still owns unfinished wallet work.
+    // sourcery: code="ZGIFT0014"
+    case giftCardCheckTimedOut
 
     // MARK: - Models
 

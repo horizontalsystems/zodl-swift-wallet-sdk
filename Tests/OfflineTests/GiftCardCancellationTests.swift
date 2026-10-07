@@ -294,6 +294,8 @@ struct GiftCardCancellationFixture {
         spendableValue: Zatoshi = Zatoshi(50_000),
         isTorEnabled: Bool = false,
         cleanupTiming: GiftCardCleanupTiming = .live,
+        checkTiming: GiftCardCleanupTiming = .live,
+        checkPolicy: GiftCardCheckPolicy? = nil,
         torClient: TorClient? = nil
     ) async throws -> GiftCardCancellationFixture {
         let card = try GiftCard(link: cardLink)
@@ -409,7 +411,9 @@ struct GiftCardCancellationFixture {
                 )
                 return synchronizer
             },
-            cleanupTiming: cleanupTiming
+            cleanupTiming: cleanupTiming,
+            checkTiming: checkTiming,
+            checkPolicy: checkPolicy
         )
         return GiftCardCancellationFixture(
             card: card,

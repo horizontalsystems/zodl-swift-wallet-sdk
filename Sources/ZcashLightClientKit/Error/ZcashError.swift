@@ -1066,6 +1066,9 @@ public enum ZcashError: Equatable, Error {
     /// The gift claim completed without any submission result. No successful redemption was reported.
     /// ZGIFT0012
     case giftCardRedemptionIncomplete
+    /// The gift-card check did not finish in time. Cleanup still owns unfinished wallet work.
+    /// ZGIFT0014
+    case giftCardCheckTimedOut
     /// Attempt to init TxId with input that is not 32 bytes.
     /// ZMODEL0001
     case txIdNot32Bytes
@@ -1365,6 +1368,7 @@ public enum ZcashError: Equatable, Error {
         case .giftCardRecipientRequiresOrchard: return "The gift card recipient must be a unified address with an Orchard receiver."
         case .giftCardCleanupTimedOut: return "Cleanup is still continuing and the gift card remains in use. Wait for cleanup to finish before creating another redeemer."
         case .giftCardRedemptionIncomplete: return "The gift claim completed without any submission result. No successful redemption was reported."
+        case .giftCardCheckTimedOut: return "The gift-card check did not finish in time. Cleanup still owns unfinished wallet work."
         case .txIdNot32Bytes: return "Attempt to init TxId with input that is not 32 bytes."
         case .txIdInvalidHexEncoding: return "Attempt to init TxId with invalid hex encoding."
         }
@@ -1679,6 +1683,7 @@ public enum ZcashError: Equatable, Error {
         case .giftCardRecipientRequiresOrchard: return .giftCardRecipientRequiresOrchard
         case .giftCardCleanupTimedOut: return .giftCardCleanupTimedOut
         case .giftCardRedemptionIncomplete: return .giftCardRedemptionIncomplete
+        case .giftCardCheckTimedOut: return .giftCardCheckTimedOut
         case .txIdNot32Bytes: return .txIdNot32Bytes
         case .txIdInvalidHexEncoding: return .txIdInvalidHexEncoding
         }

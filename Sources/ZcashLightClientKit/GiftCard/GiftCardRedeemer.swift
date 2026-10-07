@@ -139,8 +139,9 @@ public struct GiftCardStatus: Equatable {
 ///   CPU and I/O, so checking a card can slow the main wallet's sync.
 /// - ``check()`` waits for the card wallet to be up to date. The wallet keeps syncing in the
 ///   background afterwards, so calling ``check()`` again (for instance while funds are pending)
-///   reports the latest balance without waiting for a new sync. Cancelling the calling task
-///   stops the wait (the wallet keeps syncing) and throws `CancellationError`.
+///   reports the latest balance without waiting for a new sync. Each caller waits at most 600
+///   seconds, including queueing and preparation. Cancellation or timeout stops only that caller's
+///   wait. The wallet and unfinished work remain owned until they drain and cleanup succeeds.
 /// - ``cleanup()`` is always safe for the funds: the card's key is in the link, not in the
 ///   temporary wallet. Unredeemed funds stay on the card and a new redeemer can sweep them.
 /// - Releasing a used redeemer, or one with cleanup requested, retains process ownership until
@@ -187,6 +188,8 @@ public actor GiftCardRedeemer {
     private let synchronizer: SlipstreamSynchronizer
     private var accountUUID: AccountUUID?
     private let cleanupTiming: GiftCardCleanupTiming
+    nonisolated let checkTiming: GiftCardCleanupTiming
+    nonisolated let checkPolicy: GiftCardCheckPolicy
     private let cleanupCoordinator: GiftCardCleanupCoordinator
     private var isCleanedUp = false
     private var hasUsedWallet = false
@@ -239,7 +242,9 @@ public actor GiftCardRedeemer {
         loggingPolicy: Initializer.LoggingPolicy,
         container: DIContainer,
         makeSynchronizer: (Initializer) -> SlipstreamSynchronizer,
-        cleanupTiming: GiftCardCleanupTiming = .live
+        cleanupTiming: GiftCardCleanupTiming = .live,
+        checkTiming: GiftCardCleanupTiming = .live,
+        checkPolicy: GiftCardCheckPolicy? = nil
     ) throws {
         guard card.network == network.networkType else {
             throw ZcashError.giftCardNetworkMismatch
@@ -291,6 +296,8 @@ public actor GiftCardRedeemer {
         let synchronizer = makeSynchronizer(initializer)
         self.synchronizer = synchronizer
         self.cleanupTiming = cleanupTiming
+        self.checkTiming = checkTiming
+        self.checkPolicy = checkPolicy ?? GiftCardCheckPolicy.live(isTorEnabled: isTorEnabled)
         self.cleanupCoordinator = GiftCardCleanupCoordinator(
             timing: cleanupTiming,
             wipe: {
@@ -321,27 +328,6 @@ public actor GiftCardRedeemer {
         )
     }
 
-    /// Fetches the server's tree state for the block before the card's birthday, so the card
-    /// wallet scans from the birthday itself. A fetch failure, or a state for another height,
-    /// leaves the bundled checkpoint in place: slower, never wrong. The fetch goes over Tor when
-    /// the card wallet uses it.
-    private func fetchExactBirthday() async {
-        // The rust parser guarantees a birthday at or above NU5 activation, so `- 1` is a block.
-        let height = card.birthdayHeight - 1
-        do {
-            let sdkFlags = initializer.container.resolve(SDKFlags.self)
-            let treeState = try await initializer.lightWalletService.getTreeState(
-                BlockID(height: UInt64(height)),
-                mode: await sdkFlags.ifTor(.uniqueTor)
-            )
-            if !checkpointSource.use(treeState, forBirthday: card.birthdayHeight) {
-                initializer.logger.warn("Gift card: the server sent a tree state for another height; using the bundled checkpoint")
-            }
-        } catch {
-            initializer.logger.warn("Gift card: tree state for the birthday unavailable, using the bundled checkpoint")
-        }
-    }
-
     deinit {
         if hasUsedWallet || isCleanedUp {
             if GiftCardRedeemerRegistry.retainCleanup(alias: alias, owner: owner, coordinator: cleanupCoordinator) {
@@ -355,7 +341,11 @@ public actor GiftCardRedeemer {
     /// Creates (on first use) and syncs the card wallet, then reports what the card holds.
     ///
     /// The first call restores the card wallet from the card's birthday, which downloads and scans
-    /// the blocks since then. It returns once the wallet is up to date.
+    /// the blocks since then. It returns once the wallet is up to date. The caller has a 600-second
+    /// monotonic budget from method entry, including queued time and preparation. Cancellation or
+    /// expiry requests cancellation of unfinished work and returns without waiting for that work
+    /// to drain. Cleanup still joins it before wiping or releasing the card's alias.
+    /// A timeout does not mean the card is empty or cleanup has completed.
     ///
     /// When the card has spendable funds, this also proposes, without creating anything, the
     /// transaction that would sweep them, so that the fee their notes require decides: when it
@@ -368,11 +358,18 @@ public actor GiftCardRedeemer {
     ///
     /// - Returns: the card's balance and whether it can be redeemed now.
     /// - Throws: the sync error if the card wallet cannot sync (for instance, the server is
-    ///   unreachable), `CancellationError` if the calling task is cancelled, and
+    ///   unreachable), `CancellationError` if the calling task is cancelled,
+    ///   ``ZcashError/giftCardCheckTimedOut`` if the caller's budget expires, and
     ///   ``ZcashError/giftCardRedeemerCleanedUp`` after ``cleanup()``.
-    public func check() async throws -> GiftCardStatus {
-        try await serialized { redeemer, _ in
-            try await redeemer.performCheck()
+    public nonisolated func check() async throws -> GiftCardStatus {
+        // Timestamp before the actor hop, so queueing and preparation consume the same budget.
+        let operation = GiftCardCheckOperation(admittedAt: checkTiming.now(), policy: checkPolicy, timing: checkTiming)
+        return try await operation.value {
+            try operation.requireActive()
+            return try await self.serialized { redeemer, _ in
+                try operation.requireActive()
+                return try await redeemer.performCheck(operation: operation)
+            }
         }
     }
 
@@ -468,6 +465,7 @@ public actor GiftCardRedeemer {
     private func serialized<T>(
         _ operation: @escaping (GiftCardRedeemer, GiftCardOperationAdmission) async throws -> T
     ) async throws -> T {
+        try Task.checkCancellation()
         guard !isCleanedUp else { throw ZcashError.giftCardRedeemerCleanedUp }
         let previous = tail
         let id = UUID()
@@ -488,12 +486,13 @@ public actor GiftCardRedeemer {
         }
     }
 
-    private func performCheck() async throws -> GiftCardStatus {
+    private func performCheck(operation: GiftCardCheckOperation) async throws -> GiftCardStatus {
         guard !isCleanedUp else {
             throw ZcashError.giftCardRedeemerCleanedUp
         }
 
-        let accountUUID = try await prepareIfNeeded()
+        let accountUUID = try await prepareIfNeeded(operation: operation)
+        try operation.requireActive()
 
         let restarting: Bool
         switch synchronizer.latestState.syncStatus {
@@ -505,9 +504,12 @@ public actor GiftCardRedeemer {
         }
         // After a restart the state stream may still replay the error that stopped the previous
         // sync; only a later error belongs to this attempt.
+        try operation.requireActive()
         try await waitUntilUpToDate(ignoringStaleError: restarting)
+        try operation.requireActive()
 
         let balance = try await synchronizer.getAccountsBalances()[accountUUID]
+        try operation.requireActive()
         var sweep: GiftCardStatus.Sweep?
         if let spendable = balance?.shieldedSpendableValue, spendable > .zero {
             sweep = try await proposedSweep(accountUUID: accountUUID)
@@ -621,7 +623,7 @@ public actor GiftCardRedeemer {
 
     /// Prepares the card wallet from the card's seed and birthday on first use, and returns the
     /// card account.
-    private func prepareIfNeeded() async throws -> AccountUUID {
+    private func prepareIfNeeded(operation: GiftCardCheckOperation) async throws -> AccountUUID {
         if let accountUUID {
             return accountUUID
         }
@@ -643,6 +645,7 @@ public actor GiftCardRedeemer {
         try? directory.setResourceValues(values)
 
         await fetchExactBirthday()
+        try operation.requireActive()
 
         let synchronizer = self.synchronizer
         let birthday = card.birthdayHeight
@@ -658,7 +661,10 @@ public actor GiftCardRedeemer {
         guard let account = try await synchronizer.listAccounts().first else {
             throw ZcashError.giftCardRedeemerNotReady
         }
+        // Native preparation can finish after caller cancellation. Retain its account before
+        // checking cancellation, so a later check cannot delete this already prepared wallet.
         accountUUID = account.id
+        try Task.checkCancellation()
         return account.id
     }
 
@@ -683,6 +689,29 @@ public actor GiftCardRedeemer {
             }
         } onCancel: {
             waiter.finish(.failure(CancellationError()))
+        }
+    }
+}
+
+private extension GiftCardRedeemer {
+    /// Fetches the server's tree state for the block before the card's birthday, so the card
+    /// wallet scans from the birthday itself. A fetch failure, or a state for another height,
+    /// leaves the bundled checkpoint in place: slower, never wrong. The fetch goes over Tor when
+    /// the card wallet uses it.
+    func fetchExactBirthday() async {
+        // The rust parser guarantees a birthday at or above NU5 activation, so `- 1` is a block.
+        let height = card.birthdayHeight - 1
+        do {
+            let sdkFlags = initializer.container.resolve(SDKFlags.self)
+            let treeState = try await initializer.lightWalletService.getTreeState(
+                BlockID(height: UInt64(height)),
+                mode: await sdkFlags.ifTor(.uniqueTor)
+            )
+            if !checkpointSource.use(treeState, forBirthday: card.birthdayHeight) {
+                initializer.logger.warn("Gift card: the server sent a tree state for another height; using the bundled checkpoint")
+            }
+        } catch {
+            initializer.logger.warn("Gift card: tree state for the birthday unavailable, using the bundled checkpoint")
         }
     }
 }

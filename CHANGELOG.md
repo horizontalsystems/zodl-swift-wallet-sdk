@@ -8,6 +8,13 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Added
 
+- `GiftCardRedeemer.check()` keeps its public call syntax and bounds each caller to 600 seconds
+  from method entry, including queued time and wallet preparation. Expiry throws the payload-free
+  `giftCardCheckTimedOut` (`ZGIFT0014`), and cancellation returns `CancellationError` without waiting
+  for non-cooperative preparation. Unfinished wallet work remains owned until it drains; cleanup
+  waits for it before wipe, root deletion, and alias release. Timeout means neither an empty card
+  nor completed cleanup. Later checks reuse a wallet whose native preparation finished after expiry.
+
 - `NetworkActivationHeights.nu7` sets the NU7 activation height of a custom or regtest network.
   A `nil` height means "not activated".
 

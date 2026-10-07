@@ -589,6 +589,8 @@ public enum ZcashErrorCode: String {
     case giftCardCleanupTimedOut = "ZGIFT0011"
     /// The gift claim completed without any submission result. No successful redemption was reported.
     case giftCardRedemptionIncomplete = "ZGIFT0012"
+    /// The gift-card check did not finish in time. Cleanup still owns unfinished wallet work.
+    case giftCardCheckTimedOut = "ZGIFT0014"
     /// Attempt to init TxId with input that is not 32 bytes.
     case txIdNot32Bytes = "ZMODEL0001"
     /// Attempt to init TxId with invalid hex encoding.
