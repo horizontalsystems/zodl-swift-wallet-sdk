@@ -84,8 +84,10 @@ impl WalletDbOpener for SdkWalletDbOpener {
         rusqlite::vtab::array::load_module(&conn)
             .map_err(|e| storage(format!("failed to load wallet database array module: {e}")))?;
 
-        Ok(WalletDb::from_connection(conn, network, SystemClock, crate::system_rng())
-            .with_anchor_retention_interval(crate::anchor_retention_interval(network)))
+        Ok(
+            WalletDb::from_connection(conn, network, SystemClock, crate::system_rng())
+                .with_anchor_retention_interval(crate::anchor_retention_interval(network)),
+        )
     }
 }
 

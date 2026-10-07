@@ -373,10 +373,7 @@ mod tests {
             .expect("add output");
 
         let PcztResult { pczt_parts, .. } = builder
-            .build_for_pczt(
-                crate::system_rng(),
-                &zip317::FeeRule::standard(),
-            )
+            .build_for_pczt(crate::system_rng(), &zip317::FeeRule::standard())
             .expect("build_for_pczt");
 
         let base = Creator::build_from_parts(pczt_parts).expect("creator");

@@ -40,12 +40,7 @@ use crate::{NetworkParams, anchor_retention_interval, slipstream_anchor_retentio
 /// tip yet (nothing scanned — nothing to retain) or the network has no NU6.3 activation
 /// (no migration boundaries exist to retain).
 pub(crate) fn reconcile_retained_anchor_marks(
-    wallet: &mut WalletDb<
-        rusqlite::Connection,
-        NetworkParams,
-        SystemClock,
-        crate::SystemRng,
-    >,
+    wallet: &mut WalletDb<rusqlite::Connection, NetworkParams, SystemClock, crate::SystemRng>,
     network: &NetworkParams,
 ) -> anyhow::Result<u64> {
     let Some(tip) = wallet
@@ -113,17 +108,11 @@ mod tests {
 
     fn fresh_wallet(
         dir: &std::path::Path,
-    ) -> WalletDb<rusqlite::Connection, NetworkParams, SystemClock, crate::SystemRng>
-    {
+    ) -> WalletDb<rusqlite::Connection, NetworkParams, SystemClock, crate::SystemRng> {
         let path = dir.join("wallet.sqlite");
         let network = NetworkParams::Standard(Network::TestNetwork);
-        let mut db = WalletDb::for_path(
-            &path,
-            network,
-            SystemClock,
-            crate::system_rng(),
-        )
-        .expect("opens a fresh wallet db");
+        let mut db = WalletDb::for_path(&path, network, SystemClock, crate::system_rng())
+            .expect("opens a fresh wallet db");
         init_wallet_db(&mut db, None).expect("initializes the wallet schema");
         db
     }

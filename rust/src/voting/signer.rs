@@ -178,9 +178,7 @@ pub(super) fn sign_delegation_request(
         .map_err(|e| internal(format!("failed to derive the account spending key: {e}")))?;
     let ask = orchard::keys::SpendAuthorizingKey::from(usk.orchard());
 
-    let signature = ask
-        .randomize(&alpha)
-        .sign(rng, &request.sighash);
+    let signature = ask.randomize(&alpha).sign(rng, &request.sighash);
     let bytes: [u8; 64] = (&signature).into();
     Ok(bytes)
 }
@@ -309,9 +307,14 @@ mod tests {
         let alpha = pasta_curves::pallas::Scalar::from(5u64);
         let request = request_for(&seed, ff::PrimeField::to_repr(&alpha));
 
-        let sig =
-            sign_delegation_request(crate::system_rng(), &seed, crate::NETWORK_ID_TESTNET, Network::Testnet, request)
-                .unwrap();
+        let sig = sign_delegation_request(
+            crate::system_rng(),
+            &seed,
+            crate::NETWORK_ID_TESTNET,
+            Network::Testnet,
+            request,
+        )
+        .unwrap();
 
         let usk = crate::voting::helpers::usk_from_seed(
             crate::NETWORK_ID_TESTNET,
@@ -405,9 +408,14 @@ mod tests {
         let mut request = request_for(&seed, [0u8; 32]);
         request.account_index = 1 << 31;
 
-        let err =
-            sign_delegation_request(crate::system_rng(), &seed, crate::NETWORK_ID_TESTNET, Network::Testnet, request)
-                .unwrap_err();
+        let err = sign_delegation_request(
+            crate::system_rng(),
+            &seed,
+            crate::NETWORK_ID_TESTNET,
+            Network::Testnet,
+            request,
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind(), zcash_voting::VotingErrorKind::InvalidInput);
         assert!(

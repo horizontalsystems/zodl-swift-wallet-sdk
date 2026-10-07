@@ -441,9 +441,7 @@ pub unsafe extern "C" fn zcashlc_derive_address_from_ufvk(
             ufvk.find_address(j, UnifiedAddressRequest::AllAvailableKeys)
         }?;
 
-        Ok(Box::into_raw(Box::new(ffi::Address::new(
-            &network, ua, di,
-        ))))
+        Ok(Box::into_raw(Box::new(ffi::Address::new(&network, ua, di))))
     });
     unwrap_exc_or_null(res)
 }
@@ -486,9 +484,7 @@ pub unsafe extern "C" fn zcashlc_derive_address_from_uivk(
             uivk.find_address(j, UnifiedAddressRequest::AllAvailableKeys)
         }?;
 
-        Ok(Box::into_raw(Box::new(ffi::Address::new(
-            &network, ua, di,
-        ))))
+        Ok(Box::into_raw(Box::new(ffi::Address::new(&network, ua, di))))
     });
     unwrap_exc_or_null(res)
 }
@@ -703,7 +699,8 @@ pub unsafe extern "C" fn zcashlc_derive_private_use_metadata_key(
             ],
             // For the external subtree, we derive keys from the UFVK's items.
             Some(ufvk_string) => {
-                let (net, _, ufvk) = unified::Ufvk::decode(ufvk_string).map_err(|e| anyhow!("{e}"))?;
+                let (net, _, ufvk) =
+                    unified::Ufvk::decode(ufvk_string).map_err(|e| anyhow!("{e}"))?;
                 let expected_net = network.network_type();
                 if net != expected_net {
                     return Err(anyhow!(
@@ -849,13 +846,8 @@ mod tests {
         use zcash_client_sqlite::util::SystemClock;
         use zcash_client_sqlite::wallet::init::init_wallet_db;
 
-        let mut db = WalletDb::for_path(
-            path,
-            MAIN_NETWORK,
-            SystemClock,
-            crate::system_rng(),
-        )
-        .expect("the wallet database must open");
+        let mut db = WalletDb::for_path(path, MAIN_NETWORK, SystemClock, crate::system_rng())
+            .expect("the wallet database must open");
         init_wallet_db(&mut db, None).expect("initializes the wallet schema");
         let seed = secrecy::SecretVec::new(vec![7u8; 32]);
         let treestate = TreeState {
@@ -1002,7 +994,10 @@ mod tests {
             );
             let ua = UnifiedAddress::try_from(raw).expect("converts to a UnifiedAddress");
             let re_encoded = crate::encode_unified_address_r0(&ua, &MAIN_NETWORK);
-            assert_eq!(re_encoded, vector, "must reproduce the upstream vector exactly");
+            assert_eq!(
+                re_encoded, vector,
+                "must reproduce the upstream vector exactly"
+            );
         }
     }
 
@@ -1068,8 +1063,8 @@ mod tests {
         )
         .expect("a transparent receiver plus padding is valid at revision 2")
         .encode(&MAIN_NETWORK.network_type());
-        let (_, _, raw_ua) = unified::Address::decode(&transparent_only_ua_str)
-            .expect("the fixture string decodes");
+        let (_, _, raw_ua) =
+            unified::Address::decode(&transparent_only_ua_str).expect("the fixture string decodes");
         let transparent_only_ua =
             UnifiedAddress::try_from(raw_ua).expect("converts to a UnifiedAddress");
 

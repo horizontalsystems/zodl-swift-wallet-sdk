@@ -119,12 +119,12 @@ use crate::migration_engine::{
 };
 use crate::migration_finalize;
 use crate::migration_plan_cache;
-use crate::{SystemRng, system_rng};
 use crate::{
     NETWORK_ID_MAINNET, NETWORK_ID_TESTNET, NetworkParams, account_uuid_from_bytes,
     free_ptr_from_vec, free_ptr_from_vec_with, parse_network, ptr_from_vec, unwrap_exc_or,
     unwrap_exc_or_null, zcashlc_string_free,
 };
+use crate::{SystemRng, system_rng};
 
 // ----- error / value marshaling -----
 
@@ -291,12 +291,7 @@ unsafe fn wallet_db_read_only(
     rusqlite::vtab::array::load_module(&conn)
         .map_err(|e| anyhow!("Error loading wallet database array module: {e}"))?;
     Ok(
-        MigrationWallet::from_connection(
-            conn,
-            network,
-            SystemClock,
-            rng,
-        )
+        MigrationWallet::from_connection(conn, network, SystemClock, rng)
             .with_anchor_retention_interval(crate::anchor_retention_interval(network)),
     )
 }
@@ -1311,12 +1306,8 @@ fn prove_one(
                 .map_or_else(|| ctx.tip(), Ok)?;
             let network = ctx.network;
             let fvk = stored_orchard_fvk(&ctx.wallet, ctx.account)?;
-            let mut prover = WalletMigrationProver::new(
-                &mut ctx.wallet,
-                prover_rng,
-                ctx.account,
-                fvk,
-            );
+            let mut prover =
+                WalletMigrationProver::new(&mut ctx.wallet, prover_rng, ctx.account, fvk);
             let Some(proved) = migration_finalize::prove_due_transaction(
                 &network,
                 &mut prover,
@@ -2716,7 +2707,13 @@ pub unsafe extern "C" fn zcashlc_migration_advance_step(
 ) -> *mut FfiMigrationAdvanceStep {
     let res = catch_panic(|| {
         let mut ctx = unsafe {
-            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+            open(
+                system_rng(),
+                db_data,
+                db_data_len,
+                account_uuid_bytes,
+                network_id,
+            )?
         };
         // A plain load, NOT `reconcile_mined`: `advance_migration` sweeps every in-flight
         // transaction and promotes the ones the wallet's scan has seen mine, so reconciling first
@@ -2808,7 +2805,13 @@ pub unsafe extern "C" fn zcashlc_migration_progress(
 ) -> *mut FfiMigrationProgress {
     let res = catch_panic(|| {
         let mut ctx = unsafe {
-            open_read(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+            open_read(
+                system_rng(),
+                db_data,
+                db_data_len,
+                account_uuid_bytes,
+                network_id,
+            )?
         };
         let engine_state = {
             let store = account_store(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
@@ -2890,7 +2893,13 @@ pub unsafe extern "C" fn zcashlc_migration_sync_wakeups(
             }))
         };
         let mut ctx = unsafe {
-            open_read(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+            open_read(
+                system_rng(),
+                db_data,
+                db_data_len,
+                account_uuid_bytes,
+                network_id,
+            )?
         };
         let Some(state) = ({
             let store = account_store(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
@@ -3142,7 +3151,13 @@ pub unsafe extern "C" fn zcashlc_migration_transaction_statuses(
 ) -> *mut FfiMigrationTransactionStatuses {
     let res = catch_panic(|| {
         let mut ctx = unsafe {
-            open_read(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+            open_read(
+                system_rng(),
+                db_data,
+                db_data_len,
+                account_uuid_bytes,
+                network_id,
+            )?
         };
         let Some(state) = ({
             let store = account_store(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
@@ -3193,7 +3208,13 @@ pub unsafe extern "C" fn zcashlc_migration_is_note_split_needed(
 ) -> bool {
     let res = catch_panic(|| {
         let mut ctx = unsafe {
-            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+            open(
+                system_rng(),
+                db_data,
+                db_data_len,
+                account_uuid_bytes,
+                network_id,
+            )?
         };
         // `compute_plan`, NOT `plan_and_cache`: this is a pure peek — caching its throwaway plan
         // would supersede the handle of a proposal the user is currently reviewing.
@@ -3241,7 +3262,13 @@ pub unsafe extern "C" fn zcashlc_migration_has_overdue_transfers(
 ) -> bool {
     let res = catch_panic(|| {
         let mut ctx = unsafe {
-            open_read(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+            open_read(
+                system_rng(),
+                db_data,
+                db_data_len,
+                account_uuid_bytes,
+                network_id,
+            )?
         };
         let Some(state) = ({
             let store = account_store(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
@@ -3279,7 +3306,13 @@ pub unsafe extern "C" fn zcashlc_migration_has_invalid_transfers(
 ) -> bool {
     let res = catch_panic(|| {
         let mut ctx = unsafe {
-            open_read(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+            open_read(
+                system_rng(),
+                db_data,
+                db_data_len,
+                account_uuid_bytes,
+                network_id,
+            )?
         };
         let Some(state) = ({
             let store = account_store(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
@@ -3332,24 +3365,27 @@ pub unsafe extern "C" fn zcashlc_migration_prepare_note_split(
 ) -> *mut FfiNoteSplitProposal {
     let res = catch_panic(|| {
         let mut ctx = unsafe {
-            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+            open(
+                system_rng(),
+                db_data,
+                db_data_len,
+                account_uuid_bytes,
+                network_id,
+            )?
         };
-        let (values, fee, proposal_handle) = match plan_and_cache(
-            &mut system_rng(),
-            &mut ctx,
-            false,
-        )? {
-            Some((plan, _, handle)) => {
-                let split = plan.denominations();
-                let values: Vec<i64> = split
-                    .migration_outputs()
-                    .iter()
-                    .map(|v| zat_to_i64(*v))
-                    .collect();
-                (values, zat_to_i64(split.prep_fees()), handle)
-            }
-            None => (Vec::new(), 0, 0),
-        };
+        let (values, fee, proposal_handle) =
+            match plan_and_cache(&mut system_rng(), &mut ctx, false)? {
+                Some((plan, _, handle)) => {
+                    let split = plan.denominations();
+                    let values: Vec<i64> = split
+                        .migration_outputs()
+                        .iter()
+                        .map(|v| zat_to_i64(*v))
+                        .collect();
+                    (values, zat_to_i64(split.prep_fees()), handle)
+                }
+                None => (Vec::new(), 0, 0),
+            };
         let (output_values, output_values_len) = ptr_from_vec(values);
         Ok(Box::into_raw(Box::new(FfiNoteSplitProposal {
             output_values,
@@ -3387,7 +3423,13 @@ pub unsafe extern "C" fn zcashlc_migration_sign_note_split(
 ) -> *mut FfiPreparedTransfer {
     let res = catch_panic(|| {
         let mut ctx = unsafe {
-            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+            open(
+                system_rng(),
+                db_data,
+                db_data_len,
+                account_uuid_bytes,
+                network_id,
+            )?
         };
         // The decoded spending key is handed straight to the engine's signing entry point, which
         // derives its own full viewing key and checks it against the account's before building
@@ -3395,14 +3437,13 @@ pub unsafe extern "C" fn zcashlc_migration_sign_note_split(
         // key is live only for this call.
         let usk = unsafe { crate::decode_usk(usk_ptr, usk_len)? };
 
-        let (mut state, _) =
-            commit_or_resume(
-                &mut system_rng(),
-                &mut ctx,
-                Some(usk.orchard()),
-                false,
-                proposal_handle,
-            )?;
+        let (mut state, _) = commit_or_resume(
+            &mut system_rng(),
+            &mut ctx,
+            Some(usk.orchard()),
+            false,
+            proposal_handle,
+        )?;
 
         // The preparation transaction to prove now and return for immediate broadcast (see
         // [`ceremony_preparation_pick`] for which row and why). Proven now, against the wallet's
@@ -3416,7 +3457,13 @@ pub unsafe extern "C" fn zcashlc_migration_sign_note_split(
             ceremony_preparation_pick(&state, DuenessTargets::at(target)).ok_or_else(|| {
                 anyhow!("the committed migration has no broadcastable preparation transaction")
             })?;
-        if !prove_one(system_rng(), &mut system_rng(), &mut ctx, &mut state, first_prep)? {
+        if !prove_one(
+            system_rng(),
+            &mut system_rng(),
+            &mut ctx,
+            &mut state,
+            first_prep,
+        )? {
             return Err(anyhow!(
                 "the note split is not yet finalizable — its funding note is not witnessable; sync first"
             ));
@@ -3457,7 +3504,13 @@ pub unsafe extern "C" fn zcashlc_migration_residual_after_migration(
 ) -> i64 {
     let res = catch_panic(|| {
         let mut ctx = unsafe {
-            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+            open(
+                system_rng(),
+                db_data,
+                db_data_len,
+                account_uuid_bytes,
+                network_id,
+            )?
         };
         Ok(match estimate_runs(&mut system_rng(), &mut ctx)? {
             Some(estimate) if estimate.final_residual() > Zatoshis::ZERO => {
@@ -3496,7 +3549,13 @@ pub unsafe extern "C" fn zcashlc_migration_lock_residual(
 ) -> i64 {
     let res = catch_panic(|| {
         let mut ctx = unsafe {
-            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+            open(
+                system_rng(),
+                db_data,
+                db_data_len,
+                account_uuid_bytes,
+                network_id,
+            )?
         };
         // Selection targets the next block, mirroring the adapter's own selection target.
         let target = TargetHeight::from(u32::from(ctx.tip()?) + 1);
@@ -3571,7 +3630,13 @@ pub unsafe extern "C" fn zcashlc_migration_unlock_residual(
 ) -> i64 {
     let res = catch_panic(|| {
         let mut ctx = unsafe {
-            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+            open(
+                system_rng(),
+                db_data,
+                db_data_len,
+                account_uuid_bytes,
+                network_id,
+            )?
         };
         let cleared = ctx
             .wallet
@@ -3610,7 +3675,13 @@ pub unsafe extern "C" fn zcashlc_migration_estimate_runs(
 ) -> *mut FfiMigrationRunEstimate {
     let res = catch_panic(|| {
         let mut ctx = unsafe {
-            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+            open(
+                system_rng(),
+                db_data,
+                db_data_len,
+                account_uuid_bytes,
+                network_id,
+            )?
         };
         let estimate = estimate_runs(&mut system_rng(), &mut ctx)?;
         let (runs, final_residual) = match &estimate {
@@ -3664,7 +3735,13 @@ pub unsafe extern "C" fn zcashlc_migration_propose_transfers(
 ) -> *mut FfiMigrationSchedule {
     let res = catch_panic(|| {
         let mut ctx = unsafe {
-            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+            open(
+                system_rng(),
+                db_data,
+                db_data_len,
+                account_uuid_bytes,
+                network_id,
+            )?
         };
         match plan_and_cache(&mut system_rng(), &mut ctx, false)? {
             Some((plan, reference_height, handle)) => {
@@ -3701,10 +3778,22 @@ pub unsafe extern "C" fn zcashlc_migration_sign_and_store_schedule(
 ) -> bool {
     let res = catch_panic(|| {
         let mut ctx = unsafe {
-            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+            open(
+                system_rng(),
+                db_data,
+                db_data_len,
+                account_uuid_bytes,
+                network_id,
+            )?
         };
         let usk = unsafe { crate::decode_usk(usk_ptr, usk_len)? };
-        commit_or_resume(&mut system_rng(), &mut ctx, Some(usk.orchard()), false, proposal_handle)?;
+        commit_or_resume(
+            &mut system_rng(),
+            &mut ctx,
+            Some(usk.orchard()),
+            false,
+            proposal_handle,
+        )?;
         Ok(true)
     });
     unwrap_exc_or(res, false)
@@ -3758,7 +3847,13 @@ pub unsafe extern "C" fn zcashlc_migration_prove_transactions(
 ) -> *mut FfiMigrationProveOutcome {
     let res = catch_panic(|| {
         let mut ctx = unsafe {
-            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+            open(
+                system_rng(),
+                db_data,
+                db_data_len,
+                account_uuid_bytes,
+                network_id,
+            )?
         };
         let ids: Vec<MigrationTransferId> = unsafe { slice_or_empty(ids, ids_len) }
             .iter()
@@ -3827,7 +3922,13 @@ pub unsafe extern "C" fn zcashlc_migration_take_broadcast_transaction(
 ) -> *mut FfiPreparedTransfer {
     let res = catch_panic(|| {
         let mut ctx = unsafe {
-            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+            open(
+                system_rng(),
+                db_data,
+                db_data_len,
+                account_uuid_bytes,
+                network_id,
+            )?
         };
         let id = MigrationTransferId::new(id);
         // A plain load, NOT `reconcile_mined`: the advance that issued this instruction already
@@ -3900,7 +4001,13 @@ pub unsafe extern "C" fn zcashlc_migration_take_preparation_by_txid(
 ) -> *mut FfiPreparedTransfer {
     let res = catch_panic(|| {
         let mut ctx = unsafe {
-            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+            open(
+                system_rng(),
+                db_data,
+                db_data_len,
+                account_uuid_bytes,
+                network_id,
+            )?
         };
         // Checked, not coerced: `slice_or_empty` only tolerates NULL at length 0, and reading 32
         // bytes from a null pointer is undefined behaviour — which a public C ABI symbol must
@@ -3976,7 +4083,13 @@ pub unsafe extern "C" fn zcashlc_migration_record_transfer_result(
 ) -> bool {
     let res = catch_panic(|| {
         let mut ctx = unsafe {
-            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+            open(
+                system_rng(),
+                db_data,
+                db_data_len,
+                account_uuid_bytes,
+                network_id,
+            )?
         };
         let id = MigrationTransferId::new(transfer_id);
         match result_tag {
@@ -4062,7 +4175,13 @@ pub unsafe extern "C" fn zcashlc_migration_record_immediate_run(
 ) -> bool {
     let res = catch_panic(|| {
         let ctx = unsafe {
-            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+            open(
+                system_rng(),
+                db_data,
+                db_data_len,
+                account_uuid_bytes,
+                network_id,
+            )?
         };
         if txid_bytes.is_null() {
             return Err(anyhow!("txid_bytes is null"));
@@ -4100,7 +4219,13 @@ pub unsafe extern "C" fn zcashlc_migration_restart_step(
 ) -> *mut FfiMigrationSchedule {
     let res = catch_panic(|| {
         let mut ctx = unsafe {
-            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+            open(
+                system_rng(),
+                db_data,
+                db_data_len,
+                account_uuid_bytes,
+                network_id,
+            )?
         };
         {
             let mut store = account_store(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
@@ -4171,7 +4296,13 @@ pub unsafe extern "C" fn zcashlc_migration_refresh_stale_transfers(
 ) -> *mut FfiMigrationSchedule {
     let res = catch_panic(|| {
         let mut ctx = unsafe {
-            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+            open(
+                system_rng(),
+                db_data,
+                db_data_len,
+                account_uuid_bytes,
+                network_id,
+            )?
         };
         // As on the commit lane: the decoded key is handed to the engine's signing entry point
         // here and nowhere else, and `None` is the external-signer lane that never had one.
@@ -4265,15 +4396,16 @@ pub unsafe extern "C" fn zcashlc_migration_create_unsigned_note_split_pczts(
 ) -> *mut FfiUnsignedTransferPczts {
     let res = catch_panic(|| {
         let mut ctx = unsafe {
-            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+            open(
+                system_rng(),
+                db_data,
+                db_data_len,
+                account_uuid_bytes,
+                network_id,
+            )?
         };
-        let (state, unsigned) = commit_or_resume(
-            &mut system_rng(),
-            &mut ctx,
-            None,
-            true,
-            proposal_handle,
-        )?;
+        let (state, unsigned) =
+            commit_or_resume(&mut system_rng(), &mut ctx, None, true, proposal_handle)?;
         let prep_ids: HashSet<MigrationTransferId> = state
             .transactions()
             .iter()
@@ -4312,7 +4444,13 @@ pub unsafe extern "C" fn zcashlc_migration_store_signed_note_split_pczts(
 ) -> *mut FfiPreparedTransfer {
     let res = catch_panic(|| {
         let mut ctx = unsafe {
-            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+            open(
+                system_rng(),
+                db_data,
+                db_data_len,
+                account_uuid_bytes,
+                network_id,
+            )?
         };
         let signed = unsafe { decode_signed_pairs(ids, ids_len, pczts, pczt_lens)? };
         let mut store = account_store(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
@@ -4365,15 +4503,16 @@ pub unsafe extern "C" fn zcashlc_migration_create_unsigned_transfer_pczts(
 ) -> *mut FfiUnsignedTransferPczts {
     let res = catch_panic(|| {
         let mut ctx = unsafe {
-            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+            open(
+                system_rng(),
+                db_data,
+                db_data_len,
+                account_uuid_bytes,
+                network_id,
+            )?
         };
-        let (state, unsigned) = commit_or_resume(
-            &mut system_rng(),
-            &mut ctx,
-            None,
-            true,
-            proposal_handle,
-        )?;
+        let (state, unsigned) =
+            commit_or_resume(&mut system_rng(), &mut ctx, None, true, proposal_handle)?;
         let transfer_ids: HashSet<MigrationTransferId> = state
             .transactions()
             .iter()
@@ -4484,7 +4623,13 @@ pub unsafe extern "C" fn zcashlc_migration_store_signed_schedule_pczts(
 ) -> bool {
     let res = catch_panic(|| {
         let mut ctx = unsafe {
-            open(system_rng(), db_data, db_data_len, account_uuid_bytes, network_id)?
+            open(
+                system_rng(),
+                db_data,
+                db_data_len,
+                account_uuid_bytes,
+                network_id,
+            )?
         };
         let signed = unsafe { decode_signed_pairs(ids, ids_len, pczts, pczt_lens)? };
         let mut store = account_store(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
@@ -6284,7 +6429,7 @@ mod tests {
             false,
             handle,
         )
-            .expect("commit with the plan's own handle must succeed");
+        .expect("commit with the plan's own handle must succeed");
         assert!(
             unsigned.is_empty(),
             "an in-process signed commit (usk present) returns no pending-signature pczts"
@@ -6359,8 +6504,14 @@ mod tests {
 
         let usk = unsafe { crate::decode_usk(usk_bytes.as_ptr(), usk_bytes.len()) }
             .expect("the fixture usk decodes");
-        let err = commit_or_resume(&mut system_rng(), &mut ctx, Some(usk.orchard()), false, handle1)
-            .expect_err("committing with the SUPERSEDED first handle must fail");
+        let err = commit_or_resume(
+            &mut system_rng(),
+            &mut ctx,
+            Some(usk.orchard()),
+            false,
+            handle1,
+        )
+        .expect_err("committing with the SUPERSEDED first handle must fail");
         let message = err.to_string();
         assert!(
             message.starts_with(PLAN_STALE_PREFIX),
@@ -6434,7 +6585,7 @@ mod tests {
             false,
             handle,
         )
-            .expect_err("committing with a foreign spending key must fail");
+        .expect_err("committing with a foreign spending key must fail");
         let message = err.to_string();
         assert!(
             !message.starts_with(PLAN_STALE_PREFIX),
@@ -6493,14 +6644,9 @@ mod tests {
         // empty here (no `plan_and_cache` call ever ran), so this would fail with
         // `PlanLookupError::Missing` if the handle were consulted at all.
         let bogus_handle: u64 = 0xDEAD_BEEF_DEAD_BEEF;
-        let (resumed, unsigned) = commit_or_resume(
-            &mut system_rng(),
-            &mut ctx,
-            None,
-            false,
-            bogus_handle,
-        )
-            .expect("a stored non-terminal run resumes regardless of the handle");
+        let (resumed, unsigned) =
+            commit_or_resume(&mut system_rng(), &mut ctx, None, false, bogus_handle)
+                .expect("a stored non-terminal run resumes regardless of the handle");
 
         assert_eq!(
             resumed.status(),
@@ -11652,11 +11798,7 @@ mod tests {
         let mut store = account_store(&ctx.wallet, ctx.account, &mut ctx.store_conn)
             .expect("the fixture store opens");
         store
-            .take_transaction_for_broadcast(
-                system_rng(),
-                state,
-                MigrationTransferId::new(id),
-            )
+            .take_transaction_for_broadcast(system_rng(), state, MigrationTransferId::new(id))
             .map(|_| ())
     }
 

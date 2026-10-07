@@ -86,8 +86,10 @@ mod tests {
     }
 
     fn stored(conn: &Connection) -> String {
-        conn.query_row("SELECT ufvk FROM accounts WHERE account = 0", [], |r| r.get(0))
-            .unwrap()
+        conn.query_row("SELECT ufvk FROM accounts WHERE account = 0", [], |r| {
+            r.get(0)
+        })
+        .unwrap()
     }
 
     #[test]
@@ -106,7 +108,10 @@ mod tests {
         assert!(r0.starts_with("uview1"), "{r0}");
         let conn = legacy_accounts_table(&r0);
 
-        assert_eq!(realign_legacy_ufvk_encodings(&conn, &MAIN_NETWORK).unwrap(), 1);
+        assert_eq!(
+            realign_legacy_ufvk_encodings(&conn, &MAIN_NETWORK).unwrap(),
+            1
+        );
 
         let now = stored(&conn);
         assert_eq!(now, ufvk.encode(&MAIN_NETWORK));
@@ -115,13 +120,19 @@ mod tests {
         let decoded = UnifiedFullViewingKey::decode(&MAIN_NETWORK, &now).unwrap();
         assert_eq!(decoded.encode(&MAIN_NETWORK), ufvk.encode(&MAIN_NETWORK));
         // A second pass finds nothing to do.
-        assert_eq!(realign_legacy_ufvk_encodings(&conn, &MAIN_NETWORK).unwrap(), 0);
+        assert_eq!(
+            realign_legacy_ufvk_encodings(&conn, &MAIN_NETWORK).unwrap(),
+            0
+        );
     }
 
     #[test]
     fn leaves_an_undecodable_key_for_the_migration_to_report() {
         let conn = legacy_accounts_table("uview1notakey");
-        assert_eq!(realign_legacy_ufvk_encodings(&conn, &MAIN_NETWORK).unwrap(), 0);
+        assert_eq!(
+            realign_legacy_ufvk_encodings(&conn, &MAIN_NETWORK).unwrap(),
+            0
+        );
         assert_eq!(stored(&conn), "uview1notakey");
     }
 
@@ -133,13 +144,19 @@ mod tests {
              INSERT INTO accounts (id, ufvk) VALUES (0, 'uview1whatever');",
         )
         .unwrap();
-        assert_eq!(realign_legacy_ufvk_encodings(&conn, &MAIN_NETWORK).unwrap(), 0);
+        assert_eq!(
+            realign_legacy_ufvk_encodings(&conn, &MAIN_NETWORK).unwrap(),
+            0
+        );
     }
 
     #[test]
     fn ignores_a_database_without_an_accounts_table() {
         let conn = Connection::open_in_memory().unwrap();
-        assert_eq!(realign_legacy_ufvk_encodings(&conn, &MAIN_NETWORK).unwrap(), 0);
+        assert_eq!(
+            realign_legacy_ufvk_encodings(&conn, &MAIN_NETWORK).unwrap(),
+            0
+        );
     }
 }
 

@@ -19,7 +19,8 @@ pub(crate) fn temp_wallet_db(network_id: u32) -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("wallet.db").to_string_lossy().into_owned();
     let network = crate::parse_network(network_id).expect("network");
-    let mut db = WalletDb::for_path(&path, network, SystemClock, crate::system_rng()).expect("open");
+    let mut db =
+        WalletDb::for_path(&path, network, SystemClock, crate::system_rng()).expect("open");
     init_wallet_db(&mut db, None).expect("init");
     (dir, path)
 }
@@ -223,7 +224,8 @@ pub(crate) fn temp_wallet_db_with_account(network_id: u32) -> (tempfile::TempDir
 
     let (dir, path) = temp_wallet_db(network_id);
     let network = crate::parse_network(network_id).expect("network");
-    let mut db = WalletDb::for_path(&path, network, SystemClock, crate::system_rng()).expect("open");
+    let mut db =
+        WalletDb::for_path(&path, network, SystemClock, crate::system_rng()).expect("open");
 
     let usk = crate::voting::helpers::usk_from_seed(network_id, &[7u8; 32], zip32::AccountId::ZERO)
         .expect("unified spending key");

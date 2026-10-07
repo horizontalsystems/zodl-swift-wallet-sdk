@@ -34,12 +34,7 @@ use crate::NetworkParams;
 
 // This line carries custom (regtest-style) networks, so the wallet handle is parameterized by
 // `NetworkParams` rather than `zcash_protocol`'s fixed `Network`.
-type Db = WalletDb<
-    rusqlite::Connection,
-    NetworkParams,
-    SystemClock,
-    crate::SystemRng,
->;
+type Db = WalletDb<rusqlite::Connection, NetworkParams, SystemClock, crate::SystemRng>;
 
 type MigrationProposal = Proposal<StandardFeeRule, <Db as InputSource>::NoteRef>;
 

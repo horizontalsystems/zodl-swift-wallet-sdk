@@ -101,9 +101,9 @@ mod derivation;
 mod eip681;
 mod error_report;
 mod ext_schema;
-mod legacy_ufvk;
 mod ffi;
 mod interactive_qos;
+mod legacy_ufvk;
 mod migration;
 mod migration_engine;
 mod migration_finalize;
@@ -216,13 +216,8 @@ unsafe fn wallet_db<R: rand::CryptoRng>(
         .map_err(|e| anyhow!("Error setting wallet database busy_timeout: {}", e))?;
     rusqlite::vtab::array::load_module(&conn)
         .map_err(|e| anyhow!("Error loading wallet database array module: {}", e))?;
-    Ok(WalletDb::from_connection(
-        conn,
-        network,
-        SystemClock,
-        rng,
-    )
-    .with_anchor_retention_interval(anchor_retention_interval(network)))
+    Ok(WalletDb::from_connection(conn, network, SystemClock, rng)
+        .with_anchor_retention_interval(anchor_retention_interval(network)))
 }
 
 /// Helper method for construcing a FsBlockDb value from path data provided over the FFI.
@@ -3471,11 +3466,7 @@ pub unsafe extern "C" fn zcashlc_add_proofs_to_pczt(
             let local_prover = LocalTxProver::new(spend_params, output_params);
 
             prover = prover
-                .create_sapling_proofs(
-                    system_rng(),
-                    &local_prover,
-                    &local_prover,
-                )
+                .create_sapling_proofs(system_rng(), &local_prover, &local_prover)
                 .map_err(|e| anyhow!("Failed to create Sapling proofs for PCZT: {:?}", e))?;
         }
         assert!(!prover.requires_sapling_proofs());
@@ -4190,10 +4181,7 @@ pub unsafe extern "C" fn zcashlc_get_exchange_rate_usd(
         let rate = tor_runtime.runtime().block_on(async {
             tor_runtime
                 .client()
-                .get_latest_zec_to_usd_rate(
-                    &mut system_rng(),
-                    &exchanges,
-                )
+                .get_latest_zec_to_usd_rate(&mut system_rng(), &exchanges)
                 .await
         })?;
 
@@ -4325,10 +4313,7 @@ pub unsafe extern "C" fn zcashlc_get_exchange_rate_usd_from(
         let rate = tor_runtime.runtime().block_on(async {
             tor_runtime
                 .client()
-                .get_latest_zec_to_usd_rate(
-                    &mut system_rng(),
-                    &exchanges,
-                )
+                .get_latest_zec_to_usd_rate(&mut system_rng(), &exchanges)
                 .await
         })?;
 
@@ -5573,9 +5558,11 @@ pub unsafe extern "C" fn zcashlc_slipstream_open(
         // every open. Non-fatal by design — a wallet that cannot be marked must still open
         // and sync.
         let network_params = NetworkParams::Standard(network);
-        match unsafe { wallet_db(system_rng(), db_data, db_data_len, network_params) }.and_then(|mut wallet| {
-            retained_marks::reconcile_retained_anchor_marks(&mut wallet, &network_params)
-        }) {
+        match unsafe { wallet_db(system_rng(), db_data, db_data_len, network_params) }.and_then(
+            |mut wallet| {
+                retained_marks::reconcile_retained_anchor_marks(&mut wallet, &network_params)
+            },
+        ) {
             Ok(0) => {}
             Ok(n) => {
                 tracing::info!(
