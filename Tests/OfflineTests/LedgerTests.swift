@@ -322,6 +322,77 @@ final class LedgerDeviceTests: XCTestCase {
         XCTAssertEqual(pairing.binding.zip32AccountIndex, Zip32AccountIndex(1))
     }
 
+    func testAPairingCancelledBetweenExportChunksClosesTheTransportAndSendsNothingMore() async throws {
+        let ufvk = try testnetUFVK()
+        let chunks = LedgerReplies.viewingKeyChunks(ufvk.stringEncoded)
+        XCTAssertGreaterThan(chunks.count, 1)
+        // The device answers the first export chunk, and the task is cancelled before the next chunk
+        // is requested: no exchange is in progress, but the device is in the middle of the export.
+        let transport = ScriptedLedgerTransport { apdu, history in
+            switch apdu[1] {
+            case LedgerReplies.getFirmwareVersion:
+                return LedgerReplies.firmwareVersion(3, 9, 3)
+            case LedgerReplies.getWalletPublicKey:
+                return LedgerReplies.walletPublicKey(LedgerReplies.seedIdentityPoint)
+            case LedgerReplies.getVK:
+                withUnsafeCurrentTask { task in task?.cancel() }
+                return chunks[history.filter { $0[1] == LedgerReplies.getVK }.count]
+            default:
+                return LedgerReplies.status(0x6D00)
+            }
+        }
+        let ledger = LedgerDevice(transport: transport, networkType: .testnet)
+
+        let task = Task { try await ledger.pairAccount(zip32AccountIndex: Zip32AccountIndex(0)) }
+
+        do {
+            _ = try await task.value
+            XCTFail("A cancelled pairing must fail")
+        } catch is CancellationError {
+            // Expected: the cancellation reaches the caller unchanged.
+        }
+
+        let instructions = await transport.instructions
+        XCTAssertEqual(
+            instructions,
+            [LedgerReplies.getFirmwareVersion, LedgerReplies.getWalletPublicKey, LedgerReplies.getVK],
+            "no export chunk is sent after the cancellation"
+        )
+        let closeCount = await transport.closeCount
+        XCTAssertEqual(closeCount, 1, "the device is in the middle of the export, so the transport is closed")
+    }
+
+    func testALedgerDeviceCallCancelledWhileItWaitsForAnotherCallClosesNothing() async throws {
+        let transport = ScriptedLedgerTransport(delayNanoseconds: 500_000_000) { _, _ in
+            LedgerReplies.firmwareVersion(3, 9, 3)
+        }
+        let ledger = LedgerDevice(transport: transport, networkType: .testnet)
+
+        let first = Task { try await ledger.appVersion() }
+        // Waits for `first` to reach its (slow) exchange, so it holds the device when `second` starts.
+        while await transport.received.isEmpty {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        let second = Task { try await ledger.appVersion() }
+        // Lets `second` reach the device's queue behind `first` before it is cancelled.
+        try await Task.sleep(nanoseconds: 50_000_000)
+        second.cancel()
+
+        do {
+            _ = try await second.value
+            XCTFail("A cancelled call must fail")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        let version = try await first.value
+        XCTAssertEqual(version.description, "3.9.3", "the call that holds the device completes normally")
+        let received = await transport.received
+        XCTAssertEqual(received.count, 1, "the cancelled call never reached the device")
+        let closeCount = await transport.closeCount
+        XCTAssertEqual(closeCount, 0, "a call cancelled while it waits for its turn closes nothing")
+    }
+
     func testPairAccountRefusesAnAppThatCannotSign() async throws {
         let ufvk = try testnetUFVK()
         let transport = device(ufvk: ufvk.stringEncoded, version: LedgerReplies.firmwareVersion(3, 5, 0))
@@ -1001,7 +1072,7 @@ final class LedgerSignerTests: XCTestCase {
         XCTAssertEqual(session.finishCount, 0)
     }
 
-    func testTheRunnerClosesTheTransportWhenCancelledBeforeTheFirstExchange() async throws {
+    func testTheRunnerClosesNothingWhenCancelledBeforeTheFirstExchange() async throws {
         let session = ScriptedSigningSession(commands: [command(0x40, stage: .identifyingDevice)], statuses: [.complete])
         let (signer, _) = signer(session: session)
         let transport = ScriptedLedgerTransport { _, _ in LedgerReplies.firmwareVersion(3, 9, 3) }
@@ -1023,7 +1094,7 @@ final class LedgerSignerTests: XCTestCase {
         let received = await transport.received
         XCTAssertTrue(received.isEmpty)
         let closeCount = await transport.closeCount
-        XCTAssertEqual(closeCount, 1, "a cancelled ceremony always closes the transport")
+        XCTAssertEqual(closeCount, 0, "a ceremony cancelled before its first command reached the device closes nothing")
     }
 
     func testASessionTheDeviceCannotBuildReportsTheStructuredError() async throws {

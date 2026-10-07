@@ -44,13 +44,14 @@ a timeout, a disconnect, a reply that does not reassemble, or a cancelled task -
 is, since the device's reply to that command could otherwise be read as the reply to the next one.
 `LedgerDevice`'s commands and signing also close the transport on any exchange that fails. Every
 later call then throws the error that closed the transport, or `ZcashError.ledgerTransportClosed`
-after a cancellation or `close()`, and the recovery is a new connection. During `LedgerDevice`'s
-commands, a task cancelled before its exchange starts (between commands, or while queued behind
-another exchange on the same transport) leaves the transport open, except during the pause before
-resending a command the device refused with `0x6901`: a cancellation there closes it. During
-signing, a cancelled task closes the transport at any point of the ceremony, since the device can be
-in the middle of it. A refusal from the device (the user declining, a locked device, another app
-open) leaves the transport open.
+after a cancellation or `close()`, and the recovery is a new connection. A `LedgerDevice` call or a
+signing ceremony that is cancelled once it holds the device closes the transport, whatever step it
+was at -- during an exchange, between two commands or export chunks, or during the pause before
+resending a command the device refused with `0x6901` -- since the device can be in the middle of a
+command or an exchange. A call cancelled while it waits for its turn (behind another call on the same
+`LedgerDevice`, or behind another exchange on the same transport before its first command) closes
+nothing, because it never reached the device. A refusal from the device (the user declining, a
+locked device, another app open) leaves the transport open.
 `LedgerZcashApp.ensureZcashAppOpen` closes the caller's transport only when its link fails, and
 closes a transport its `reconnect` opened whenever the call fails; `LedgerZcashApp.currentApp`
 never closes the transport it is given.

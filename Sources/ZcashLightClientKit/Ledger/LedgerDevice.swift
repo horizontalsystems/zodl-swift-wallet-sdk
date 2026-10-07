@@ -303,12 +303,18 @@ public actor LedgerDevice {
     /// Runs `operation` once no other call on this device is in progress, and converts its failure into
     /// the public error.
     private func serialized<T>(_ operation: () async throws -> T) async throws -> T {
+        // A call cancelled here waits for its turn and never reaches the device, so it closes nothing.
         try await gate.acquire()
         do {
             let result = try await operation()
             await gate.release()
             return result
         } catch {
+            if error is CancellationError || Task.isCancelled {
+                // The call holds the device, which can be in the middle of a command or an exchange.
+                // Closing is idempotent, so a transport that a failed exchange closed is not affected.
+                await transport.close()
+            }
             await gate.release()
             throw ledgerZcashError(error)
         }

@@ -22,11 +22,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first frame went out (a timeout, a disconnect, a reply that does not reassemble, or a cancelled
   task), whoever the caller is; every later call then throws the error that closed it, or
   `ZcashError.ledgerTransportClosed` after a cancellation or `close()`. Open a new connection then.
-  `LedgerDevice`'s commands and signing also close the transport on any exchange that fails. During
-  `LedgerDevice`'s commands, a task cancelled before its exchange starts, between commands or while
-  queued behind another exchange on the same transport, leaves the transport open, except during the
-  pause before resending a command the device refused with `0x6901`, where a cancellation closes it.
-  During signing, a cancelled task closes the transport at any point of the ceremony.
+  `LedgerDevice`'s commands and signing also close the transport on any exchange that fails. A
+  `LedgerDevice` call or a signing ceremony that is cancelled once it holds the device closes the
+  transport, whatever step it was at; a call cancelled while it waits for its turn, before it reaches
+  the device, closes nothing.
   `LedgerZcashApp.ensureZcashAppOpen` closes the caller's transport only when its link fails, and
   closes a transport its `reconnect` opened whenever the call fails; `LedgerZcashApp.currentApp`
   never closes the transport it is given.
