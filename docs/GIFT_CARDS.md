@@ -45,7 +45,7 @@ let redeemer = try GiftCardRedeemer(
 
 let status = try await redeemer.check()             // syncs the card wallet from its birthday
 switch status.state {
-case .ready:   break                                // status.spendable can be swept now
+case .ready:   break                                // show status.redeemable: current Orchard preview, after status.fee
 case .pending: break                                // waiting for 10 confirmations; check() again later
 case .dust:    break                                // the fee would take everything; nothing to redeem
 case .empty:   break                                // already redeemed, or never funded
@@ -53,11 +53,13 @@ case .empty:   break                                // already redeemed, or neve
 
 await mainSynchronizer.stopAndWait()                // optional: await the main wallet's stop operation
 let redemption = try await redeemer.redeem(
-    to: myUnifiedAddress,
+    to: myUnifiedAddress,                           // same network, with an Orchard receiver
     memo: try Memo(string: "Gift card"),
     recordIn: mainSynchronizer                       // the wallet myUnifiedAddress belongs to
 )
 // redemption.results: one TransactionSubmitResult per created transaction (usually one)
+// redemption.amount and redemption.fee come from the actual proposal.
+// Later note or chain changes can make them differ from the earlier status preview.
 // redemption.recordedInDestination: the trusted claim is visible in main-wallet history
 // Recording alone does not confirm the claim or make its funds spendable (ZIP 315).
 try await mainSynchronizer.start()
@@ -72,7 +74,15 @@ try await redeemer.cleanup()                        // stops and deletes the tem
   It discards the outgoing viewing key, so the card's key cannot reveal the recipient; the
   redeeming wallet still records the incoming payment as usual. `redeem(to:memo:)` does the same
   without a destination and returns the results alone.
-- With an address that has an Orchard receiver, no Sapling parameters are downloaded.
+- Both redemption overloads require a same-network unified address with an Orchard receiver.
+  Orchard-only and multi-receiver addresses that include Orchard are accepted unchanged. An address
+  without Orchard throws `giftCardRecipientRequiresOrchard` before proposal or claim creation.
+- `check()` derives `fee` and `redeemable` from a send-max proposal to the card's Orchard-only
+  address, previewing the Orchard-capable recipient class redemption accepts. It is a snapshot of
+  current notes and chain height. Later note or chain changes can change the actual proposal's fee
+  and amount; use `Redemption.fee` and `Redemption.amount` for the actual result.
+- Sapling parameters are unnecessary only if the actual proposal has no Sapling inputs or outputs.
+  Input selection is unchanged, so an Orchard recipient alone does not guarantee this.
 
 ## Confirmations (ZIP 315)
 
@@ -194,6 +204,11 @@ none of them carries any part of the link.
 | `giftCardRedeemerNotReady` (`ZGIFT0003`) | `redeem(to:)` before `check()`. |
 | `giftCardNothingToRedeem` (`ZGIFT0004`) | Nothing spendable: empty, still pending, or dust (the fee would take everything). |
 | `giftCardRedeemerCleanedUp` (`ZGIFT0005`) | The redeemer was cleaned up. |
+| `giftCardRecipientRequiresOrchard` (`ZGIFT0013`) | Use a same-network unified address with an Orchard receiver; other receivers may also be present. |
+
+The cleaned-up, not-ready and network-mismatch guards take precedence over the recipient receiver
+check. The new recipient error carries no address or key data; exhaustive switches over `ZcashError`
+or `ZcashErrorCode` need the new case. Both redemption method signatures are unchanged.
 
 `check()` also rethrows the card wallet's sync error, and `redeem(to:)` the errors of
 `proposeSendMax` and `createProposedTransactions`. The destination's errors are never thrown; see

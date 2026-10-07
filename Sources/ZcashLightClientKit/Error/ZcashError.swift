@@ -1057,6 +1057,9 @@ public enum ZcashError: Equatable, Error {
     /// a valid card key, or the link is too long. Thrown by `GiftCard(link:)`.
     /// ZGIFT0010
     case giftCardLinkInvalid
+    /// The gift card recipient must be a unified address with an Orchard receiver.
+    /// ZGIFT0013
+    case giftCardRecipientRequiresOrchard
     /// Attempt to init TxId with input that is not 32 bytes.
     /// ZMODEL0001
     case txIdNot32Bytes
@@ -1353,6 +1356,7 @@ public enum ZcashError: Equatable, Error {
         case .giftCardLinkUnsupportedNetwork: return "The gift card is for a network this SDK cannot redeem on (regtest, or an unknown one)."
         case .giftCardLinkInvalidBirthday: return "The gift card link's birthday height is malformed, or below the network's NU5 activation"
         case .giftCardLinkInvalid: return "The gift card link is malformed: a field is missing, repeated or invalid, the key is not"
+        case .giftCardRecipientRequiresOrchard: return "The gift card recipient must be a unified address with an Orchard receiver."
         case .txIdNot32Bytes: return "Attempt to init TxId with input that is not 32 bytes."
         case .txIdInvalidHexEncoding: return "Attempt to init TxId with invalid hex encoding."
         }
@@ -1664,6 +1668,7 @@ public enum ZcashError: Equatable, Error {
         case .giftCardLinkUnsupportedNetwork: return .giftCardLinkUnsupportedNetwork
         case .giftCardLinkInvalidBirthday: return .giftCardLinkInvalidBirthday
         case .giftCardLinkInvalid: return .giftCardLinkInvalid
+        case .giftCardRecipientRequiresOrchard: return .giftCardRecipientRequiresOrchard
         case .txIdNot32Bytes: return .txIdNot32Bytes
         case .txIdInvalidHexEncoding: return .txIdInvalidHexEncoding
         }

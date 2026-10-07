@@ -21,7 +21,7 @@ final class GiftCardCancellationTests: ZcashTestCase {
         fixture.encoder.propose = {
             predecessorEntered.fulfill()
             await gate.wait()
-            return FfiProposalFixtures.makeProposal(steps: [])
+            return FfiProposalFixtures.makeProposal(steps: [FfiProposalFixtures.Step(inputValues: [50_000], changeValues: [], fee: 10_000)])
         }
         let predecessor = Task { try await fixture.redeemer.check() }
         await fulfillment(of: [predecessorEntered], timeout: 5)
@@ -39,7 +39,7 @@ final class GiftCardCancellationTests: ZcashTestCase {
         redemption.cancel()
         fixture.encoder.propose = {
             XCTFail("Cancelled queued redemption must not prepare a proposal")
-            return FfiProposalFixtures.makeProposal(steps: [])
+            return FfiProposalFixtures.makeProposal(steps: [FfiProposalFixtures.Step(inputValues: [50_000], changeValues: [], fee: 10_000)])
         }
         await gate.open()
         _ = try await predecessor.value
@@ -62,7 +62,7 @@ final class GiftCardCancellationTests: ZcashTestCase {
         fixture.encoder.propose = {
             proposalEntered.fulfill()
             await gate.wait()
-            return FfiProposalFixtures.makeProposal(steps: [])
+            return FfiProposalFixtures.makeProposal(steps: [FfiProposalFixtures.Step(inputValues: [50_000], changeValues: [], fee: 10_000)])
         }
         let finished = XCTestExpectation(description: "cancelled preparation finished")
         let redemption = Task {
@@ -94,7 +94,7 @@ final class GiftCardCancellationTests: ZcashTestCase {
         fixture.encoder.propose = {
             predecessorEntered.fulfill()
             await gate.wait()
-            return FfiProposalFixtures.makeProposal(steps: [])
+            return FfiProposalFixtures.makeProposal(steps: [FfiProposalFixtures.Step(inputValues: [50_000], changeValues: [], fee: 10_000)])
         }
         let predecessor = Task { try await fixture.redeemer.check() }
         await fulfillment(of: [predecessorEntered], timeout: 5)
@@ -172,8 +172,12 @@ struct GiftCardCancellationFixture {
     let container: DIContainer
     let latest: LatestBlocksDataProviderMock
 
-    static func make(storageDirectory: URL) async throws -> GiftCardCancellationFixture {
-        let card = try GiftCard(link: GiftCardTests.zodlTestnetLink)
+    static func make(
+        storageDirectory: URL,
+        cardLink: String = GiftCardTests.zodlTestnetLink,
+        spendableValue: Zatoshi = Zatoshi(50_000)
+    ) async throws -> GiftCardCancellationFixture {
+        let card = try GiftCard(link: cardLink)
         let container = DIContainer()
         container.isTestEnvironment = true
         let backend = ZcashRustBackendWeldingMock()
@@ -189,7 +193,7 @@ struct GiftCardCancellationFixture {
         backend.listAccountsReturnValue = [account]
         let balance = AccountBalance(
             saplingBalance: .zero,
-            orchardBalance: PoolBalance(spendableValue: Zatoshi(50_000), changePendingConfirmation: .zero, valuePendingSpendability: .zero),
+            orchardBalance: PoolBalance(spendableValue: spendableValue, changePendingConfirmation: .zero, valuePendingSpendability: .zero),
             unshielded: .zero
         )
         backend.getWalletSummaryReturnValue = WalletSummary(
@@ -232,7 +236,7 @@ struct GiftCardCancellationFixture {
         var synchronizer: SDKSynchronizer!
         let redeemer = try GiftCardRedeemer(
             card: card,
-            network: ZcashNetworkBuilder.network(for: .testnet),
+            network: ZcashNetworkBuilder.network(for: card.network),
             endpoint: LightWalletEndpointBuilder.default,
             isTorEnabled: false,
             storageDirectory: storageDirectory,
@@ -261,25 +265,56 @@ struct GiftCardCancellationFixture {
 
 /// Replaces proving/network work while keeping the redeemer, synchronizer and broadcaster real.
 final class GiftCardCancellationEncoder: TransactionEncoder {
-    var propose: (() async throws -> Proposal)?
-    private(set) var createdTransactions: [CreatedTransaction] = []
-    private(set) var submittedTransactions: [EncodedTransaction] = []
+    struct ProposalCall {
+        let recipient: String
+        let memoBytes: MemoBytes?
+    }
+
+    private struct State {
+        var propose: (() async throws -> Proposal)?
+        var proposalCalls: [ProposalCall] = []
+        var createdTransactions: [CreatedTransaction] = []
+        var submittedTransactions: [EncodedTransaction] = []
+    }
+
+    // The package supports macOS 12 / iOS 13, below OSAllocatedUnfairLock's deployment floor.
+    private let lock = NSLock()
+    private var state = State()
+
+    var propose: (() async throws -> Proposal)? {
+        get { withState { $0.propose } }
+        set { withState { $0.propose = newValue } }
+    }
+
+    var proposalCalls: [ProposalCall] { withState { $0.proposalCalls } }
+    var createdTransactions: [CreatedTransaction] { withState { $0.createdTransactions } }
+    var submittedTransactions: [EncodedTransaction] { withState { $0.submittedTransactions } }
+
+    private func withState<T>(_ body: (inout State) -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(&state)
+    }
 
     func proposeSendMax(accountUUID: AccountUUID, recipient: String, memoBytes: MemoBytes?, mode: MaxSpendMode) async throws -> Proposal {
+        let propose = withState { state in
+            state.proposalCalls.append(ProposalCall(recipient: recipient, memoBytes: memoBytes))
+            return state.propose
+        }
         if let propose { return try await propose() }
-        return FfiProposalFixtures.makeProposal(steps: [])
+        return FfiProposalFixtures.makeProposal(steps: [FfiProposalFixtures.Step(inputValues: [50_000], changeValues: [], fee: 10_000)])
     }
 
     func requiresSaplingParameters(for proposal: Proposal) throws -> Bool { false }
 
     func createProposedTransactions(proposal: Proposal, spendingKey: UnifiedSpendingKey, ovkPolicy: OvkPolicy) async throws -> [CreatedTransaction] {
         let transaction = CreatedTransaction(txId: Data(repeating: 0xA1, count: 32), raw: Data([1]), expiryHeight: 3_000_100)
-        createdTransactions.append(transaction)
+        withState { $0.createdTransactions.append(transaction) }
         return [transaction]
     }
 
     func submit(transaction: EncodedTransaction) async throws {
-        submittedTransactions.append(transaction)
+        withState { $0.submittedTransactions.append(transaction) }
     }
 
     func fetchTransactionsForTxIds(_ txIds: [Data]) async throws -> [ZcashTransaction.Overview] { [] }

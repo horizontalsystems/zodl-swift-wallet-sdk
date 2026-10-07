@@ -38,16 +38,23 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `init(card:network:endpoint:isTorEnabled:storageDirectory:loggingPolicy:)`, then `check()` (syncs
   the card wallet from its birthday and returns a `GiftCardStatus`: `.ready`, `.pending` while the
   card's funds wait for their 10 confirmations, `.dust` when the fee would take all of its
-  spendable funds, or `.empty`, with `total`, `spendable` and `pending` amounts),
+  spendable funds, or `.empty`, with `total`, `spendable` and `pending` amounts; a `.ready` status
+  also carries `fee`, the ZIP 317 fee a redemption pays for the card's actual notes, and
+  `redeemable`, what it sends to the recipient after that fee, both from the same send-max
+  preview proposal for an Orchard-capable recipient, so show `redeemable` rather than `spendable`
+  minus a guessed fee. The preview reflects current notes and chain height; later note or chain
+  changes can change the actual redemption's proposal-derived amount and fee;
+  `fee` is `nil` and `redeemable` is `.zero` in every other state),
   `redeem(to:memo:)` (sends the whole spendable balance, with an optional memo, minus the ZIP 317
   fee to a `UnifiedAddress` and returns the `TransactionSubmitResult`s), and `cleanup()` (stops the
   temporary wallet and deletes all of its files). `isTorEnabled` routes the card wallet's birthday
   lookup, sync and claim submission over Tor; pass the main wallet's setting, since with `false`
   the server sees the device's IP address with the card and its claim. The redeeming transaction
   discards the outgoing viewing key, so the card's key — which the card's issuer can rederive —
-  does not reveal the recipient, and it needs no Sapling parameters for an address with an Orchard
-  receiver. `check()` downloads and scans the blocks since the card's birthday. Only one redeemer
-  per card may be alive at a time. New errors: `giftCardNetworkMismatch` (`ZGIFT0001`),
+  does not reveal the recipient. Sapling parameters are unnecessary only when the actual proposal
+  has no Sapling inputs or outputs; Orchard recipient validation does not change input selection.
+  `check()` downloads and scans the blocks since the card's birthday. Only one redeemer per card
+  may be alive at a time. New errors: `giftCardNetworkMismatch` (`ZGIFT0001`),
   `giftCardRedeemerAlreadyActive` (`ZGIFT0002`), `giftCardRedeemerNotReady` (`ZGIFT0003`),
   `giftCardNothingToRedeem` (`ZGIFT0004`, also thrown for a `.dust` card) and
   `giftCardRedeemerCleanedUp` (`ZGIFT0005`).
@@ -61,7 +68,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the main wallet shows the incoming gift at once and can spend it after the default 3
   confirmations. This works while the destination is stopped, and only with the
   SDK's own synchronizers (`SDKSynchronizer`, `SlipstreamSynchronizer`). It returns a
-  `GiftCardRedeemer.Redemption` with the submission `results` and `recordedInDestination`, which is
+  `GiftCardRedeemer.Redemption` with the submission `results`, the `fee` paid, the `amount` sent to
+  the recipient, and `recordedInDestination`, which is
   `false` — never an error — when the destination could not record the claim, including when the
   claim does not involve the destination's wallet and so was not stored there; the funds are on
   chain once mined. When trust was never recorded and the claim pays the destination wallet, normal
@@ -89,6 +97,12 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`ZRUST0157`).
 
 ## Changed
+
+- Both `GiftCardRedeemer.redeem(to:memo:)` and `redeem(to:memo:recordIn:)` now reject unified
+  addresses without an Orchard receiver with `giftCardRecipientRequiresOrchard` (`ZGIFT0013`)
+  before proposing or creating a claim. Orchard-only and multi-receiver unified addresses that
+  include Orchard are accepted. Public signatures are unchanged. Exhaustive switches over
+  `ZcashError` or `ZcashErrorCode` must handle the new case; it carries no address or key data.
 
 - `TxId.init(_ id: [UInt8])` now throws `ZcashError.txIdNot32Bytes` (`ZMODEL0001`) unless `id` is
   exactly 32 bytes, so call sites need `try`. `TxId.id` is now a `let`: assigning to it no longer
