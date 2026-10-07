@@ -99,6 +99,16 @@ mod eip681;
 mod error_report;
 mod ext_schema;
 mod ffi;
+// `liberated_payment.rs` is shared verbatim with the payment-minting tooling, so items this
+// crate does not use (minting, link writing) are allowed rather than edited out, and rustfmt
+// leaves it alone so the copies stay byte-identical. cbindgen must not parse it: its `Error` enum
+// would shadow the generic `Error` paths cbindgen resolves elsewhere. `gift_ffi` carries its C
+// surface, which presents a liberated payment to the SDK as a gift card.
+/// cbindgen:ignore
+#[allow(dead_code)]
+#[rustfmt::skip]
+mod liberated_payment;
+mod gift_ffi;
 mod interactive_qos;
 mod migration;
 mod migration_engine;
@@ -107,6 +117,7 @@ mod migration_keystone;
 mod migration_plan_cache;
 mod migration_turnstile;
 mod retained_marks;
+mod sapling_prover;
 mod tor;
 mod voting;
 
@@ -2893,6 +2904,14 @@ pub unsafe extern "C" fn zcashlc_propose_shielding(
 /// - `output_params`: A pointer to a buffer containing the operating system path of the Sapling
 ///   output proving parameters, in the operating system's preferred path representation.
 /// - `output_params_len`: the length of the `output_params` buffer.
+/// - `ovk_policy`: how the outgoing viewing key is used to encrypt the transactions' outputs:
+///   `0` (Sender) lets the sending account's OVK recover them, `1` (Discard) makes them
+///   unrecoverable by any OVK, so nobody holding the sender's keys can learn the recipients
+///   or amounts from the chain. Any other value is an error.
+///
+/// The Sapling parameters are only loaded when the proposal has a Sapling input, payment, change
+/// or dummy output (see `zcashlc_proposal_requires_sapling_params`). For any other proposal,
+/// `spend_params` and `output_params` may be null and the files they name need not exist.
 ///
 /// # Safety
 ///
@@ -2916,13 +2935,13 @@ pub unsafe extern "C" fn zcashlc_propose_shielding(
 ///   function call.
 /// - The total size `usk_len` must be no larger than `isize::MAX`. See the safety
 ///   documentation of `pointer::offset`.
-/// - `spend_params` must be non-null and valid for reads for `spend_params_len` bytes,
+/// - `spend_params` must be null or valid for reads for `spend_params_len` bytes,
 ///   and it must have an alignment of `1`.
 /// - The memory referenced by `spend_params` must not be mutated for the duration of the
 ///   function call.
 /// - The total size `spend_params_len` must be no larger than `isize::MAX`. See the safety
 ///   documentation of `pointer::offset`.
-/// - `output_params` must be non-null and valid for reads for `output_params_len` bytes,
+/// - `output_params` must be null or valid for reads for `output_params_len` bytes,
 ///   and it must have an alignment of `1`.
 /// - The memory referenced by `output_params` must not be mutated for the duration of the
 ///   function call.
@@ -2941,6 +2960,7 @@ pub unsafe extern "C" fn zcashlc_create_proposed_transactions(
     output_params: *const u8,
     output_params_len: usize,
     network_id: u32,
+    ovk_policy: u32,
 ) -> *mut ffi::TxIds {
     const CONTEXT: &str = "create_proposed_transactions";
 
@@ -2948,7 +2968,8 @@ pub unsafe extern "C" fn zcashlc_create_proposed_transactions(
         let network = parse_network(network_id)?;
         let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
 
-        let proposal =
+        let ovk_policy = parse_ovk_policy(ovk_policy)?;
+        let proposal_proto =
             Proposal::decode(unsafe { slice::from_raw_parts(proposal_ptr, proposal_len) })
                 .map_err(|e| {
                     debug!("{CONTEXT}: proposal did not decode: {e}");
@@ -2957,17 +2978,20 @@ pub unsafe extern "C" fn zcashlc_create_proposed_transactions(
                         ErrorKind::ProposalInvalid,
                         "the proposal could not be decoded",
                     )
-                })?
-                .try_into_standard_proposal(&network, &db_data)?;
+                })?;
+        // Loads the Sapling parameters only when the proposal has a Sapling bundle to prove, so a
+        // proposal that never touches Sapling builds even when the parameter files are absent.
+        let prover = unsafe {
+            sapling_prover::SaplingProver::for_proposal(
+                &proposal_proto,
+                spend_params,
+                spend_params_len,
+                output_params,
+                output_params_len,
+            )
+        }?;
+        let proposal = proposal_proto.try_into_standard_proposal(&network, &db_data)?;
         let usk = unsafe { decode_usk(usk_ptr, usk_len) }?;
-        let spend_params = Path::new(OsStr::from_bytes(unsafe {
-            slice::from_raw_parts(spend_params, spend_params_len)
-        }));
-        let output_params = Path::new(OsStr::from_bytes(unsafe {
-            slice::from_raw_parts(output_params, output_params_len)
-        }));
-
-        let prover = LocalTxProver::new(spend_params, output_params);
         let expiry_height = None;
 
         let txids = create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
@@ -2978,7 +3002,7 @@ pub unsafe extern "C" fn zcashlc_create_proposed_transactions(
             &prover,
             &prover,
             &SpendingKeys::from_unified_spending_key(usk),
-            OvkPolicy::Sender,
+            ovk_policy,
             &proposal,
             expiry_height,
         )
@@ -3515,6 +3539,87 @@ pub unsafe extern "C" fn zcashlc_set_transaction_status(
     });
 
     unwrap_exc_or(res, false)
+}
+
+/// Marks the given transaction as trusted or untrusted, in the sense of [ZIP 315]: the outputs of
+/// a trusted transaction become spendable after the policy's `trusted` confirmations even though
+/// they were not produced by this wallet.
+///
+/// The transaction must already be stored in `db_data` (for instance through
+/// [`zcashlc_decrypt_and_store_transaction`], which stores nothing for a transaction that does not
+/// involve the wallet). Returns `true` on success and `false` with the last error set otherwise,
+/// including when the transaction is not stored, so `true` always means the status was recorded.
+///
+/// [ZIP 315]: https://zips.z.cash/zip-0315
+///
+/// # Safety
+///
+/// - `db_data` must be non-null and valid for reads for `db_data_len` bytes, and it must
+///   have an alignment of `1`. Its contents must be a string representing a valid system
+///   path in the operating system's preferred representation.
+/// - The memory referenced by `db_data` must not be mutated for the duration of the
+///   function call.
+/// - The total size `db_data_len` must be no larger than `isize::MAX`. See the safety
+///   documentation of pointer::offset.
+/// - `txid_bytes` must be non-null and valid for reads for `txid_bytes_len` bytes, and it must
+///   have an alignment of `1`.
+/// - The memory referenced by `txid_bytes` must not be mutated for the duration of the
+///   function call.
+/// - The total size `txid_bytes_len` must be no larger than `isize::MAX`. See the safety
+///   documentation of pointer::offset.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zcashlc_set_transaction_trust(
+    db_data: *const u8,
+    db_data_len: usize,
+    txid_bytes: *const u8,
+    txid_bytes_len: usize,
+    trusted: bool,
+    network_id: u32,
+) -> bool {
+    let res = catch_panic(|| {
+        let network = parse_network(network_id)?;
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
+
+        let txid_bytes = unsafe { slice::from_raw_parts(txid_bytes, txid_bytes_len) };
+        let txid = TxId::read(txid_bytes)?;
+
+        set_trust_of_stored_transaction(&mut db_data, txid, trusted)?;
+
+        Ok(true)
+    });
+
+    unwrap_exc_or(res, false)
+}
+
+/// Sets the trust status of a transaction this wallet has stored, failing when it has not.
+///
+/// `WalletWrite::set_tx_trust` is an update that succeeds without touching a row when the
+/// transaction is unknown, and `decrypt_and_store_transaction` stores nothing for a transaction
+/// that does not involve the wallet. Checking first is what lets a caller tell "trusted" apart from
+/// "there was nothing to trust".
+fn set_trust_of_stored_transaction<W>(
+    db_data: &mut W,
+    txid: TxId,
+    trusted: bool,
+) -> anyhow::Result<()>
+where
+    W: WalletRead + WalletWrite,
+    <W as WalletRead>::Error: std::fmt::Display,
+{
+    let stored = db_data
+        .get_transaction(txid)
+        .map_err(|e| anyhow!("Error looking up txid {}: {}", txid, e))?
+        .is_some();
+    if !stored {
+        return Err(anyhow!(
+            "Transaction {} is not stored in this wallet; its trust status was not set",
+            txid
+        ));
+    }
+
+    db_data
+        .set_tx_trust(txid, trusted)
+        .map_err(|e| anyhow!("Error setting the trust status of txid {}: {}", txid, e))
 }
 
 /// Returns a list of transaction data requests that the network client should satisfy.
@@ -4870,6 +4975,15 @@ pub extern "C" fn zcashlc_set_custom_network(
     }
 }
 
+/// Decodes the `ovk_policy` argument of `zcashlc_create_proposed_transactions`.
+fn parse_ovk_policy(value: u32) -> anyhow::Result<OvkPolicy> {
+    match value {
+        0 => Ok(OvkPolicy::Sender),
+        1 => Ok(OvkPolicy::Discard),
+        _ => Err(anyhow!("Invalid OVK policy: {value}")),
+    }
+}
+
 pub(crate) fn parse_network(value: u32) -> anyhow::Result<NetworkParams> {
     match value {
         NETWORK_ID_TESTNET => Ok(NetworkParams::Standard(TestNetwork)),
@@ -4955,6 +5069,17 @@ pub(crate) fn parse_optional_height(value: i64) -> anyhow::Result<Option<BlockHe
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The C callers select the outgoing viewing key policy by number; only the two documented
+    /// values are accepted, so a caller asking for an unrecoverable send is never silently given
+    /// a recoverable one.
+    #[test]
+    fn ovk_policy_codes() {
+        assert!(matches!(parse_ovk_policy(0).unwrap(), OvkPolicy::Sender));
+        assert!(matches!(parse_ovk_policy(1).unwrap(), OvkPolicy::Discard));
+        assert!(parse_ovk_policy(2).is_err());
+        assert!(parse_ovk_policy(u32::MAX).is_err());
+    }
 
     /// Only the production network gets the ZIP 318 grid, whose anonymity set depends on every
     /// wallet sharing it. Testnet gets the shortened grid, so a migration passes through anchor
@@ -5190,6 +5315,31 @@ mod tests {
             !fresh_tip_decision(false, false, 1, 1),
             "a completed range without a refresh this run proves nothing"
         );
+    }
+
+    /// A transaction the wallet never stored, such as one `decrypt_and_store_transaction` skipped
+    /// because it does not involve the wallet, must not report its trust as set: the update
+    /// underneath would succeed on zero rows.
+    #[test]
+    fn trusting_a_transaction_the_wallet_did_not_store_fails() {
+        use zcash_client_sqlite::wallet::init::init_wallet_db;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("wallet.sqlite");
+        let mut db = WalletDb::for_path(
+            &path,
+            NetworkParams::Standard(TestNetwork),
+            SystemClock,
+            system_rng(),
+        )
+        .expect("opens a fresh wallet db");
+        init_wallet_db(&mut db, None).expect("initializes the wallet schema");
+
+        let txid = TxId::from_bytes([0x5a; 32]);
+        let error = set_trust_of_stored_transaction(&mut db, txid, true)
+            .expect_err("an unknown transaction cannot be trusted");
+        assert!(error.to_string().contains("not stored in this wallet"));
+        assert!(db.get_transaction(txid).unwrap().is_none());
     }
 }
 

@@ -19,6 +19,9 @@ orchard = { version = "0.16" }
 pasta_curves = "0.6"
 ff = "0.14"
 sapling = { package = "sapling-crypto", version = "0.9", default-features = false }
+# The scalar types in the Sapling prover traits, named by `rust/src/sapling_prover.rs`.
+bls12_381 = "0.9"
+jubjub = "0.11"
 transparent = { package = "zcash_transparent", version = "=0.11.0-pre.1", default-features = false }
 zcash_address = { version = "=0.14.0-pre.1" }
 zcash_client_backend = { version = "=0.25.0-pre.1", features = [
@@ -57,6 +60,13 @@ ur-registry = { git = "https://github.com/KeystoneHQ/keystone-sdk-rust", rev = "
 
 # EIP-681
 eip681 = "0.1.0"
+
+# Gift cards (`rust/src/liberated_payment.rs`): payment secrets are BIP 39 entropy encoded as
+# Bech32m. Descriptions are percent-encoded and legacy payloads are base64url (`base64`, below);
+# both crates are librustzcash dependencies already in the lockfile.
+bech32 = "0.11"
+bip0039 = { version = "0.14", default-features = false, features = ["std"] }
+percent-encoding = "2"
 
 # Infrastructure
 prost = "0.14"

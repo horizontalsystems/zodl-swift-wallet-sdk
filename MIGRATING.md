@@ -1,5 +1,21 @@
 # Migrating from previous versions to _Unreleased_
 
+## `TxId` validates its length — `init(_: [UInt8])` throws
+
+`TxId.init(_ id: [UInt8])` now throws `ZcashError.txIdNot32Bytes` for anything but 32 bytes,
+and `TxId.id` is a `let`.
+
+```swift
+// Before
+let txId = TxId(bytes)
+var copy = txId
+copy.id = otherBytes
+
+// After
+let txId = try TxId(bytes)
+let copy = try TxId(otherBytes)
+```
+
 ## Bounded Tor GET requests
 
 After successful Tor enablement, use

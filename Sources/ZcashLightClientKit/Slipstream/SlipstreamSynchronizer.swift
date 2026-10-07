@@ -1755,9 +1755,18 @@ public actor SlipstreamSynchronizer: Synchronizer {
         proposal: Proposal,
         spendingKey: UnifiedSpendingKey
     ) async throws -> AsyncThrowingStream<TransactionSubmitResult, Error> {
+        try await createProposedTransactions(proposal: proposal, spendingKey: spendingKey, ovkPolicy: .sender)
+    }
+
+    public func createProposedTransactions(
+        proposal: Proposal,
+        spendingKey: UnifiedSpendingKey,
+        ovkPolicy: OvkPolicy
+    ) async throws -> AsyncThrowingStream<TransactionSubmitResult, Error> {
         let transactions = try await broadcaster.createProposedTransactions(
             proposal: proposal,
-            spendingKey: spendingKey
+            spendingKey: spendingKey,
+            ovkPolicy: ovkPolicy
         )
         return submitTransactions(transactions)
     }
@@ -1917,6 +1926,26 @@ public actor SlipstreamSynchronizer: Synchronizer {
                 minedHeight: fetchedTransaction.minedHeight
             )
         }
+    }
+
+    // Trusted external transactions (ZIP 315): straight to the wallet database, like
+    // `SDKSynchronizer`; see `TrustedTransactionRecording`.
+
+    func recordTrustedTransaction(_ rawTransaction: Data, txId: TxId) async throws {
+        let storedTxId = try await initializer.rustBackend.decryptAndStoreTransaction(
+            txBytes: rawTransaction.bytes,
+            minedHeight: nil
+        )
+        guard storedTxId == Data(txId.id) else {
+            throw ZcashError.synchronizerTrustedTransactionIdMismatch
+        }
+        try await initializer.rustBackend.setTransactionTrust(txId: storedTxId, trusted: true)
+    }
+
+    /// Marks a stored transaction as trusted or untrusted (ZIP 315). Internal: see
+    /// `TrustedTransactionRecording`.
+    func setTransactionTrust(txId: TxId, trusted: Bool) async throws {
+        try await initializer.rustBackend.setTransactionTrust(txId: Data(txId.id), trusted: trusted)
     }
 
     // ── Height queries ────────────────────────────────────────────────────────
@@ -2968,3 +2997,5 @@ private extension SlipstreamSynchronizer {
         })
     }
 }
+
+extension SlipstreamSynchronizer: TrustedTransactionRecording {}

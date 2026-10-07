@@ -8,6 +8,34 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `zcashlc_parse_gift_card_link(link, error_out)` reads a gift card link — any `https` URL whose
+  fragment carries a `v=1` card (`#v=1&key=…&height=…`) or the legacy JSON payment-link encoding at
+  `/payment-links/open#vN=` — without touching a database or the network, and returns an
+  `FfiGiftCardLink`: its `origin` (`FfiGiftCardOrigin`: `V1`, `LegacyV1`, `LegacyV2`, `LegacyV3`),
+  `network_id` (`0` testnet, `1` mainnet; regtest cards are refused), `birthday_height` (never
+  below the network's NU5 activation height), the informational amount (`has_amount`/`amount`, in
+  zatoshis), a nullable `description` (sanitized: control whitespace becomes a space, other
+  control and invisible formatting characters such as bidi overrides are removed), the card
+  wallet's Orchard-only `funding_address`, and the 64-byte BIP 39 `seed` of the card wallet (ZIP 32
+  account 0). Free it with `zcashlc_free_gift_card`, which zeroes the seed. On failure it returns
+  null, writes the reason to `error_out` when that is non-null, and sets the last error; neither
+  contains any part of the link, which carries a spending secret. The reason is a stable
+  `FfiGiftCardLinkError`: `NotAGiftLink`, `UnsupportedVersion`, `WrongNetwork` (regtest or an
+  unknown network), `InvalidBirthday` (malformed, or below NU5 activation) or `InvalidLink`
+  (anything else).
+- `zcashlc_set_transaction_trust(db_data, db_data_len, txid_bytes, txid_bytes_len, trusted,
+  network_id)` marks a stored transaction as trusted or untrusted in the sense of ZIP 315
+  (`WalletWrite::set_tx_trust`): the outputs of a trusted transaction become spendable after the
+  confirmations policy's `trusted` count even though this wallet did not produce them. The
+  transaction must already be stored (for instance through `zcashlc_decrypt_and_store_transaction`,
+  which stores nothing for a transaction that does not involve the wallet). Returns `true` on
+  success, `false` with the last error set otherwise, including for a txid the wallet has not
+  stored, so `true` always means the status was recorded.
+- `zcashlc_proposal_requires_sapling_params(proposal_ptr, proposal_len)` reports, without a
+  database, whether creating a proposal's transactions needs the Sapling proving parameters: `1`
+  when any step has a Sapling input, payment, change or dummy output (or leaves a pool
+  unspecified), `0` otherwise, and `-1` with the last error set when the proposal does not decode.
+
 - `zcashlc_tor_http_get_with_timeout` adds an HTTP GET entry point whose trailing positive
   `timeout_ms` bounds the complete Tor operation, including connection setup, retries, and response
   body collection. It otherwise accepts the same arguments and returns the same response as
@@ -321,6 +349,14 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `zcashlc_set_custom_network` takes a trailing `nu7` activation height. As for the other
   heights, a negative value means "not activated on this network".
+- `zcashlc_create_proposed_transactions` takes a trailing `ovk_policy: u32`: `0` encrypts the
+  outputs to the sending account's outgoing viewing key, as every call did before, and `1` discards
+  it, so nobody holding the account's keys can recover the recipients, amounts or memos from the
+  chain. Any other value fails. Existing callers must pass `0` to keep their behavior.
+- `zcashlc_create_proposed_transactions` reads the Sapling parameter files only for a proposal that
+  `zcashlc_proposal_requires_sapling_params` reports as needing them. For any other proposal
+  `spend_params` and `output_params` may be null and the files need not exist; a proposal that
+  needs them with null paths fails instead of panicking.
 - `zcashlc_slipstream_snapshot` reports `tip_fresh = 1` only once the run that refreshed the
   chain tip has also completed a ChainTip-priority scan range (`spendable_hint = 1`) or reached
   Done, so a host that lifts a spendable-balance mask on `tip_fresh` never uncovers the transient
