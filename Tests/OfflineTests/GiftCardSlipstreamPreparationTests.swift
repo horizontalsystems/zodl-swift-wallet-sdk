@@ -6,6 +6,7 @@ import XCTest
 final class GiftCardSlipstreamPreparationTests: ZcashTestCase {
     func testOlderGiftExactBirthdayKeepsIndependentLatestRecoveryFallback() async throws {
         let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory)
+        let latestCheckpointHeight = CheckpointSourceFactory.fromBundle(for: .testnet).latestKnownCheckpoint().height
         fixture.service.getTreeStateModeClosure = nil
         var exact = TreeState()
         exact.height = 2_999_999
@@ -16,13 +17,14 @@ final class GiftCardSlipstreamPreparationTests: ZcashTestCase {
         _ = try await fixture.redeemer.check()
         let calls = await fixture.anchor.calls
         XCTAssertEqual(calls.first?.birthday, 2_999_999)
-        XCTAssertEqual(calls.first?.fallbackCheckpointHeight, 4_460_000)
+        XCTAssertEqual(calls.first?.fallbackCheckpointHeight, latestCheckpointHeight)
         XCTAssertEqual(fixture.backend.createAccountSeedTreeStateRecoverUntilNameKeySourceReceivedArguments?.treeState.height, 2_999_999)
         try await fixture.redeemer.cleanup()
     }
 
     func testInitializerUsesLatestKnownCheckpointIndependentlyOfBirthdayLookup() async throws {
         let fixture = try await GiftCardSlipstreamFixture.make(storageDirectory: testTempDirectory, isTorEnabled: false)
+        let latestCheckpointHeight = CheckpointSourceFactory.fromBundle(for: .testnet).latestKnownCheckpoint().height
         let source = GiftCardCheckpointSource(bundled: CheckpointSourceFactory.fromBundle(for: .testnet))
         var state = TreeState()
         state.height = 2_999_999
@@ -43,7 +45,7 @@ final class GiftCardSlipstreamPreparationTests: ZcashTestCase {
                 torDirPath: nil
             )
         }
-        await anchor.setResponse(SlipstreamRestoreAnchor(height: 4_460_000, treeState: nil))
+        await anchor.setResponse(SlipstreamRestoreAnchor(height: latestCheckpointHeight, treeState: nil))
         _ = try await fixture.initializer.initialize(
             with: fixture.card.seed.withBytes { $0 },
             walletBirthday: 3_000_000,
@@ -51,12 +53,16 @@ final class GiftCardSlipstreamPreparationTests: ZcashTestCase {
             keySource: nil
         )
         let calls = await anchor.calls
-        XCTAssertEqual(calls.first?.fallbackCheckpointHeight, 4_460_000)
+        XCTAssertEqual(calls.first?.fallbackCheckpointHeight, latestCheckpointHeight)
         XCTAssertEqual(fixture.backend.createAccountSeedTreeStateRecoverUntilNameKeySourceReceivedArguments?.treeState.height, 2_999_999)
-        XCTAssertEqual(fixture.backend.createAccountSeedTreeStateRecoverUntilNameKeySourceReceivedArguments?.recoverUntil, 4_460_000)
+        XCTAssertEqual(
+            fixture.backend.createAccountSeedTreeStateRecoverUntilNameKeySourceReceivedArguments?.recoverUntil,
+            UInt32(latestCheckpointHeight)
+        )
     }
 
     func testGiftBirthdayFallbackAndRoutesUseRealHostRequests() async throws {
+        let latestCheckpointHeight = CheckpointSourceFactory.fromBundle(for: .testnet).latestKnownCheckpoint().height
         for isTorEnabled in [false, true] {
             for responseHeight: UInt64? in [2_999_999, 3_000_000, nil] {
                 let fixture = try await GiftCardCancellationFixture.make(storageDirectory: testTempDirectory, isTorEnabled: isTorEnabled)
@@ -75,7 +81,7 @@ final class GiftCardSlipstreamPreparationTests: ZcashTestCase {
                 let created = try XCTUnwrap(fixture.backend.createAccountSeedTreeStateRecoverUntilNameKeySourceReceivedArguments)
                 XCTAssertEqual(created.treeState.height, responseHeight == 2_999_999 ? 2_999_999 : 2_990_000)
                 let calls = await fixture.anchor.calls
-                XCTAssertEqual(calls.first?.fallbackCheckpointHeight, 4_460_000)
+                XCTAssertEqual(calls.first?.fallbackCheckpointHeight, latestCheckpointHeight)
                 XCTAssertEqual(calls.first?.endpoint.host, "127.0.0.1")
                 if isTorEnabled {
                     XCTAssertEqual(calls.first?.torDirPath, fixture.initializer.torDirURL.appendingPathComponent("slipstream").path)
@@ -142,7 +148,8 @@ final class GiftCardSlipstreamPreparationTests: ZcashTestCase {
             storageDirectory: testTempDirectory,
             isTorEnabled: false
         )
-        await fixture.anchor.setResponse(SlipstreamRestoreAnchor(height: 4_460_000, treeState: nil))
+        let latestCheckpointHeight = CheckpointSourceFactory.fromBundle(for: .testnet).latestKnownCheckpoint().height
+        await fixture.anchor.setResponse(SlipstreamRestoreAnchor(height: latestCheckpointHeight, treeState: nil))
 
         let result = try await fixture.synchronizer.prepare(
             with: fixture.card.seed.withBytes { $0 },
@@ -159,7 +166,7 @@ final class GiftCardSlipstreamPreparationTests: ZcashTestCase {
         let call = try XCTUnwrap(calls.first)
         XCTAssertTrue(call.isRestore)
         XCTAssertEqual(call.birthday, 3_000_000)
-        XCTAssertEqual(call.fallbackCheckpointHeight, 4_460_000)
+        XCTAssertEqual(call.fallbackCheckpointHeight, latestCheckpointHeight)
         XCTAssertEqual(call.endpoint.host, "127.0.0.1")
         XCTAssertEqual(call.endpoint.port, 1)
         XCTAssertEqual(call.network.networkType, .testnet)
@@ -168,7 +175,7 @@ final class GiftCardSlipstreamPreparationTests: ZcashTestCase {
         let created = try XCTUnwrap(fixture.backend.createAccountSeedTreeStateRecoverUntilNameKeySourceReceivedArguments)
         XCTAssertEqual(created.treeState.height, 3_000_000)
         XCTAssertEqual(created.treeState.hash, "0031432018aa59e440804fa87974ec791ae174fa2909470f3c3a8a93842a659f")
-        XCTAssertEqual(created.recoverUntil, 4_460_000)
+        XCTAssertEqual(created.recoverUntil, UInt32(latestCheckpointHeight))
         XCTAssertEqual(fixture.synchronizer.latestState.accountsBalances[fixture.account.id], fixture.balance)
         XCTAssertEqual(fixture.synchronizer.latestState.latestBlockHeight, 3_000_010)
         XCTAssertEqual(fixture.service.latestBlockHeightModeCallsCount, 0)
@@ -196,7 +203,8 @@ final class GiftCardSlipstreamPreparationTests: ZcashTestCase {
             storageDirectory: testTempDirectory,
             isTorEnabled: true
         )
-        await fixture.anchor.setResponse(SlipstreamRestoreAnchor(height: 4_460_000, treeState: nil))
+        let latestCheckpointHeight = CheckpointSourceFactory.fromBundle(for: .testnet).latestKnownCheckpoint().height
+        await fixture.anchor.setResponse(SlipstreamRestoreAnchor(height: latestCheckpointHeight, treeState: nil))
 
         _ = try await fixture.synchronizer.prepare(
             with: fixture.card.seed.withBytes { $0 },
@@ -219,7 +227,8 @@ final class GiftCardSlipstreamPreparationTests: ZcashTestCase {
             storageDirectory: testTempDirectory,
             isTorEnabled: false
         )
-        await fixture.anchor.setResponse(SlipstreamRestoreAnchor(height: 4_460_000, treeState: nil))
+        let latestCheckpointHeight = CheckpointSourceFactory.fromBundle(for: .testnet).latestKnownCheckpoint().height
+        await fixture.anchor.setResponse(SlipstreamRestoreAnchor(height: latestCheckpointHeight, treeState: nil))
 
         _ = try await fixture.synchronizer.prepare(
             with: fixture.card.seed.withBytes { $0 },
@@ -242,11 +251,12 @@ final class GiftCardSlipstreamPreparationTests: ZcashTestCase {
         )
         // The native offline policy returns max(latest checkpoint, resolved birthday + 1).
         // A requested birthday beyond bundled checkpoints resolves to their latest entry.
-        await fixture.anchor.setResponse(SlipstreamRestoreAnchor(height: 4_460_001, treeState: nil))
+        let latestCheckpointHeight = CheckpointSourceFactory.fromBundle(for: .testnet).latestKnownCheckpoint().height
+        await fixture.anchor.setResponse(SlipstreamRestoreAnchor(height: latestCheckpointHeight + 1, treeState: nil))
 
         _ = try await fixture.synchronizer.prepare(
             with: fixture.card.seed.withBytes { $0 },
-            walletBirthday: 4_470_000,
+            walletBirthday: latestCheckpointHeight + 10_000,
             name: "Gift card",
             keySource: nil
         )
@@ -254,11 +264,11 @@ final class GiftCardSlipstreamPreparationTests: ZcashTestCase {
         let calls = await fixture.anchor.calls
         let call = try XCTUnwrap(calls.first)
         XCTAssertTrue(call.isRestore)
-        XCTAssertEqual(call.birthday, 4_460_000)
-        XCTAssertEqual(call.fallbackCheckpointHeight, 4_460_000)
+        XCTAssertEqual(call.birthday, latestCheckpointHeight)
+        XCTAssertEqual(call.fallbackCheckpointHeight, latestCheckpointHeight)
         let created = try XCTUnwrap(fixture.backend.createAccountSeedTreeStateRecoverUntilNameKeySourceReceivedArguments)
-        XCTAssertEqual(created.treeState.height, 4_460_000)
-        XCTAssertEqual(created.recoverUntil, 4_460_001)
+        XCTAssertEqual(created.treeState.height, UInt64(latestCheckpointHeight))
+        XCTAssertEqual(created.recoverUntil, UInt32(latestCheckpointHeight + 1))
     }
 }
 
