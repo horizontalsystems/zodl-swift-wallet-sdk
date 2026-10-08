@@ -13,6 +13,11 @@ import Foundation
 /// closes the transport, since the device's reply to the outstanding command can no longer be
 /// attributed; every other failure ends the ceremony with the session's error.
 ///
+/// The ceremony holds the transport from before its first command until it is over, so no other
+/// ceremony the SDK runs over the same transport (a `LedgerDevice` call, an app switch, another
+/// signing) can put a command of its own between two of this one's; one started meanwhile waits. See
+/// `LedgerCeremony`.
+///
 /// Once the ceremony's first command has reached the device, a cancelled task closes the transport, at
 /// any point: during an exchange, between two exchanges, or while the session is built. The device can
 /// be in the middle of the ceremony, so the caller must open a new connection before it tries again. A
@@ -22,6 +27,25 @@ struct LedgerSigner {
     let logger: Logger
 
     func sign(
+        pczt: Pczt,
+        accountUUID: AccountUUID,
+        binding: LedgerAccountBinding,
+        transport: LedgerAPDUTransport,
+        progress: (@Sendable (LedgerSigningProgress) -> Void)?
+    ) async throws -> Pczt {
+        try await LedgerCeremony.run(on: transport) {
+            try await signHoldingTransport(
+                pczt: pczt,
+                accountUUID: accountUUID,
+                binding: binding,
+                transport: transport,
+                progress: progress
+            )
+        }
+    }
+
+    /// The ceremony itself, run while `sign` holds `transport` for it.
+    private func signHoldingTransport(
         pczt: Pczt,
         accountUUID: AccountUUID,
         binding: LedgerAccountBinding,

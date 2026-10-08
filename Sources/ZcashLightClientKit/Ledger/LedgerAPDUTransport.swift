@@ -18,7 +18,12 @@ import Foundation
 ///   peripheral partway through its life would invalidate that binding for every exchange after
 ///   the switch.
 /// - One exchange at a time. A reply is only ever the answer to the command last sent, and nothing
-///   in a reply says which command it answers.
+///   in a reply says which command it answers. The SDK goes further on its own side: every pairing,
+///   signing ceremony and app switch holds the transport for all of its commands, so two of them
+///   over one transport run one after the other, whichever `LedgerDevice`, `Synchronizer` or
+///   `LedgerZcashApp` call started them. Only the SDK's own entry points hold that ceremony-wide
+///   ownership; a caller that exchanges with a transport directly, while one of them runs, can
+///   still interleave its command with theirs.
 /// - The reply is the raw payload: the response data followed by the two-byte status word. A
 ///   transport never inspects the status word; a device that answers "denied" is a successful
 ///   exchange.
@@ -26,7 +31,7 @@ import Foundation
 ///   reply that does not reassemble, a cancelled task) leaves the device's reply uncollected. The
 ///   transport must then refuse every later exchange and close the connection, so that a late reply
 ///   is never taken for the answer to the next command. It never resends a command on its own.
-public protocol LedgerAPDUTransport: Sendable {
+public protocol LedgerAPDUTransport: AnyObject, Sendable {
     /// Sends one command and returns the device's reply.
     ///
     /// - Parameters:

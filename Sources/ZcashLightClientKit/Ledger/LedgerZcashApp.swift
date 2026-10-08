@@ -30,7 +30,11 @@ public enum LedgerZcashApp {
     ///   device's refusal is transient. ``ZcashError/ledgerMalformedReply(_:)`` if the reply is not an
     ///   app name and version. A ``ZcashError`` for a transport failure.
     public static func currentApp(transport: any LedgerAPDUTransport) async throws -> LedgerRunningApp {
-        try await launcher().currentApp(transport: transport)
+        // Holds the transport for the query, like every other ceremony the SDK runs over one; see
+        // `LedgerCeremony`.
+        try await LedgerCeremony.run(on: transport) {
+            try await launcher().currentApp(transport: transport)
+        }
     }
 
     /// Makes sure the device is running the Zcash app, opening it if needed, and returns the
@@ -88,7 +92,12 @@ public enum LedgerZcashApp {
         transport: any LedgerAPDUTransport,
         reconnect: @escaping @Sendable () async throws -> any LedgerAPDUTransport
     ) async throws -> any LedgerAPDUTransport {
-        try await launcher().ensureZcashAppOpen(transport: transport, reconnect: reconnect)
+        // Holds `transport` for the whole switch, so no other ceremony the SDK runs over it can put a
+        // command between the query and the open; see `LedgerCeremony`. A transport `reconnect`
+        // returns is new and is not under that hold, exactly as with `LedgerDevice.pairAccount`.
+        try await LedgerCeremony.run(on: transport) {
+            try await launcher().ensureZcashAppOpen(transport: transport, reconnect: reconnect)
+        }
     }
 
     private static func launcher() -> LedgerAppLauncher {

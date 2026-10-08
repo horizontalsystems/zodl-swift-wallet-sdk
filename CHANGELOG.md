@@ -34,7 +34,13 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restartable `ledgerTransportClosed` would invite it to reconnect and displace the new connection
   in turn.
 - `LedgerAPDUTransport`, the protocol the pairing and signing code depends on
-  (`exchange(_:timeout:)`, `close()`), for custom transports and test doubles.
+  (`exchange(_:timeout:)`, `close()`), for custom transports and test doubles. A conformer is a
+  class or an actor: the SDK identifies a transport by instance to hold it for a whole ceremony.
+- Every pairing, signing ceremony and app query or switch holds its transport for all of its
+  commands: two of them over one transport run one after the other, whichever `LedgerDevice`,
+  `Synchronizer.signPCZTWithLedger` or `LedgerZcashApp` call started them, so neither can put a
+  command between two of the other's and corrupt the device's ceremony. A call cancelled while it
+  waits for its turn throws `CancellationError`, sends nothing and closes nothing.
 - `LedgerExchangeNotStarted`, the error a transport's `exchange(_:timeout:)` throws to report that
   this exchange never sent anything, such as a caller cancelled while queued behind another exchange
   on the same transport; the SDK's own commands normalize it to `CancellationError`. `LedgerDevice`'s

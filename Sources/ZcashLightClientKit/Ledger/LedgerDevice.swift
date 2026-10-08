@@ -13,9 +13,13 @@ import Foundation
 /// Every method throws a ``ZcashError`` from the `ledger` family, or `CancellationError` when its task
 /// is cancelled. A method whose exchange fails on the transport, or is cancelled once it has started,
 /// closes the transport: open a new connection before trying again. A call cancelled while only
-/// queued, waiting for another call already in progress, throws `CancellationError` without closing
-/// anything: it never reached the transport. Calls are serialized; a call made while another is in
-/// progress waits for it.
+/// queued, waiting for another ceremony already in progress, throws `CancellationError` without
+/// closing anything: it never reached the transport.
+///
+/// Every call holds the transport for all of its commands, and so does every other ceremony the SDK
+/// runs over a transport (another `LedgerDevice` over the same transport, a signing ceremony, an app
+/// switch): a call made while any of them is in progress waits for it, so no two of them interleave
+/// their commands on the device. See `LedgerCeremony`.
 ///
 /// The caller owns every transport: the one passed to `init` and every one a `pairAccount`
 /// `reconnect` function returns. This closes a transport whose exchange failed (closing is idempotent)
@@ -47,7 +51,6 @@ public actor LedgerDevice {
     /// this; build a new device over that one.
     public private(set) var transport: LedgerAPDUTransport
     private let networkType: NetworkType
-    private let gate = LedgerSerialGate()
 
     /// - Parameters:
     ///   - transport: The connection to the device, such as a ``LedgerBluetoothTransport``.
@@ -113,9 +116,10 @@ public actor LedgerDevice {
     ///     ``defaultPairingReadTimeout`` to detect a stalled device early. `.infinity` means no cap on
     ///     the reads' one reconnect either: it still runs once, just unbounded, instead of trapping.
     ///   - reconnect: Opens a fresh connection to the same device, for one retry of the reads before
-    ///     the export. `nil` for no retry. It runs while this device holds its serializing gate, which
-    ///     is not reentrant: it must not call this device, directly or through anything that waits on
-    ///     it, or it deadlocks.
+    ///     the export. `nil` for no retry. It runs while this call holds the transport's ceremony
+    ///     gate, which is not reentrant: it must not call this device, nor run any other ceremony
+    ///     over this device's ``transport``, directly or through anything that waits on one, or it
+    ///     deadlocks. The transport it returns is a new one and is not under that gate.
     /// - Throws: ``ZcashError/ledgerAppTooOld(_:)`` when the app cannot sign transactions for this SDK,
     ///   ``ZcashError/ledgerUserRejected`` when the user declines the export,
     ///   ``ZcashError/ledgerDeviceMismatch`` when the exported key of account 0 does not derive the
@@ -300,23 +304,23 @@ public actor LedgerDevice {
         }
     }
 
-    /// Runs `operation` once no other call on this device is in progress, and converts its failure into
-    /// the public error.
+    /// Runs `operation` once no other ceremony on this device's transport is in progress, and converts
+    /// its failure into the public error.
     private func serialized<T>(_ operation: () async throws -> T) async throws -> T {
-        // A call cancelled here waits for its turn and never reaches the device, so it closes nothing.
-        try await gate.acquire()
-        do {
-            let result = try await operation()
-            await gate.release()
-            return result
-        } catch {
-            if error is CancellationError || Task.isCancelled {
-                // The call holds the device, which can be in the middle of a command or an exchange.
-                // Closing is idempotent, so a transport that a failed exchange closed is not affected.
-                await transport.close()
+        // A call cancelled while queued never reaches the device, so it closes nothing;
+        // `LedgerCeremony.run` throws the `CancellationError` for it.
+        try await LedgerCeremony.run(on: transport) {
+            do {
+                return try await operation()
+            } catch {
+                if error is CancellationError || Task.isCancelled {
+                    // The call holds the device, which can be in the middle of a command or an
+                    // exchange. Closing is idempotent, so a transport that a failed exchange closed
+                    // is not affected.
+                    await transport.close()
+                }
+                throw ledgerZcashError(error)
             }
-            await gate.release()
-            throw ledgerZcashError(error)
         }
     }
 }

@@ -48,10 +48,18 @@ after a cancellation or `close()`, and the recovery is a new connection. A `Ledg
 signing ceremony that is cancelled once it holds the device closes the transport, whatever step it
 was at -- during an exchange, between two commands or export chunks, or during the pause before
 resending a command the device refused with `0x6901` -- since the device can be in the middle of a
-command or an exchange. A call cancelled while it waits for its turn (behind another call on the same
-`LedgerDevice`, or behind another exchange on the same transport before its first command) closes
-nothing, because it never reached the device. A refusal from the device (the user declining, a
-locked device, another app open) leaves the transport open.
+command or an exchange. A call cancelled while it waits for its turn (behind another ceremony on the
+same transport, or behind another exchange on it before its first command) closes nothing, because
+it never reached the device. A refusal from the device (the user declining, a locked device, another
+app open) leaves the transport open.
+
+Every pairing, signing ceremony and app query or switch holds its transport for all of its commands.
+Two of them over one transport run one after the other, whichever `LedgerDevice`,
+`Synchronizer.signPCZTWithLedger` or `LedgerZcashApp` call started them, so neither can put a
+command of its own between two of the other's: the Zcash app keeps per-ceremony state, and a stray
+command in the middle of an export or a signing fails both. A call made while another ceremony runs
+simply waits for it. Only the SDK's own entry points hold the transport this way; a caller that
+exchanges with a transport directly while one of them runs can still interleave its command.
 `LedgerZcashApp.ensureZcashAppOpen` closes the caller's transport only when its link fails, and
 closes a transport its `reconnect` opened whenever the call fails; `LedgerZcashApp.currentApp`
 never closes the transport it is given.
