@@ -558,11 +558,13 @@ func reconnectRaceNanoseconds(_ timeout: TimeInterval) -> UInt64? {
 /// With no timer, the caller's cancellation reaches `reconnect` only through `reconnect`'s own
 /// cancellation checks. A `reconnect` that ignores cancellation keeps the caller waiting until it
 /// returns; the transport it returns is then owned by whichever caller asked for it. The pairing
-/// read adopts it onto `LedgerDevice`'s `transport` right away, and since `LedgerCommands.exchange`
-/// now checks cancellation before its `do` instead of inside it, the read that follows throws
-/// without closing -- so a cancelled `pairAccount` leaves the new transport there for its own
-/// caller to close. `ensureZcashAppOpen` closes it itself, through `closeReplacement()`, if the
-/// overall call fails.
+/// read adopts it onto `LedgerDevice`'s `transport` right away, under that transport's own ceremony;
+/// a cancellation reaching the read that follows throws without the read itself closing anything,
+/// since `LedgerCommands.exchange` checks cancellation before its `do` instead of inside it -- but
+/// `pairAccount`'s own serializing wrapper closes whichever transport the call is on once its
+/// operation fails this way, so a cancelled `pairAccount` closes the adopted transport rather than
+/// leaving it open for its caller. `ensureZcashAppOpen` closes a replacement transport itself,
+/// through `closeReplacement()`, if the overall call fails.
 ///
 /// Not `private`: shared by `AppSwitch`'s own app-switch reconnects and by `LedgerDevice`'s
 /// pairing-read reconnect, rather than duplicating this race in both places.

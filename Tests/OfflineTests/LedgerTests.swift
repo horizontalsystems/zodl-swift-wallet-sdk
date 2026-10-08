@@ -11,6 +11,25 @@ import XCTest
 @testable import TestUtils
 @testable import ZcashLightClientKit
 
+/// Polls `condition` with a short yield between checks, failing the test after `timeoutSeconds` if
+/// it never becomes true. Not named `waitUntil`: `XCTestCase` has a member of that name (from
+/// `TestUtils`) that returns the outcome instead of failing, and member lookup would win.
+private func expectEventually(
+    timeoutSeconds: TimeInterval = 2,
+    file: StaticString = #filePath,
+    line: UInt = #line,
+    _ condition: () async -> Bool
+) async {
+    let deadline = DispatchTime.now() + timeoutSeconds
+    while DispatchTime.now() < deadline {
+        if await condition() {
+            return
+        }
+        await Task.yield()
+    }
+    XCTFail("condition did not become true within \(timeoutSeconds) s", file: file, line: line)
+}
+
 // MARK: - Scripted device
 
 /// A transport that answers every command from a script and records what it was asked.
@@ -369,13 +388,14 @@ final class LedgerDeviceTests: XCTestCase {
         let ledger = LedgerDevice(transport: transport, networkType: .testnet)
 
         let first = Task { try await ledger.appVersion() }
-        // Waits for `first` to reach its (slow) exchange, so it holds the device when `second` starts.
-        while await transport.received.isEmpty {
-            try await Task.sleep(nanoseconds: 1_000_000)
-        }
+        // Waits for `first` to reach its (slow) exchange, so it provably holds the device when
+        // `second` starts.
+        await expectEventually { await transport.received.count == 1 }
         let second = Task { try await ledger.appVersion() }
-        // Lets `second` reach the device's queue behind `first` before it is cancelled.
-        try await Task.sleep(nanoseconds: 50_000_000)
+        // Waits for `second` to have actually queued behind `first` on the device before cancelling
+        // it: cancelling any earlier would exercise the already-cancelled-on-entry path instead of
+        // the queued one this test means to cover.
+        await expectEventually { await ledger.queuedCount == 1 }
         second.cancel()
 
         do {

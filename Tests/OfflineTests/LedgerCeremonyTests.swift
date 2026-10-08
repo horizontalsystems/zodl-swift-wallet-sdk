@@ -47,6 +47,26 @@ private actor RefusingLedgerTransport: LedgerAPDUTransport {
     }
 }
 
+/// A transport that answers its first exchange and then throws ``LedgerExchangeNotStarted`` without
+/// sending anything for every exchange after it, the way a transport's own admission gate refuses a
+/// caller it cancels while queued behind one already in flight.
+private actor RefusingAfterFirstExchangeLedgerTransport: LedgerAPDUTransport {
+    private(set) var closeCount = 0
+    private(set) var attempts = 0
+
+    func exchange(_ apdu: Data, timeout: TimeInterval?) async throws -> Data {
+        attempts += 1
+        guard attempts == 1 else {
+            throw LedgerExchangeNotStarted()
+        }
+        return LedgerReplies.firmwareVersion(3, 9, 3)
+    }
+
+    func close() async {
+        closeCount += 1
+    }
+}
+
 final class LedgerCeremonyTests: XCTestCase {
     private let dashboardQuery: UInt8 = 0x01
 
@@ -241,9 +261,16 @@ final class LedgerCeremonyTests: XCTestCase {
 
     /// The same for the signing ceremony: a refusal before anything was sent is a cancellation that
     /// closes nothing, unlike a cancellation once the ceremony's first command reached the device.
+    /// The transport answers the version probe first, so the ceremony holds the device before its
+    /// next exchange -- the first signing command -- is the one refused.
     func testASigningCeremonyTheTransportRefusedBeforeSendingClosesNothing() async throws {
-        let transport = RefusingLedgerTransport()
-        let session = ScriptedSigningSession(commands: [], statuses: [])
+        let transport = RefusingAfterFirstExchangeLedgerTransport()
+        let session = ScriptedSigningSession(
+            commands: [
+                LedgerSignCommand(apdu: Data([0xE0, 0x52, 0, 0, 0]), waitsForUser: false, startsReview: false, stage: .streaming, streamAcknowledged: 0, streamTotal: 1)
+            ],
+            statuses: [.complete]
+        )
         let ledgerSigner = signer(session: session)
         let binding = try binding()
 
@@ -261,7 +288,7 @@ final class LedgerCeremonyTests: XCTestCase {
         }
 
         let closeCount = await transport.closeCount
-        XCTAssertEqual(closeCount, 0, "an exchange the transport never sent must not close it")
+        XCTAssertEqual(closeCount, 0, "an exchange the transport never sent must not close it, even once the ceremony holds the device")
     }
 
     // MARK: - The gate registry
