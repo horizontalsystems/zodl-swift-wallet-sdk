@@ -10,9 +10,10 @@ import XCTest
 @testable import ZcashLightClientKit
 
 /// Polls `condition` with a short yield between checks, failing the test after `timeoutSeconds` if
-/// it never becomes true. Used to wait for an actor's observable state instead of guessing with a
+/// it never becomes true. Not named `waitUntil`: `XCTestCase` has a member of that name (from
+/// `TestUtils`) that returns the outcome instead of failing, and member lookup would win. Used to wait for an actor's observable state instead of guessing with a
 /// fixed sleep, which would either race a slow run or waste time on a fast one.
-private func waitUntil(
+private func expectEventually(
     timeoutSeconds: TimeInterval = 2,
     file: StaticString = #filePath,
     line: UInt = #line,
@@ -40,7 +41,7 @@ final class LedgerSerialGateTests: XCTestCase {
         let second = Task { try await gate.acquire() }
         // Waits for `second` to have actually reached the queue before cancelling it: cancelling
         // any earlier would exercise the already-cancelled-on-entry path instead of this one.
-        await waitUntil { await gate.queuedCount == 1 }
+        await expectEventually { await gate.queuedCount == 1 }
         second.cancel()
 
         do {
@@ -61,7 +62,7 @@ final class LedgerSerialGateTests: XCTestCase {
         // Waits for `third` to have actually reached the queue before releasing: releasing any
         // earlier risks finding the gate idle (second already gone, third not queued yet) and
         // admitting it through the fast path, which is not the hand-off this test means to cover.
-        await waitUntil { await gate.queuedCount == 1 }
+        await expectEventually { await gate.queuedCount == 1 }
         await gate.release()
 
         do {
@@ -129,12 +130,12 @@ final class LedgerSerialGateTests: XCTestCase {
         let first = Task { try await exchangeUnderGate() }
         // Waits for `first` to have actually reached its (stalled) exchange, so it provably still
         // holds the gate once `second` is created.
-        await waitUntil { await transport.received.count == 1 }
+        await expectEventually { await transport.received.count == 1 }
 
         let second = Task { try await exchangeUnderGate() }
         // Waits for `second` to have actually reached the queue before cancelling it, for the same
         // reason as the test above.
-        await waitUntil { await gate.queuedCount == 1 }
+        await expectEventually { await gate.queuedCount == 1 }
         second.cancel()
 
         do {
@@ -163,10 +164,10 @@ final class LedgerSerialGateTests: XCTestCase {
         let first = Task { try await LedgerCommands.exchange(Data([0xC4]), on: transport, timeout: nil) }
         // Waits for `first` to have actually started its (stalled) exchange, so it provably holds
         // the transport's own gate once `second` is created.
-        await waitUntil { await transport.exchangesStarted == 1 }
+        await expectEventually { await transport.exchangesStarted == 1 }
 
         let second = Task { try await LedgerCommands.exchange(Data([0xC4]), on: transport, timeout: nil) }
-        await waitUntil { await transport.queuedCount == 1 }
+        await expectEventually { await transport.queuedCount == 1 }
         second.cancel()
 
         do {
