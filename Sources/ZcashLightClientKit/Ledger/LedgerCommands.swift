@@ -12,9 +12,10 @@ import Foundation
 /// A transport throws this, instead of letting the failure read as an ordinary exchange failure,
 /// when its own admission logic refuses a caller before its turn -- ``LedgerBluetoothTransport``
 /// does this for a caller cancelled while still queued behind another exchange on the same
-/// transport. The SDK's own commands catch it and rethrow a plain `CancellationError` instead.
-/// ``LedgerDevice``'s commands then leave the transport open; the signing ceremony closes it, as it
-/// does on every cancellation. A caller that exchanges with a transport directly, outside those
+/// transport. The SDK's own commands let it through untouched until the error leaves them, where
+/// `ledgerZcashError(_:)` turns it into a plain `CancellationError`; ``LedgerDevice``'s commands and
+/// the signing ceremony both leave the transport open for it, unlike for a cancellation of an
+/// exchange that did start. A caller that exchanges with a transport directly, outside those
 /// commands, sees this type itself.
 public struct LedgerExchangeNotStarted: Error {
     public init() {}
@@ -30,15 +31,17 @@ enum LedgerCommands {
     /// before this call even reaches the transport (checked up front, not inside the `do` below), or
     /// the transport itself reports, via ``LedgerExchangeNotStarted``, that its own admission gate
     /// refused the caller before anything was sent: neither one put anything on the wire, so neither
-    /// is a failure of the transport, and the transport is left open. The signing ceremony closes the
-    /// transport itself on any cancellation; see ``LedgerSigner``.
+    /// is a failure of the transport, and the transport is left open. ``LedgerExchangeNotStarted`` is
+    /// rethrown as it is, so that ``LedgerDevice`` and ``LedgerSigner`` can tell a cancellation that
+    /// never reached the transport from one that did, and close the transport only for the latter;
+    /// `ledgerZcashError(_:)` turns it into a `CancellationError` once that decision is made.
     static func exchange(_ apdu: Data, on transport: LedgerAPDUTransport, timeout: TimeInterval?) async throws -> Data {
         try Task.checkCancellation()
 
         do {
             return try await transport.exchange(apdu, timeout: timeout)
         } catch is LedgerExchangeNotStarted {
-            throw CancellationError()
+            throw LedgerExchangeNotStarted()
         } catch {
             await transport.close()
             throw ledgerZcashError(error)

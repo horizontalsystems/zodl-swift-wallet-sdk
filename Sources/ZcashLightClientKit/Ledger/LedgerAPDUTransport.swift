@@ -45,9 +45,9 @@ public protocol LedgerAPDUTransport: AnyObject, Sendable {
     ///   only when its link fails, and closes a transport its `reconnect` opened whenever the call
     ///   fails; `LedgerZcashApp.currentApp` never closes the transport it is given. The one
     ///   exception is ``LedgerExchangeNotStarted``, which an implementation throws instead to report
-    ///   that it refused this exchange before sending anything: ``LedgerDevice``'s commands leave
-    ///   the transport open for it. Signing reports it as a cancellation and closes the transport,
-    ///   as it does on every cancellation.
+    ///   that it refused this exchange before sending anything: ``LedgerDevice``'s commands and the
+    ///   signing ceremony both report it as a cancellation and leave the transport open, since the
+    ///   device never received the command.
     func exchange(_ apdu: Data, timeout: TimeInterval?) async throws -> Data
 
     /// Closes the connection. Every later exchange fails. Closing twice has no effect.

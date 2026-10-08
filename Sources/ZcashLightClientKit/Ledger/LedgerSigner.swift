@@ -82,7 +82,11 @@ struct LedgerSigner {
             return signed
         } catch {
             let publicError = ledgerZcashError(error)
-            if holdsDevice && (publicError is CancellationError || Task.isCancelled) {
+            // An exchange the transport refused before sending anything never reached the device,
+            // so there is nothing on it to abandon: the transport stays open, as for a cancellation
+            // before the first command.
+            let neverReachedDevice = error is LedgerExchangeNotStarted
+            if holdsDevice && !neverReachedDevice && (publicError is CancellationError || Task.isCancelled) {
                 // The device can be in the middle of the ceremony. Closing is idempotent, so a
                 // transport that an exchange already closed is not affected.
                 logger.debug("Ledger signing: cancelled; closing the transport")

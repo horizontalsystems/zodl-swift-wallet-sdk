@@ -313,7 +313,10 @@ public actor LedgerDevice {
             do {
                 return try await operation()
             } catch {
-                if error is CancellationError || Task.isCancelled {
+                if error is LedgerExchangeNotStarted {
+                    // The transport refused the exchange before sending anything: the device never
+                    // saw it, so the transport stays open for whoever is using it.
+                } else if error is CancellationError || Task.isCancelled {
                     // The call holds the device, which can be in the middle of a command or an
                     // exchange. Closing is idempotent, so a transport that a failed exchange closed
                     // is not affected.

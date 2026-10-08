@@ -44,7 +44,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `LedgerExchangeNotStarted`, the error a transport's `exchange(_:timeout:)` throws to report that
   this exchange never sent anything, such as a caller cancelled while queued behind another exchange
   on the same transport; the SDK's own commands normalize it to `CancellationError`. `LedgerDevice`'s
-  commands then leave the transport open, and signing closes it, as on every cancellation.
+  commands and signing both leave the transport open for it: the device never received the command,
+  so the connection of whoever is using it is not closed out from under them.
 - `LedgerDevice(transport:networkType:)`: `appVersion()` (a `LedgerAppVersion`),
   `deviceIdentity()` (a `LedgerDeviceIdentity`),
   `pairAccount(zip32AccountIndex:readTimeout:reconnect:)` (a `LedgerAccountPairing` carrying the

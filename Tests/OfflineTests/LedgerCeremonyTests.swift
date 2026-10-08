@@ -31,6 +31,22 @@ private func expectEventually(
     XCTFail("condition did not become true within \(timeoutSeconds) s", file: file, line: line)
 }
 
+/// A transport whose exchanges throw ``LedgerExchangeNotStarted`` without sending anything, the way a
+/// transport's own admission gate refuses a caller it cancels while queued.
+private actor RefusingLedgerTransport: LedgerAPDUTransport {
+    private(set) var closeCount = 0
+    private(set) var attempts = 0
+
+    func exchange(_ apdu: Data, timeout: TimeInterval?) async throws -> Data {
+        attempts += 1
+        throw LedgerExchangeNotStarted()
+    }
+
+    func close() async {
+        closeCount += 1
+    }
+}
+
 final class LedgerCeremonyTests: XCTestCase {
     private let dashboardQuery: UInt8 = 0x01
 
@@ -201,6 +217,51 @@ final class LedgerCeremonyTests: XCTestCase {
         XCTAssertEqual(received.count, 1, "the cancelled call never reached the device")
         let closeCount = await transport.closeCount
         XCTAssertEqual(closeCount, 0, "a call cancelled while it waits for its turn closes nothing")
+    }
+
+    /// A transport that refuses an exchange before sending it, as a transport's own gate does for a
+    /// caller it cancels while queued, leaves `LedgerDevice`'s call with a `CancellationError` and the
+    /// transport open: the device never saw the command, so there is nothing to abandon.
+    func testADeviceCallTheTransportRefusedBeforeSendingClosesNothing() async throws {
+        let transport = RefusingLedgerTransport()
+        let device = LedgerDevice(transport: transport, networkType: .testnet)
+
+        do {
+            _ = try await device.appVersion()
+            XCTFail("a refused exchange must fail the call")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        let attempts = await transport.attempts
+        XCTAssertEqual(attempts, 1)
+        let closeCount = await transport.closeCount
+        XCTAssertEqual(closeCount, 0, "an exchange the transport never sent must not close it")
+    }
+
+    /// The same for the signing ceremony: a refusal before anything was sent is a cancellation that
+    /// closes nothing, unlike a cancellation once the ceremony's first command reached the device.
+    func testASigningCeremonyTheTransportRefusedBeforeSendingClosesNothing() async throws {
+        let transport = RefusingLedgerTransport()
+        let session = ScriptedSigningSession(commands: [], statuses: [])
+        let ledgerSigner = signer(session: session)
+        let binding = try binding()
+
+        do {
+            _ = try await ledgerSigner.sign(
+                pczt: Data([1]),
+                accountUUID: AccountUUID(id: [UInt8](repeating: 1, count: 16)),
+                binding: binding,
+                transport: transport,
+                progress: nil
+            )
+            XCTFail("a refused exchange must fail the ceremony")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        let closeCount = await transport.closeCount
+        XCTAssertEqual(closeCount, 0, "an exchange the transport never sent must not close it")
     }
 
     // MARK: - The gate registry

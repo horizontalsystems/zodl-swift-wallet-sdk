@@ -155,7 +155,8 @@ final class LedgerSerialGateTests: XCTestCase {
     /// `LedgerCommands.exchange` must not close a transport over a cancellation that never reached
     /// the wire: two callers share one transport that gates its own `exchange(_:timeout:)`, the
     /// second is cancelled while queued for that internal gate, and the holder's own exchange must
-    /// still complete, with the transport left open for it.
+    /// still complete, with the transport left open for it. The refusal reaches the caller as
+    /// ``LedgerExchangeNotStarted``, not as a plain `CancellationError`.
     func testLedgerCommandsExchangeDoesNotCloseATransportForAnExchangeThatNeverStarted() async throws {
         let transport = GatedScriptedLedgerTransport(delayNanoseconds: 500_000_000) { _ in
             LedgerReplies.firmwareVersion(3, 9, 3)
@@ -173,8 +174,10 @@ final class LedgerSerialGateTests: XCTestCase {
         do {
             _ = try await second.value
             XCTFail("a cancelled waiter must throw")
-        } catch is CancellationError {
-            // expected
+        } catch is LedgerExchangeNotStarted {
+            // Expected: the marker comes through as it is, so `LedgerDevice` and `LedgerSigner` can
+            // tell this cancellation from one that reached the device; `ledgerZcashError(_:)` turns
+            // it into the `CancellationError` their callers see.
         }
 
         let reply = try await first.value
