@@ -58,8 +58,10 @@ Two of them over one transport run one after the other, whichever `LedgerDevice`
 `Synchronizer.signPCZTWithLedger` or `LedgerZcashApp` call started them, so neither can put a
 command of its own between two of the other's: the Zcash app keeps per-ceremony state, and a stray
 command in the middle of an export or a signing fails both. A call made while another ceremony runs
-simply waits for it. Only the SDK's own entry points hold the transport this way; a caller that
-exchanges with a transport directly while one of them runs can still interleave its command.
+simply waits for it. A pairing that reconnects partway through holds the replacement transport the
+same way, for the rest of the call, so a second device or ceremony on it waits too. Only the SDK's
+own entry points hold the transport this way; a caller that exchanges with a transport directly while
+one of them runs can still interleave its command.
 `LedgerZcashApp.ensureZcashAppOpen` closes the caller's transport only when its link fails, and
 closes a transport its `reconnect` opened whenever the call fails; `LedgerZcashApp.currentApp`
 never closes the transport it is given.

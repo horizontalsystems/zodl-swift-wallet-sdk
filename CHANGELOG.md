@@ -40,7 +40,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   commands: two of them over one transport run one after the other, whichever `LedgerDevice`,
   `Synchronizer.signPCZTWithLedger` or `LedgerZcashApp` call started them, so neither can put a
   command between two of the other's and corrupt the device's ceremony. A call cancelled while it
-  waits for its turn throws `CancellationError`, sends nothing and closes nothing.
+  waits for its turn throws `CancellationError`, sends nothing and closes nothing. A pairing that
+  reconnects partway through holds the replacement transport the same way for the rest of the call,
+  so a second device or ceremony on it waits too.
 - `LedgerExchangeNotStarted`, the error a transport's `exchange(_:timeout:)` throws to report that
   this exchange never sent anything, such as a caller cancelled while queued behind another exchange
   on the same transport; the SDK's own commands normalize it to `CancellationError`. `LedgerDevice`'s

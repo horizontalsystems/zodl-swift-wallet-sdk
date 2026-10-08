@@ -16,10 +16,13 @@ import Foundation
 /// queued, waiting for another ceremony already in progress, throws `CancellationError` without
 /// closing anything: it never reached the transport.
 ///
-/// Every call holds the transport for all of its commands, and so does every other ceremony the SDK
-/// runs over a transport (another `LedgerDevice` over the same transport, a signing ceremony, an app
-/// switch): a call made while any of them is in progress waits for it, so no two of them interleave
-/// their commands on the device. See `LedgerCeremony`.
+/// A `LedgerDevice` runs one call at a time; a second call made while one is in progress waits for
+/// it. The call holding the device also holds its transport for all of its commands, and so does
+/// every other ceremony the SDK runs over a transport (another `LedgerDevice` over the same
+/// transport, a signing ceremony, an app switch): a call made while any of them is in progress waits
+/// for it, so no two of them interleave their commands on the device. A call that reconnects
+/// mid-flight -- see `pairAccount`'s `reconnect` parameter -- holds its replacement transport the
+/// same way for the rest of the call. See `LedgerCeremony`.
 ///
 /// The caller owns every transport: the one passed to `init` and every one a `pairAccount`
 /// `reconnect` function returns. This closes a transport whose exchange failed (closing is idempotent)
@@ -51,6 +54,21 @@ public actor LedgerDevice {
     /// this; build a new device over that one.
     public private(set) var transport: LedgerAPDUTransport
     private let networkType: NetworkType
+
+    /// Serializes every call on this one device instance, taken before the transport's own ceremony
+    /// gate and held for as long as the call runs, including a `pairAccount` that reconnects to
+    /// another transport partway through. The order is always this gate first, then a ceremony gate:
+    /// `LedgerSigner` and `LedgerZcashApp` take only a ceremony gate and never this one, so the two
+    /// never wait on each other in reverse order, and acquiring them in this one, fixed order cannot
+    /// deadlock.
+    private let gate = LedgerSerialGate()
+
+    /// How many calls are queued behind the one currently running on this device. Test-only
+    /// visibility into otherwise-private state, so a test can wait for a caller to actually be
+    /// queued instead of guessing with a sleep.
+    var queuedCount: Int {
+        get async { await gate.queuedCount }
+    }
 
     /// - Parameters:
     ///   - transport: The connection to the device, such as a ``LedgerBluetoothTransport``.
@@ -116,10 +134,14 @@ public actor LedgerDevice {
     ///     ``defaultPairingReadTimeout`` to detect a stalled device early. `.infinity` means no cap on
     ///     the reads' one reconnect either: it still runs once, just unbounded, instead of trapping.
     ///   - reconnect: Opens a fresh connection to the same device, for one retry of the reads before
-    ///     the export. `nil` for no retry. It runs while this call holds the transport's ceremony
-    ///     gate, which is not reentrant: it must not call this device, nor run any other ceremony
-    ///     over this device's ``transport``, directly or through anything that waits on one, or it
-    ///     deadlocks. The transport it returns is a new one and is not under that gate.
+    ///     the export. `nil` for no retry. It runs while this call holds the device's own gate and the
+    ///     original transport's ceremony gate, neither of which is reentrant: it must not call this
+    ///     device, nor run any other ceremony over this device's ``transport``, directly or through
+    ///     anything that waits on one, or it deadlocks. The transport it returns is a new one and is
+    ///     not under that ceremony gate while `reconnect` itself runs; once adopted, this call takes
+    ///     that transport's own ceremony gate too, and holds it for everything that follows -- the
+    ///     retried reads, the export and the identity check -- so the replacement is held for the
+    ///     rest of the call exactly as the original transport was.
     /// - Throws: ``ZcashError/ledgerAppTooOld(_:)`` when the app cannot sign transactions for this SDK,
     ///   ``ZcashError/ledgerUserRejected`` when the user declines the export,
     ///   ``ZcashError/ledgerDeviceMismatch`` when the exported key of account 0 does not derive the
@@ -135,26 +157,27 @@ public actor LedgerDevice {
     ) async throws -> LedgerAccountPairing {
         let networkType = self.networkType
         return try await serialized {
-            let (appVersion, identity) = try await self.readBeforeExport(readTimeout: readTimeout, reconnect: reconnect)
-            let encodedUFVK = try await self.exportUFVK(zip32AccountIndex: zip32AccountIndex)
+            try await self.readBeforeExport(readTimeout: readTimeout, reconnect: reconnect) { appVersion, identity in
+                let encodedUFVK = try await self.exportUFVK(zip32AccountIndex: zip32AccountIndex)
 
-            let ufvk: UnifiedFullViewingKey
-            do {
-                ufvk = try UnifiedFullViewingKey(encoding: encodedUFVK, network: networkType)
-            } catch {
-                throw ZcashError.ledgerMalformedReply("the exported viewing key is not a unified full viewing key for this network")
+                let ufvk: UnifiedFullViewingKey
+                do {
+                    ufvk = try UnifiedFullViewingKey(encoding: encodedUFVK, network: networkType)
+                } catch {
+                    throw ZcashError.ledgerMalformedReply("the exported viewing key is not a unified full viewing key for this network")
+                }
+
+                // Only the key of account 0 derives the identity; see the method documentation.
+                if zip32AccountIndex.index == 0 {
+                    try ZcashLedgerBackend.checkAccountZeroIdentity(ufvk: ufvk, identity: identity, networkType: networkType)
+                }
+
+                return LedgerAccountPairing(
+                    ufvk: ufvk,
+                    binding: LedgerAccountBinding(deviceIdentity: identity, zip32AccountIndex: zip32AccountIndex),
+                    appVersion: appVersion
+                )
             }
-
-            // Only the key of account 0 derives the identity; see the method documentation.
-            if zip32AccountIndex.index == 0 {
-                try ZcashLedgerBackend.checkAccountZeroIdentity(ufvk: ufvk, identity: identity, networkType: networkType)
-            }
-
-            return LedgerAccountPairing(
-                ufvk: ufvk,
-                binding: LedgerAccountBinding(deviceIdentity: identity, zip32AccountIndex: zip32AccountIndex),
-                appVersion: appVersion
-            )
         }
     }
 
@@ -240,21 +263,37 @@ public actor LedgerDevice {
     // MARK: - Commands
 
     /// The reads before the export, retried once over a transport from `reconnect` when the first
-    /// attempt fails on the connection. `reconnect` is raced against `readTimeout`, the same race
-    /// `LedgerZcashApp` runs during the app switch: a `reconnect` that is still running once that time
-    /// is up fails as ``ZcashError/ledgerBluetoothConnectionFailed(_:)``, and a transport it produces
-    /// after losing that race is closed rather than adopted.
-    private func readBeforeExport(
+    /// attempt fails on the connection, followed by `afterReads` -- the export and whatever depends
+    /// on its reply. `reconnect` is raced against `readTimeout`, the same race `LedgerZcashApp` runs
+    /// during the app switch: a `reconnect` that is still running once that time is up fails as
+    /// ``ZcashError/ledgerBluetoothConnectionFailed(_:)``, and a transport it produces after losing
+    /// that race is closed rather than adopted.
+    ///
+    /// A retry moves ``transport`` to the reconnected one and keeps it held for the rest of the call:
+    /// `afterReads` runs inside `LedgerCeremony.run(on:)` on that transport, nested inside the
+    /// ceremony `serialized` already holds on the original one. The two are different transport
+    /// instances, so the nesting cannot deadlock, and no other ceremony on the reconnected transport
+    /// can run until `afterReads` returns. `afterReads` itself is never retried, on the first attempt
+    /// or after a reconnect: only a failure of the reads before it is.
+    private func readBeforeExport<T>(
         readTimeout: TimeInterval,
-        reconnect: (@Sendable () async throws -> any LedgerAPDUTransport)?
-    ) async throws -> (LedgerAppVersion, LedgerDeviceIdentity) {
+        reconnect: (@Sendable () async throws -> any LedgerAPDUTransport)?,
+        afterReads: (LedgerAppVersion, LedgerDeviceIdentity) async throws -> T
+    ) async throws -> T {
+        let appVersion: LedgerAppVersion
+        let identity: LedgerDeviceIdentity
         do {
-            return try await readAppVersionAndIdentity(timeout: readTimeout)
+            (appVersion, identity) = try await readAppVersionAndIdentity(timeout: readTimeout)
         } catch {
             guard let reconnect, isLinkFailure(error) else { throw error }
-            transport = try await raceReconnect(reconnect, timeout: readTimeout)
-            return try await readAppVersionAndIdentity(timeout: readTimeout)
+            let replacement = try await raceReconnect(reconnect, timeout: readTimeout)
+            transport = replacement
+            return try await LedgerCeremony.run(on: replacement) {
+                let (appVersion, identity) = try await self.readAppVersionAndIdentity(timeout: readTimeout)
+                return try await afterReads(appVersion, identity)
+            }
         }
+        return try await afterReads(appVersion, identity)
     }
 
     private func readAppVersionAndIdentity(timeout: TimeInterval) async throws -> (LedgerAppVersion, LedgerDeviceIdentity) {
@@ -304,26 +343,41 @@ public actor LedgerDevice {
         }
     }
 
-    /// Runs `operation` once no other ceremony on this device's transport is in progress, and converts
-    /// its failure into the public error.
+    /// Runs `operation` once no other call on this device, and no other ceremony on its transport, is
+    /// in progress, and converts its failure into the public error.
     private func serialized<T>(_ operation: () async throws -> T) async throws -> T {
-        // A call cancelled while queued never reaches the device, so it closes nothing;
-        // `LedgerCeremony.run` throws the `CancellationError` for it.
-        try await LedgerCeremony.run(on: transport) {
-            do {
-                return try await operation()
-            } catch {
-                if error is LedgerExchangeNotStarted {
-                    // The transport refused the exchange before sending anything: the device never
-                    // saw it, so the transport stays open for whoever is using it.
-                } else if error is CancellationError || Task.isCancelled {
-                    // The call holds the device, which can be in the middle of a command or an
-                    // exchange. Closing is idempotent, so a transport that a failed exchange closed
-                    // is not affected.
-                    await transport.close()
+        // A call cancelled while only queued here -- for this device, or for the transport's ceremony
+        // gate just below -- never reaches the device, so it closes nothing: this throws
+        // `CancellationError` before `gate.acquire()` returns, and `LedgerCeremony.run` does the same
+        // for its own gate.
+        try await gate.acquire()
+
+        let startingTransport = transport
+        do {
+            let result = try await LedgerCeremony.run(on: startingTransport) {
+                do {
+                    return try await operation()
+                } catch {
+                    if error is LedgerExchangeNotStarted {
+                        // The transport refused the exchange before sending anything: the device never
+                        // saw it, so the transport stays open for whoever is using it.
+                    } else if error is CancellationError || Task.isCancelled {
+                        // The call holds the device, which can be in the middle of a command or an
+                        // exchange. `transport` is read again here, live, instead of reusing
+                        // `startingTransport`: a call that reconnected partway through
+                        // (`readBeforeExport`) has moved it on, and this closes the one the call is
+                        // actually on when it fails. Closing is idempotent, so a transport a failed
+                        // exchange already closed is not affected.
+                        await transport.close()
+                    }
+                    throw ledgerZcashError(error)
                 }
-                throw ledgerZcashError(error)
             }
+            await gate.release()
+            return result
+        } catch {
+            await gate.release()
+            throw error
         }
     }
 }
