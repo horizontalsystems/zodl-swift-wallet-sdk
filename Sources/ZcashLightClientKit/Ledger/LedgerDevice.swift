@@ -141,11 +141,13 @@ public actor LedgerDevice {
     ///     the export. `nil` for no retry. It runs while this call holds the device's own gate and the
     ///     original transport's ceremony gate, neither of which is reentrant: it must not call this
     ///     device, nor run any other ceremony over this device's ``transport``, directly or through
-    ///     anything that waits on one, or it deadlocks. The transport it returns is a new one and is
-    ///     not under that ceremony gate while `reconnect` itself runs; this call then takes that
+    ///     anything that waits on one, or it deadlocks. The transport it returns is normally a new
+    ///     one, not under that ceremony gate while `reconnect` itself runs; this call then takes that
     ///     transport's own ceremony gate too, adopts it as ``transport`` once it holds it, and keeps
     ///     it for everything that follows -- the retried reads, the export and the identity check --
     ///     so the replacement is held for the rest of the call exactly as the original transport was.
+    ///     A `reconnect` that hands back this device's own ``transport`` (one that reconnects
+    ///     internally) is accepted too; that one is already held.
     /// - Throws: ``ZcashError/ledgerAppTooOld(_:)`` when the app cannot sign transactions for this SDK,
     ///   ``ZcashError/ledgerUserRejected`` when the user declines the export,
     ///   ``ZcashError/ledgerDeviceMismatch`` when the exported key of account 0 does not derive the
@@ -293,15 +295,21 @@ public actor LedgerDevice {
         } catch {
             guard let reconnect, isLinkFailure(error) else { throw error }
             let replacement = try await raceReconnect(reconnect, timeout: readTimeout)
-            let hold = try await LedgerCeremony.adopt(replacement)
+            // A `reconnect` that hands back this very transport -- one that reconnects internally,
+            // whose `close()` only dropped the link -- is already held by `serialized`; taking its
+            // ceremony again would wait on this call itself.
+            var hold: LedgerCeremonyHold?
+            if ObjectIdentifier(replacement) != ObjectIdentifier(transport) {
+                hold = try await LedgerCeremony.adopt(replacement)
+            }
             transport = replacement
             do {
                 let (appVersion, identity) = try await readAppVersionAndIdentity(timeout: readTimeout)
                 let result = try await afterReads(appVersion, identity)
-                await hold.release()
+                await hold?.release()
                 return result
             } catch {
-                await hold.release()
+                await hold?.release()
                 throw error
             }
         }

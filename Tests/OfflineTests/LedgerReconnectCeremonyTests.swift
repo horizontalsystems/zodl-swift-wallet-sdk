@@ -181,6 +181,53 @@ final class LedgerReconnectCeremonyTests: XCTestCase {
         XCTAssertEqual(freshCloseCount, 0, "a call cancelled while only queued for its turn closes nothing")
     }
 
+    // MARK: - A reconnect that hands back the same transport
+
+    /// A transport that reconnects internally hands itself back from `reconnect`. The pairing already
+    /// holds that transport's ceremony, so it must not take it a second time -- that would wait on
+    /// itself forever -- and the retried reads and the export run on it as on any replacement.
+    func testAReconnectThatReturnsTheSameTransportDoesNotWaitOnItself() async throws {
+        let ufvk = try testnetUFVK()
+        let chunks = LedgerReplies.viewingKeyChunks(ufvk.stringEncoded)
+        // The first read fails on the link; everything after answers.
+        let transport = ScriptedLedgerTransport { apdu, history in
+            if history.isEmpty { throw ZcashError.ledgerTimeout }
+            switch apdu[1] {
+            case LedgerReplies.getFirmwareVersion:
+                return LedgerReplies.firmwareVersion(3, 9, 3)
+            case LedgerReplies.getWalletPublicKey:
+                return LedgerReplies.walletPublicKey(LedgerReplies.seedIdentityPoint)
+            case LedgerReplies.getVK:
+                return chunks[history.filter { $0[1] == LedgerReplies.getVK }.count]
+            default:
+                return LedgerReplies.status(0x6D00)
+            }
+        }
+        let ledger = LedgerDevice(transport: transport, networkType: .testnet)
+
+        let pairing = Task {
+            try await ledger.pairAccount(zip32AccountIndex: Zip32AccountIndex(0), reconnect: { transport })
+        }
+        // A pairing that waits on itself never returns: cancel it after a while, so the regression
+        // fails this test with `CancellationError` instead of hanging it.
+        let watchdog = Task {
+            try await Task.sleep(nanoseconds: 5_000_000_000)
+            pairing.cancel()
+        }
+        let result = try await pairing.value
+        watchdog.cancel()
+
+        XCTAssertEqual(result.ufvk, ufvk)
+        let instructions = await transport.instructions
+        XCTAssertEqual(
+            instructions,
+            [LedgerReplies.getFirmwareVersion] + Array(pairingThenProbeInstructions(ufvk: ufvk.stringEncoded).dropLast()),
+            "the failed read, then the retried reads and the export, all on the one transport"
+        )
+        let current = await ledger.transport
+        XCTAssertEqual(ObjectIdentifier(current), ObjectIdentifier(transport))
+    }
+
     // MARK: - A replacement another ceremony holds
 
     /// The transport a `reconnect` returns can already be in use: here another device's pairing holds

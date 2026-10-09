@@ -376,10 +376,18 @@ private final class AppSwitch {
     /// nothing else uses is taken at once; one another ceremony holds is waited for, and a
     /// cancellation while queued throws without adopting it, so the switch's cleanup closes nothing
     /// of the holder's -- `current` is still the transport that dropped, already closed.
+    ///
+    /// `reconnect` may hand back a transport the switch already holds: the previous replacement
+    /// again, or the caller's own transport, when the transport reconnects internally and `close()`
+    /// only drops the link. The previous replacement's hold is therefore released before the new one
+    /// is taken (the previous replacement is already closed by then, so nothing slips in between),
+    /// and the caller's own transport is not taken at all, since the public wrapper holds it for the
+    /// whole switch; either would otherwise wait on this switch itself.
     private func adopt(_ replacement: any LedgerAPDUTransport) async throws {
-        let hold = try await LedgerCeremony.adopt(replacement)
         await releaseReplacementHold()
-        replacementHold = hold
+        if ObjectIdentifier(replacement) != ObjectIdentifier(original) {
+            replacementHold = try await LedgerCeremony.adopt(replacement)
+        }
         current = replacement
         didReplaceTransport = true
         usable = true
