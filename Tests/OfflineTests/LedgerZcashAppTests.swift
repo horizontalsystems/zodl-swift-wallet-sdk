@@ -176,6 +176,50 @@ private actor TimeLog {
     }
 }
 
+/// A transport that stands in for one reconnecting internally: `reconnect` hands the very same
+/// instance back, as its own `close()` only drops the link rather than ending it. Parks on its first
+/// reply, for `releaseFirstReply()`, so a test can queue another ceremony behind the switch's hold
+/// before anything proceeds; its third call fails on the connection, to drive a second reconnect onto
+/// this same instance, and every call after that succeeds.
+private actor SelfReconnectingTransport: LedgerAPDUTransport {
+    private(set) var received: [Data] = []
+    private(set) var closeCount = 0
+    private(set) var isWaitingForFirstReply = false
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+    private var released = false
+
+    var instructions: [UInt8] { received.map { $0[1] } }
+
+    func exchange(_ apdu: Data, timeout: TimeInterval?) async throws -> Data {
+        let index = received.count
+        received.append(apdu)
+        if index == 0, !released {
+            isWaitingForFirstReply = true
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                releaseContinuation = continuation
+            }
+            isWaitingForFirstReply = false
+        }
+        switch index {
+        case 0: return dashboardReply
+        case 1: return LedgerReplies.status(0x9000)
+        case 2: throw ZcashError.ledgerTimeout
+        default: return zcashReply
+        }
+    }
+
+    func close() async {
+        closeCount += 1
+    }
+
+    /// Lets the first reply, parked in `exchange(_:timeout:)`, proceed.
+    func releaseFirstReply() {
+        released = true
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+}
+
 // MARK: - Tests
 
 final class LedgerZcashAppTests: XCTestCase {
@@ -1343,5 +1387,46 @@ final class LedgerZcashAppTests: XCTestCase {
         XCTAssertTrue(received.isEmpty, "the cancelled switch never sent anything on the replacement")
         let originalCloseCount = await original.closeCount
         XCTAssertEqual(originalCloseCount, 1, "the dropped original was closed when its link failed, and only then")
+    }
+
+    // MARK: - A reconnect that hands back the replacement the switch already holds
+
+    /// `reconnect` can hand back the very transport the switch already holds as its replacement: one
+    /// that reconnects internally, whose `close()` only drops the link. The switch's hold on it must
+    /// not be released and retaken in that case: doing so would hand the gate to whatever ceremony is
+    /// queued behind it, letting that ceremony's command land on the transport between the switch's
+    /// own commands, on a connection the ceremony finds open again.
+    func testASecondReconnectToTheSameReplacementKeepsTheSwitchsHold() async throws {
+        let original = ScriptedLedgerTransport { _, history in
+            if history.isEmpty { throw ZcashError.ledgerBluetoothDisconnected }
+            return dashboardReply
+        }
+        let flapping = SelfReconnectingTransport()
+
+        let switching = Task { try await launcher.ensureZcashAppOpen(transport: original) { flapping } }
+        // The switch has adopted `flapping` and sent its first query, which is parked here: it still
+        // holds `flapping`'s ceremony, giving this test all the time it needs before anything races.
+        await expectEventually { await flapping.isWaitingForFirstReply }
+
+        let otherCeremony = Task {
+            try await LedgerCeremony.run(on: flapping) {
+                _ = try await flapping.exchange(Data([0xFF, 0xEE, 0x00, 0x00, 0x00]), timeout: 1)
+            }
+        }
+        // Waits for the other ceremony to have actually queued behind the switch's hold before
+        // letting the parked reply go.
+        await expectEventually { await LedgerCeremonyGates.shared.queuedCeremonies(on: flapping) == 1 }
+        await flapping.releaseFirstReply()
+
+        let result = try await switching.value
+        try await otherCeremony.value
+
+        XCTAssertTrue(isSame(result, flapping))
+        let instructions = await flapping.instructions
+        XCTAssertEqual(
+            instructions,
+            [0x01, 0xD8, 0x01, 0x01, 0xEE],
+            "the other ceremony's command runs only once the switch is completely done with the transport, not between its own"
+        )
     }
 }

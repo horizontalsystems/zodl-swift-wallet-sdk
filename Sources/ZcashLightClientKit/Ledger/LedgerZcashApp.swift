@@ -378,13 +378,20 @@ private final class AppSwitch {
     /// cancellation while queued throws without adopting it, so the switch's cleanup closes nothing
     /// of the holder's -- `current` is still the transport that dropped, already closed.
     ///
-    /// `reconnect` may hand back a transport the switch already holds: the previous replacement
-    /// again, or the caller's own transport, when the transport reconnects internally and `close()`
-    /// only drops the link. The previous replacement's hold is therefore released before the new one
-    /// is taken (the previous replacement is already closed by then, so nothing slips in between),
-    /// and the caller's own transport is not taken at all, since the public wrapper holds it for the
-    /// whole switch; either would otherwise wait on this switch itself.
+    /// `reconnect` may hand back a transport the switch already holds, in either of two ways. The
+    /// switch's own current replacement, from a transport that reconnects internally and whose
+    /// `close()` only drops the link, keeps the hold it already has: releasing it and taking it again
+    /// would open a gap in which a ceremony queued behind it is handed the gate and runs its commands
+    /// on a transport that is open again, before the switch gets it back. The caller's own transport
+    /// is not taken at all, since the public wrapper holds it for the whole switch; taking it here
+    /// would wait on this switch itself. Anything else releases whatever hold the switch currently
+    /// has, if any, and takes the new replacement fresh, the same as a first reconnect.
     private func adopt(_ replacement: any LedgerAPDUTransport) async throws {
+        if ObjectIdentifier(replacement) == ObjectIdentifier(current), replacementHold != nil {
+            didReplaceTransport = true
+            usable = true
+            return
+        }
         await releaseReplacementHold()
         if ObjectIdentifier(replacement) != ObjectIdentifier(original) {
             replacementHold = try await LedgerCeremony.adopt(replacement)
