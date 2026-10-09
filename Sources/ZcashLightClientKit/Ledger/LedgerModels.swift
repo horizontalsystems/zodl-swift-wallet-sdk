@@ -74,7 +74,7 @@ public struct LedgerAppVersion: Equatable, Hashable, Codable, Sendable, CustomSt
 
 /// What a wallet stores next to an account imported from a Ledger device, and passes back when the
 /// account signs.
-public struct LedgerAccountBinding: Equatable, Hashable, Codable {
+public struct LedgerAccountBinding: Equatable, Hashable, Codable, Sendable {
     /// The device the account was paired with.
     public let deviceIdentity: LedgerDeviceIdentity
 
@@ -93,7 +93,7 @@ public struct LedgerAccountBinding: Equatable, Hashable, Codable {
 /// passing `nil` for the seed fingerprint and the ZIP 32 account index (a Ledger never reveals its seed
 /// fingerprint), `.spending` as the purpose and ``Account/ledgerKeySource`` as the key source, and store
 /// ``binding`` next to the imported account.
-public struct LedgerAccountPairing: Equatable {
+public struct LedgerAccountPairing: Equatable, Sendable {
     /// The account's unified full viewing key, exported by the device after the user approved it.
     public let ufvk: UnifiedFullViewingKey
 

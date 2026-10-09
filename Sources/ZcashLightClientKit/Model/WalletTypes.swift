@@ -65,7 +65,7 @@ public struct TransparentAccountPrivKey: Equatable, Undescribable {
 }
 
 /// A ZIP 316 Unified Full Viewing Key.
-public struct UnifiedFullViewingKey: Equatable, StringEncoded, Undescribable, Hashable, Codable {
+public struct UnifiedFullViewingKey: Equatable, StringEncoded, Undescribable, Hashable, Codable, Sendable {
     let encoding: String
 
     public var stringEncoded: String { encoding }
@@ -230,7 +230,7 @@ public struct SaplingAddress: Equatable, StringEncoded {
     }
 }
 
-public struct UnifiedAddress: Equatable, StringEncoded, Codable, Hashable {
+public struct UnifiedAddress: Equatable, StringEncoded, Codable, Hashable, Sendable {
     let networkType: NetworkType
 
     public enum ReceiverTypecodes: Hashable {

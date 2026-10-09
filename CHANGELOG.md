@@ -45,6 +45,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   waits for its turn throws `CancellationError`, sends nothing and closes nothing. A pairing that
   reconnects partway through holds the replacement transport the same way for the rest of the call,
   so a second device or ceremony on it waits too.
+- `LedgerAccountBinding`, `LedgerAccountPairing`, `UnifiedFullViewingKey`, `UnifiedAddress`,
+  `Zip32AccountIndex` and `NetworkType` are `Sendable`, so everything `LedgerDevice`'s methods take
+  and return crosses its actor boundary under Swift 6 strict concurrency without `@preconcurrency`.
 - `LedgerExchangeNotStarted`, the error a transport's `exchange(_:timeout:)` throws to report that
   this exchange never sent anything, such as a caller cancelled while queued behind another exchange
   on the same transport; the SDK's own commands normalize it to `CancellationError`. `LedgerDevice`'s
