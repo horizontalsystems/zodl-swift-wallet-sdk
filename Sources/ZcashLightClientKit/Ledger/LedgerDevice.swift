@@ -129,7 +129,7 @@ public actor LedgerDevice {
     /// with the ceremony holding it, and this call closes nothing of theirs.
     /// The call is raced against `readTimeout`: a `reconnect` still running once that time is up fails
     /// as ``ZcashError/ledgerBluetoothConnectionFailed(_:)`` instead, and a transport it produces after
-    /// losing that race is closed rather than adopted.
+    /// losing that race is closed, unless another ceremony already holds it, rather than adopted.
     ///
     /// - Parameters:
     ///   - zip32AccountIndex: The account to export.
@@ -152,7 +152,8 @@ public actor LedgerDevice {
     ///   ``ZcashError/ledgerUserRejected`` when the user declines the export,
     ///   ``ZcashError/ledgerDeviceMismatch`` when the exported key of account 0 does not derive the
     ///   device's identity, ``ZcashError/ledgerMalformedReply(_:)`` when the exported key of account 0
-    ///   has no transparent item,
+    ///   has no transparent item, or when the exported key of any account has no Orchard item -- the
+    ///   signing session refuses an account without one,
     ///   ``ZcashError/ledgerDerivationBudgetExhausted`` when the user must reopen the Zcash app first,
     ///   ``ZcashError/ledgerBluetoothConnectionFailed(_:)`` when a retry's own `reconnect` does not
     ///   finish within `readTimeout`.
@@ -176,6 +177,16 @@ public actor LedgerDevice {
                 // Only the key of account 0 derives the identity; see the method documentation.
                 if zip32AccountIndex.index == 0 {
                     try ZcashLedgerBackend.checkAccountZeroIdentity(ufvk: ufvk, identity: identity, networkType: networkType)
+                }
+
+                // Every account's key needs an Orchard item: the signing session refuses one
+                // without it. `expectedUnifiedAddress` reports a missing Orchard item as
+                // `ledgerInvalidInput`, the only input error it can raise for a key just parsed for
+                // this network; any other error passes through unchanged.
+                do {
+                    _ = try Self.expectedUnifiedAddress(ufvk: ufvk, networkType: networkType)
+                } catch ZcashError.ledgerInvalidInput {
+                    throw ZcashError.ledgerMalformedReply("the exported viewing key has no Orchard item")
                 }
 
                 return LedgerAccountPairing(
@@ -273,7 +284,7 @@ public actor LedgerDevice {
     /// on its reply. `reconnect` is raced against `readTimeout`, the same race `LedgerZcashApp` runs
     /// during the app switch: a `reconnect` that is still running once that time is up fails as
     /// ``ZcashError/ledgerBluetoothConnectionFailed(_:)``, and a transport it produces after losing
-    /// that race is closed rather than adopted.
+    /// that race is closed, unless another ceremony already holds it, rather than adopted.
     ///
     /// A retry takes the reconnected transport's ceremony (`LedgerCeremony.adopt(_:)`), nested inside
     /// the ceremony `serialized` already holds on the original one, and only then moves ``transport``
@@ -283,6 +294,11 @@ public actor LedgerDevice {
     /// and no other ceremony on the reconnected transport can run until `afterReads` returns.
     /// `afterReads` itself is never retried, on the first attempt or after a reconnect: only a
     /// failure of the reads before it is.
+    ///
+    /// Once this call does hold the replacement's own ceremony, a cancellation closes the
+    /// replacement before giving up that hold, so a ceremony queued behind it is not handed a
+    /// transport on its way out; `serialized`'s own close of the live transport, reached once this
+    /// error propagates out of here, then finds it already closed.
     private func readBeforeExport<T>(
         readTimeout: TimeInterval,
         reconnect: (@Sendable () async throws -> any LedgerAPDUTransport)?,
@@ -309,6 +325,22 @@ public actor LedgerDevice {
                 await hold?.release()
                 return result
             } catch {
+                // Only a replacement this call itself adopted (`hold != nil`) is closed here.
+                // `hold == nil` means `reconnect` handed back the device's own transport, already
+                // held by `serialized`'s outer ceremony, which closes it on this same condition.
+                if let hold {
+                    if error is LedgerExchangeNotStarted {
+                        // The transport never saw this exchange: nothing queued behind it needs
+                        // protecting from a close.
+                    } else if error is CancellationError || Task.isCancelled {
+                        // A ceremony queued behind this hold must not be handed a transport this
+                        // call is giving up on, so it is closed before the release admits the next
+                        // one. `serialized`'s own close of the live transport, once this error
+                        // reaches it, then finds this one already closed, since closing is
+                        // idempotent.
+                        await replacement.close()
+                    }
+                }
                 await hold?.release()
                 throw error
             }
@@ -386,8 +418,9 @@ public actor LedgerDevice {
                         // exchange. `transport` is read again here, live, instead of reusing
                         // `startingTransport`: a call that reconnected partway through
                         // (`readBeforeExport`) has moved it on, and this closes the one the call is
-                        // actually on when it fails. Closing is idempotent, so a transport a failed
-                        // exchange already closed is not affected.
+                        // actually on when it fails. Closing is idempotent, so a transport already
+                        // closed -- by a failed exchange, or by `readBeforeExport`'s own close of a
+                        // replacement it gave up on cancellation -- is not affected.
                         await transport.close()
                     }
                     throw ledgerZcashError(error)

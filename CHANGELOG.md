@@ -65,7 +65,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refuses the pairing with `ZcashError.ledgerDeviceMismatch` when it is not the identity the device
   gave, or with `ledgerMalformedReply` when the key has no transparent item. The key of any other
   account does not derive the identity, so `pairAccount` does not check it for those accounts;
-  `displayUnifiedAddress` checks their keys. The app-version and identity reads before the export take `readTimeout` (`LedgerDevice.defaultReadTimeout`,
+  `displayUnifiedAddress` checks their keys. Every account's exported key, account 0 included, is
+  also refused with `ledgerMalformedReply` when it has no Orchard item, since the signing session
+  needs one. The app-version and identity reads before the export take `readTimeout` (`LedgerDevice.defaultReadTimeout`,
   the engine's normal timeout, by default; `LedgerDevice.defaultPairingReadTimeout`, 10 seconds,
   detects a stalled device early).
   When one of those reads fails on the connection and `reconnect` is given, the failed transport
@@ -115,7 +117,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a reconnect before those 10 seconds can end the wait, and the time a reconnect that succeeds
   takes does not count towards them. Each reconnect during that wait has 10 seconds of its own,
   enforced for a `reconnect` that honors cancellation; one that ignores it is waited for, and any
-  transport it then produces is closed rather than used. A
+  transport it then produces is closed, unless another ceremony is already running on it, rather
+  than used. A
   failed one restarts the 10-second wait, since
   the device may still be rebooting into the app, and is tried again after 500 milliseconds, then
   after twice the previous wait, at most 2 seconds. It keeps trying for 10 seconds from the first

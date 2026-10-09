@@ -176,6 +176,50 @@ private actor TimeLog {
     }
 }
 
+/// A transport that stands in for one reconnecting internally: `reconnect` hands the very same
+/// instance back, as its own `close()` only drops the link rather than ending it. Parks on its first
+/// reply, for `releaseFirstReply()`, so a test can queue another ceremony behind the switch's hold
+/// before anything proceeds; its third call fails on the connection, to drive a second reconnect onto
+/// this same instance, and every call after that succeeds.
+private actor SelfReconnectingTransport: LedgerAPDUTransport {
+    private(set) var received: [Data] = []
+    private(set) var closeCount = 0
+    private(set) var isWaitingForFirstReply = false
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+    private var released = false
+
+    var instructions: [UInt8] { received.map { $0[1] } }
+
+    func exchange(_ apdu: Data, timeout: TimeInterval?) async throws -> Data {
+        let index = received.count
+        received.append(apdu)
+        if index == 0, !released {
+            isWaitingForFirstReply = true
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                releaseContinuation = continuation
+            }
+            isWaitingForFirstReply = false
+        }
+        switch index {
+        case 0: return dashboardReply
+        case 1: return LedgerReplies.status(0x9000)
+        case 2: throw ZcashError.ledgerTimeout
+        default: return zcashReply
+        }
+    }
+
+    func close() async {
+        closeCount += 1
+    }
+
+    /// Lets the first reply, parked in `exchange(_:timeout:)`, proceed.
+    func releaseFirstReply() {
+        released = true
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+}
+
 // MARK: - Tests
 
 final class LedgerZcashAppTests: XCTestCase {
@@ -701,6 +745,108 @@ final class LedgerZcashAppTests: XCTestCase {
         XCTAssertEqual(lateCloseCount, 1, "a transport produced after the caller cancels is closed, not leaked")
         let lateReceived = await late.received
         XCTAssertEqual(lateReceived.count, 0, "the loser is closed before anything is sent on it")
+    }
+
+    // MARK: - A late reconnect result another ceremony holds
+
+    /// The transport `reconnect` hands back after losing the race to the timeout can already be held
+    /// by another ceremony. Closing it then would disconnect that ceremony, so it is left open
+    /// instead, and the ceremony holding it finishes undisturbed.
+    func testALateReconnectResultFromATimedOutRaceIsLeftOpenWhenAnotherCeremonyHoldsIt() async throws {
+        let original = ScriptedLedgerTransport { _, history in
+            if history.count == 1 { throw ZcashError.ledgerBluetoothDisconnected }
+            return dashboardReply
+        }
+        let late = scripted([dashboardReply])
+        let afterSwitch = scripted([zcashReply])
+        let hangingLauncher = LedgerAppLauncher(
+            queryTimeout: queryTimeout,
+            pollTimeout: pollTimeout,
+            pollInterval: pollInterval,
+            transitionTimeout: transitionTimeout,
+            switchReconnectTimeout: 0.05,
+            switchReconnectWindow: switchReconnectWindow,
+            switchReconnectFirstBackoff: switchReconnectFirstBackoff,
+            switchReconnectMaxBackoff: switchReconnectMaxBackoff,
+            switchOverallTimeout: 60
+        )
+        let reconnects = CallCounter()
+        let entered = Latch()
+        let release = Latch()
+        let holder = holdCeremony(on: late, entered: entered, release: release)
+        await entered.wait()
+
+        let result = try await hangingLauncher.ensureZcashAppOpen(transport: original) {
+            let count = await reconnects.increment()
+            if count == 1 {
+                // Loses the race to the 50 ms timeout, then ignores its own cancellation and
+                // returns `late` anyway, same as the sibling test without a holder.
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                return late
+            }
+            return afterSwitch
+        }
+
+        XCTAssertTrue(isSame(result, afterSwitch))
+        let lateCloseCount = await late.closeCount
+        XCTAssertEqual(lateCloseCount, 0, "a late result another ceremony holds is not closed")
+
+        await release.open()
+        try await holder.value
+        await expectEventually { await LedgerCeremonyGates.shared.transportsInUse == 0 }
+    }
+
+    /// The same, but the caller's own cancellation ends the race instead of the timeout: `reconnect`
+    /// ignores that cancellation and hands back `late` anyway, which is left open just the same when
+    /// another ceremony holds it.
+    func testALateReconnectResultFromACancelledCallerIsLeftOpenWhenAnotherCeremonyHoldsIt() async throws {
+        actor Entered {
+            private(set) var didEnter = false
+            func mark() { didEnter = true }
+        }
+        let entered = Entered()
+        let original = ScriptedLedgerTransport { _, history in
+            if history.count == 1 { throw ZcashError.ledgerBluetoothDisconnected }
+            return dashboardReply
+        }
+        let late = scripted([dashboardReply])
+        let holdEntered = Latch()
+        let holdRelease = Latch()
+        let holder = holdCeremony(on: late, entered: holdEntered, release: holdRelease)
+        await holdEntered.wait()
+
+        let task = Task {
+            try await launcher.ensureZcashAppOpen(transport: original) {
+                await entered.mark()
+                // Unlike the live Bluetooth connect, ignores the caller's own cancellation: a
+                // detached task does not inherit it, so this keeps running past the caller's cancel
+                // and still hands back `late`, held by another ceremony the whole time.
+                await Task.detached {
+                    try? await Task.sleep(nanoseconds: 300_000_000)
+                }.value
+                return late
+            }
+        }
+        // Spins until the reconnect has actually started, so the cancel below always lands while the
+        // race is in flight.
+        while await !entered.didEnter {
+            await Task.yield()
+        }
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            XCTFail("The caller's own cancellation must propagate")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        let lateCloseCount = await late.closeCount
+        XCTAssertEqual(lateCloseCount, 0, "a late result another ceremony holds is not closed")
+
+        await holdRelease.open()
+        try await holder.value
+        await expectEventually { await LedgerCeremonyGates.shared.transportsInUse == 0 }
     }
 
     /// `reconnectRaceNanoseconds(_:)`'s mapping from `timeout` to the race's `Task.sleep` bound: not
@@ -1241,5 +1387,46 @@ final class LedgerZcashAppTests: XCTestCase {
         XCTAssertTrue(received.isEmpty, "the cancelled switch never sent anything on the replacement")
         let originalCloseCount = await original.closeCount
         XCTAssertEqual(originalCloseCount, 1, "the dropped original was closed when its link failed, and only then")
+    }
+
+    // MARK: - A reconnect that hands back the replacement the switch already holds
+
+    /// `reconnect` can hand back the very transport the switch already holds as its replacement: one
+    /// that reconnects internally, whose `close()` only drops the link. The switch's hold on it must
+    /// not be released and retaken in that case: doing so would hand the gate to whatever ceremony is
+    /// queued behind it, letting that ceremony's command land on the transport between the switch's
+    /// own commands, on a connection the ceremony finds open again.
+    func testASecondReconnectToTheSameReplacementKeepsTheSwitchsHold() async throws {
+        let original = ScriptedLedgerTransport { _, history in
+            if history.isEmpty { throw ZcashError.ledgerBluetoothDisconnected }
+            return dashboardReply
+        }
+        let flapping = SelfReconnectingTransport()
+
+        let switching = Task { try await launcher.ensureZcashAppOpen(transport: original) { flapping } }
+        // The switch has adopted `flapping` and sent its first query, which is parked here: it still
+        // holds `flapping`'s ceremony, giving this test all the time it needs before anything races.
+        await expectEventually { await flapping.isWaitingForFirstReply }
+
+        let otherCeremony = Task {
+            try await LedgerCeremony.run(on: flapping) {
+                _ = try await flapping.exchange(Data([0xFF, 0xEE, 0x00, 0x00, 0x00]), timeout: 1)
+            }
+        }
+        // Waits for the other ceremony to have actually queued behind the switch's hold before
+        // letting the parked reply go.
+        await expectEventually { await LedgerCeremonyGates.shared.queuedCeremonies(on: flapping) == 1 }
+        await flapping.releaseFirstReply()
+
+        let result = try await switching.value
+        try await otherCeremony.value
+
+        XCTAssertTrue(isSame(result, flapping))
+        let instructions = await flapping.instructions
+        XCTAssertEqual(
+            instructions,
+            [0x01, 0xD8, 0x01, 0x01, 0xEE],
+            "the other ceremony's command runs only once the switch is completely done with the transport, not between its own"
+        )
     }
 }

@@ -87,6 +87,25 @@ enum LedgerCeremony {
         }
         return LedgerCeremonyHold(transport: transport, gate: gate)
     }
+
+    /// Closes `transport` unless some ceremony holds it.
+    ///
+    /// A `reconnect` may hand back a transport another ceremony is already running, or the caller's
+    /// own transport reconnecting internally -- `adopt(_:)`'s documentation covers both. Closing such
+    /// a transport out from under its ceremony would disconnect it, so this leaves it alone instead,
+    /// closing only a transport nothing holds.
+    ///
+    /// - Parameters:
+    ///   - transport: The transport to close if nothing holds its ceremony.
+    static func closeIfUnowned(_ transport: any LedgerAPDUTransport) async {
+        let gates = LedgerCeremonyGates.shared
+        let gate = await gates.gate(for: transport)
+        if await gate.tryAcquire() {
+            await transport.close()
+            await gate.release()
+        }
+        await gates.release(transport)
+    }
 }
 
 /// A ceremony's hold on one transport, from `LedgerCeremony.adopt(_:)`; `LedgerCeremony.run(on:_:)`
