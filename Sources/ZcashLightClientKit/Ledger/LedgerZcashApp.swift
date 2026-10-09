@@ -250,7 +250,8 @@ private final class AppSwitch {
             return running
         }
 
-        try await adopt(try await raceReconnect())
+        let replacement = try await raceReconnect()
+        try await adopt(replacement)
         return try await launcher.currentApp(transport: current)
     }
 
@@ -342,7 +343,8 @@ private final class AppSwitch {
     /// propagates uncaught, never as a reconnect failure.
     private func replace() async throws -> ZcashError? {
         do {
-            try await adopt(try await raceReconnect())
+            let replacement = try await raceReconnect()
+            try await adopt(replacement)
             return nil
         } catch {
             guard isLinkFailure(error), let zcashError = error as? ZcashError else { throw error }
