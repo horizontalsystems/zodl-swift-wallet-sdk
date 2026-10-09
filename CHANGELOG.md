@@ -282,8 +282,14 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   synchronizer returns) reports a trusted receive (`isTrusted`, ZIP 315) as `.confirmed` once it
   is 3 blocks deep, the depth at which its funds become spendable, instead of 10. Untrusted
   receives, sent, self-send and shielding transactions are unchanged. No call site needs editing.
-
-### NU7 pre-release crates
+- The Rust logging the SDK installs at load caps the network stack under the sync engine (`h2`,
+  `hyper`, `hyper_util`, `rustls`, `tonic`, `tower`) at `warn`, never above the level the host asks
+  for. `h2` logs every frame it receives at `debug`, tens of thousands of events per resync, each
+  through the os_log and signpost layers on the connection threads themselves. A host at `off`,
+  `error` or `warn` sees no change; a host at `info` or more verbose no longer sees those six
+  crates' `info`, `debug` and `trace` lines. The SDK's own targets, and `zcash_client_backend` (already
+  capped the same way), are unchanged. This is a logging change for every SDK client, not a Ledger
+  one; it rides this release because the Ledger work's device logging surfaced the volume.
 
 - The SDK now builds on the NU7 pre-release generation of the underlying Zcash Rust crates and the
   `zodl-slipstream` 0.4.0-pre.1 engine.
