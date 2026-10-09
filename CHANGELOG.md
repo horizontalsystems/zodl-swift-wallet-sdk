@@ -165,6 +165,20 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sees those six crates' `info`, `debug` and `trace` lines. The SDK's own targets, and
   `zcash_client_backend` (already capped the same way), are unchanged. No call site needs editing.
 
+## Checkpoints
+
+Mainnet
+
+````
+Sources/ZcashLightClientKit/Resources/checkpoints/mainnet/3510000.json
+````
+
+Testnet
+
+````
+Sources/ZcashLightClientKit/Resources/checkpoints/testnet/4480000.json
+````
+
 # 5.1.0 - 2026-10-07
 
 ## Added
