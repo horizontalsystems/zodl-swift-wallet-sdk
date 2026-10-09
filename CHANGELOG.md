@@ -115,7 +115,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a reconnect before those 10 seconds can end the wait, and the time a reconnect that succeeds
   takes does not count towards them. Each reconnect during that wait has 10 seconds of its own,
   enforced for a `reconnect` that honors cancellation; one that ignores it is waited for, and any
-  transport it then produces is closed rather than used. A
+  transport it then produces is closed, unless another ceremony is already running on it, rather
+  than used. A
   failed one restarts the 10-second wait, since
   the device may still be rebooting into the app, and is tried again after 500 milliseconds, then
   after twice the previous wait, at most 2 seconds. It keeps trying for 10 seconds from the first

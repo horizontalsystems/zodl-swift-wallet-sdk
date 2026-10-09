@@ -129,7 +129,7 @@ public actor LedgerDevice {
     /// with the ceremony holding it, and this call closes nothing of theirs.
     /// The call is raced against `readTimeout`: a `reconnect` still running once that time is up fails
     /// as ``ZcashError/ledgerBluetoothConnectionFailed(_:)`` instead, and a transport it produces after
-    /// losing that race is closed rather than adopted.
+    /// losing that race is closed, unless another ceremony already holds it, rather than adopted.
     ///
     /// - Parameters:
     ///   - zip32AccountIndex: The account to export.
@@ -273,7 +273,7 @@ public actor LedgerDevice {
     /// on its reply. `reconnect` is raced against `readTimeout`, the same race `LedgerZcashApp` runs
     /// during the app switch: a `reconnect` that is still running once that time is up fails as
     /// ``ZcashError/ledgerBluetoothConnectionFailed(_:)``, and a transport it produces after losing
-    /// that race is closed rather than adopted.
+    /// that race is closed, unless another ceremony already holds it, rather than adopted.
     ///
     /// A retry takes the reconnected transport's ceremony (`LedgerCeremony.adopt(_:)`), nested inside
     /// the ceremony `serialized` already holds on the original one, and only then moves ``transport``

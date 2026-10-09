@@ -55,7 +55,8 @@ public enum LedgerZcashApp {
     /// followed by such a reconnect before the 10 seconds can end the wait; once they have passed, a
     /// link replaced after them gets one more poll. Each of those reconnects gets 10 seconds of its own,
     /// enforced for a `reconnect` that honors cancellation: past them it is cancelled, and any transport
-    /// it still produces is closed rather than used. One that ignores cancellation is waited for. None
+    /// it still produces is closed, unless another ceremony already holds it, rather than used. One
+    /// that ignores cancellation is waited for. None
     /// of it waits on Bluetooth pairing, since the phone has already bonded with the device. A
     /// reconnect that fails is tried again, since the device may still be
     /// rebooting into the app: first after 500 milliseconds, then after twice the previous wait, at
@@ -585,10 +586,11 @@ func reconnectRaceNanoseconds(_ timeout: TimeInterval) -> UInt64? {
 /// Races `reconnect` against `timeout`; the first to finish cancels the other. `reconnect` is
 /// caller-supplied and may ignore that cancellation, so a transport it still produces after losing the
 /// race — to the timeout, or to an error such as the caller's own cancellation — is drained explicitly
-/// so it can be closed rather than leaked; the task group's own implicit cleanup would await that
-/// transport just the same, but only this explicit drain closes it. The caller's own cancellation is
-/// read from `Task.checkCancellation()` so a coincidental race at the deadline is never misreported as
-/// this timeout firing.
+/// so it can be closed, unless another ceremony already holds it (`LedgerCeremony.closeIfUnowned(_:)`),
+/// rather than leaked; the task group's own implicit cleanup would await that transport just the same,
+/// but only this explicit drain closes it. The caller's own cancellation is read from
+/// `Task.checkCancellation()` so a coincidental race at the deadline is never misreported as this
+/// timeout firing.
 ///
 /// A `timeout` that is not finite, or not representable in `UInt64` nanoseconds (see
 /// `reconnectRaceNanoseconds(_:)`), races nothing: this just awaits `reconnect()` directly, with no cap
@@ -635,7 +637,7 @@ func raceReconnect(
             group.cancelAll()
             while let result = await group.nextResult() {
                 if case .success(.connected(let late)) = result {
-                    await late.close()
+                    await LedgerCeremony.closeIfUnowned(late)
                 }
             }
             throw error
@@ -651,10 +653,11 @@ func raceReconnect(
             return transport
         case .timedOut:
             // The reconnect may still complete, now cancelled, after losing the race; close what it
-            // produces rather than let a live transport leak.
+            // produces, unless another ceremony has already taken it, rather than let a live
+            // transport leak.
             while let result = await group.nextResult() {
                 if case .success(.connected(let late)) = result {
-                    await late.close()
+                    await LedgerCeremony.closeIfUnowned(late)
                 }
             }
             try Task.checkCancellation()

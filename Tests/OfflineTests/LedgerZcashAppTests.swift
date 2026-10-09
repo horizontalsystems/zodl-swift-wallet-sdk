@@ -703,6 +703,108 @@ final class LedgerZcashAppTests: XCTestCase {
         XCTAssertEqual(lateReceived.count, 0, "the loser is closed before anything is sent on it")
     }
 
+    // MARK: - A late reconnect result another ceremony holds
+
+    /// The transport `reconnect` hands back after losing the race to the timeout can already be held
+    /// by another ceremony. Closing it then would disconnect that ceremony, so it is left open
+    /// instead, and the ceremony holding it finishes undisturbed.
+    func testALateReconnectResultFromATimedOutRaceIsLeftOpenWhenAnotherCeremonyHoldsIt() async throws {
+        let original = ScriptedLedgerTransport { _, history in
+            if history.count == 1 { throw ZcashError.ledgerBluetoothDisconnected }
+            return dashboardReply
+        }
+        let late = scripted([dashboardReply])
+        let afterSwitch = scripted([zcashReply])
+        let hangingLauncher = LedgerAppLauncher(
+            queryTimeout: queryTimeout,
+            pollTimeout: pollTimeout,
+            pollInterval: pollInterval,
+            transitionTimeout: transitionTimeout,
+            switchReconnectTimeout: 0.05,
+            switchReconnectWindow: switchReconnectWindow,
+            switchReconnectFirstBackoff: switchReconnectFirstBackoff,
+            switchReconnectMaxBackoff: switchReconnectMaxBackoff,
+            switchOverallTimeout: 60
+        )
+        let reconnects = CallCounter()
+        let entered = Latch()
+        let release = Latch()
+        let holder = holdCeremony(on: late, entered: entered, release: release)
+        await entered.wait()
+
+        let result = try await hangingLauncher.ensureZcashAppOpen(transport: original) {
+            let count = await reconnects.increment()
+            if count == 1 {
+                // Loses the race to the 50 ms timeout, then ignores its own cancellation and
+                // returns `late` anyway, same as the sibling test without a holder.
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                return late
+            }
+            return afterSwitch
+        }
+
+        XCTAssertTrue(isSame(result, afterSwitch))
+        let lateCloseCount = await late.closeCount
+        XCTAssertEqual(lateCloseCount, 0, "a late result another ceremony holds is not closed")
+
+        await release.open()
+        try await holder.value
+        await expectEventually { await LedgerCeremonyGates.shared.transportsInUse == 0 }
+    }
+
+    /// The same, but the caller's own cancellation ends the race instead of the timeout: `reconnect`
+    /// ignores that cancellation and hands back `late` anyway, which is left open just the same when
+    /// another ceremony holds it.
+    func testALateReconnectResultFromACancelledCallerIsLeftOpenWhenAnotherCeremonyHoldsIt() async throws {
+        actor Entered {
+            private(set) var didEnter = false
+            func mark() { didEnter = true }
+        }
+        let entered = Entered()
+        let original = ScriptedLedgerTransport { _, history in
+            if history.count == 1 { throw ZcashError.ledgerBluetoothDisconnected }
+            return dashboardReply
+        }
+        let late = scripted([dashboardReply])
+        let holdEntered = Latch()
+        let holdRelease = Latch()
+        let holder = holdCeremony(on: late, entered: holdEntered, release: holdRelease)
+        await holdEntered.wait()
+
+        let task = Task {
+            try await launcher.ensureZcashAppOpen(transport: original) {
+                await entered.mark()
+                // Unlike the live Bluetooth connect, ignores the caller's own cancellation: a
+                // detached task does not inherit it, so this keeps running past the caller's cancel
+                // and still hands back `late`, held by another ceremony the whole time.
+                await Task.detached {
+                    try? await Task.sleep(nanoseconds: 300_000_000)
+                }.value
+                return late
+            }
+        }
+        // Spins until the reconnect has actually started, so the cancel below always lands while the
+        // race is in flight.
+        while await !entered.didEnter {
+            await Task.yield()
+        }
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            XCTFail("The caller's own cancellation must propagate")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        let lateCloseCount = await late.closeCount
+        XCTAssertEqual(lateCloseCount, 0, "a late result another ceremony holds is not closed")
+
+        await holdRelease.open()
+        try await holder.value
+        await expectEventually { await LedgerCeremonyGates.shared.transportsInUse == 0 }
+    }
+
     /// `reconnectRaceNanoseconds(_:)`'s mapping from `timeout` to the race's `Task.sleep` bound: not
     /// finite or too large for `UInt64` nanoseconds maps to `nil` (no cap), a negative or zero
     /// `timeout` maps to `0`, and an ordinary value converts to nanoseconds.
