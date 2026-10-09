@@ -107,6 +107,16 @@ actor LedgerSerialGate {
     /// of guessing with a sleep.
     var queuedCount: Int { waiters.count }
 
+    /// Holds the gate at once when nothing holds it, whether or not the calling task is cancelled,
+    /// and returns `false` without waiting when something does.
+    func tryAcquire() -> Bool {
+        guard !isBusy else {
+            return false
+        }
+        isBusy = true
+        return true
+    }
+
     /// Waits until no other operation holds the gate, then holds it.
     ///
     /// Throws `CancellationError` instead of holding the gate when the calling task is already

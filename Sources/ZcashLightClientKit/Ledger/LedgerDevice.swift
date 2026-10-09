@@ -121,8 +121,12 @@ public actor LedgerDevice {
     /// final, and so is a refusal before the export. Nothing is retried once the export command has
     /// been sent.
     ///
-    /// A transport `reconnect` returns becomes ``transport``, whatever the outcome, and belongs to the
-    /// caller like the one passed to `init`; a failure `reconnect` itself throws propagates as it is.
+    /// A transport `reconnect` returns becomes ``transport`` as soon as this call holds its ceremony,
+    /// whatever the outcome from then on, and belongs to the caller like the one passed to `init`; a
+    /// failure `reconnect` itself throws propagates as it is. The one case in which it is not adopted:
+    /// another ceremony already holds it (see `LedgerCeremony`) and this call is cancelled while it
+    /// waits for its turn on it. ``transport`` then stays the original, the replacement stays open
+    /// with the ceremony holding it, and this call closes nothing of theirs.
     /// The call is raced against `readTimeout`: a `reconnect` still running once that time is up fails
     /// as ``ZcashError/ledgerBluetoothConnectionFailed(_:)`` instead, and a transport it produces after
     /// losing that race is closed rather than adopted.
@@ -138,10 +142,10 @@ public actor LedgerDevice {
     ///     original transport's ceremony gate, neither of which is reentrant: it must not call this
     ///     device, nor run any other ceremony over this device's ``transport``, directly or through
     ///     anything that waits on one, or it deadlocks. The transport it returns is a new one and is
-    ///     not under that ceremony gate while `reconnect` itself runs; once adopted, this call takes
-    ///     that transport's own ceremony gate too, and holds it for everything that follows -- the
-    ///     retried reads, the export and the identity check -- so the replacement is held for the
-    ///     rest of the call exactly as the original transport was.
+    ///     not under that ceremony gate while `reconnect` itself runs; this call then takes that
+    ///     transport's own ceremony gate too, adopts it as ``transport`` once it holds it, and keeps
+    ///     it for everything that follows -- the retried reads, the export and the identity check --
+    ///     so the replacement is held for the rest of the call exactly as the original transport was.
     /// - Throws: ``ZcashError/ledgerAppTooOld(_:)`` when the app cannot sign transactions for this SDK,
     ///   ``ZcashError/ledgerUserRejected`` when the user declines the export,
     ///   ``ZcashError/ledgerDeviceMismatch`` when the exported key of account 0 does not derive the
@@ -269,12 +273,14 @@ public actor LedgerDevice {
     /// ``ZcashError/ledgerBluetoothConnectionFailed(_:)``, and a transport it produces after losing
     /// that race is closed rather than adopted.
     ///
-    /// A retry moves ``transport`` to the reconnected one and keeps it held for the rest of the call:
-    /// `afterReads` runs inside `LedgerCeremony.run(on:)` on that transport, nested inside the
-    /// ceremony `serialized` already holds on the original one. The two are different transport
-    /// instances, so the nesting cannot deadlock, and no other ceremony on the reconnected transport
-    /// can run until `afterReads` returns. `afterReads` itself is never retried, on the first attempt
-    /// or after a reconnect: only a failure of the reads before it is.
+    /// A retry takes the reconnected transport's ceremony (`LedgerCeremony.adopt(_:)`), nested inside
+    /// the ceremony `serialized` already holds on the original one, and only then moves ``transport``
+    /// to it, so a cancellation while another ceremony still holds the replacement leaves
+    /// ``transport`` on the original, already closed, one, and `serialized`'s cleanup closes nothing
+    /// of the holder's. The two are different transport instances, so the nesting cannot deadlock,
+    /// and no other ceremony on the reconnected transport can run until `afterReads` returns.
+    /// `afterReads` itself is never retried, on the first attempt or after a reconnect: only a
+    /// failure of the reads before it is.
     private func readBeforeExport<T>(
         readTimeout: TimeInterval,
         reconnect: (@Sendable () async throws -> any LedgerAPDUTransport)?,
@@ -287,10 +293,16 @@ public actor LedgerDevice {
         } catch {
             guard let reconnect, isLinkFailure(error) else { throw error }
             let replacement = try await raceReconnect(reconnect, timeout: readTimeout)
+            let hold = try await LedgerCeremony.adopt(replacement)
             transport = replacement
-            return try await LedgerCeremony.run(on: replacement) {
-                let (appVersion, identity) = try await self.readAppVersionAndIdentity(timeout: readTimeout)
-                return try await afterReads(appVersion, identity)
+            do {
+                let (appVersion, identity) = try await readAppVersionAndIdentity(timeout: readTimeout)
+                let result = try await afterReads(appVersion, identity)
+                await hold.release()
+                return result
+            } catch {
+                await hold.release()
+                throw error
             }
         }
         return try await afterReads(appVersion, identity)

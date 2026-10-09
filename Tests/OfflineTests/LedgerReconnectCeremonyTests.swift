@@ -181,6 +181,55 @@ final class LedgerReconnectCeremonyTests: XCTestCase {
         XCTAssertEqual(freshCloseCount, 0, "a call cancelled while only queued for its turn closes nothing")
     }
 
+    // MARK: - A replacement another ceremony holds
+
+    /// The transport a `reconnect` returns can already be in use: here another device's pairing holds
+    /// it, waiting on the user for its export. The reconnecting pairing queues for it, and when it is
+    /// cancelled while queued it closes nothing -- not the replacement, which it never came to hold
+    /// and must not adopt -- and the pairing holding the replacement finishes undisturbed.
+    func testAPairingCancelledWhileQueuedForAReplacementAnotherCeremonyHoldsClosesNothing() async throws {
+        let ufvk = try testnetUFVK()
+        let fresh = SignaledExportTransport(ufvk: ufvk.stringEncoded)
+        let holder = LedgerDevice(transport: fresh, networkType: .testnet)
+        let holderPairing = Task {
+            try await holder.pairAccount(zip32AccountIndex: Zip32AccountIndex(0))
+        }
+        await expectEventually { await fresh.isWaitingForExportSignal }
+
+        let stalled = stalledTransport()
+        let ledger = LedgerDevice(transport: stalled, networkType: .testnet)
+        let pairing = Task {
+            try await ledger.pairAccount(zip32AccountIndex: Zip32AccountIndex(0), reconnect: { fresh })
+        }
+        // Waits for the reconnecting pairing to have actually queued on the replacement's ceremony
+        // gate, behind the holder, before cancelling it.
+        await expectEventually { await LedgerCeremonyGates.shared.queuedCeremonies(on: fresh) == 1 }
+        pairing.cancel()
+
+        do {
+            _ = try await pairing.value
+            XCTFail("a pairing cancelled while queued must fail")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        let freshCloseCount = await fresh.closeCount
+        XCTAssertEqual(freshCloseCount, 0, "a replacement the cancelled pairing never came to hold is not closed")
+        let current = await ledger.transport
+        XCTAssertEqual(ObjectIdentifier(current), ObjectIdentifier(stalled), "a replacement the pairing never came to hold is not adopted")
+
+        await fresh.releaseExport()
+        let holderResult = try await holderPairing.value
+        XCTAssertEqual(holderResult.ufvk, ufvk)
+
+        let instructions = await fresh.instructions
+        XCTAssertEqual(
+            instructions,
+            Array(pairingThenProbeInstructions(ufvk: ufvk.stringEncoded).dropLast()),
+            "only the holder's pairing ever sent anything on the replacement"
+        )
+    }
+
     // MARK: - A second device over the reconnected transport waits too
 
     /// A second `LedgerDevice` built directly over the reconnected transport waits for the pairing the

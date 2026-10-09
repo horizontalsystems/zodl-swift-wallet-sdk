@@ -48,17 +48,58 @@ enum LedgerCeremony {
             await gates.release(transport)
             throw CancellationError()
         }
+        let hold = LedgerCeremonyHold(transport: transport, gate: gate)
 
         do {
             let result = try await body()
-            await gate.release()
-            await gates.release(transport)
+            await hold.release()
             return result
         } catch {
-            await gate.release()
-            await gates.release(transport)
+            await hold.release()
             throw error
         }
+    }
+
+    /// Takes `transport` for a ceremony already in progress that moves onto it partway through -- a
+    /// pairing or an app switch whose link dropped and that reconnected -- and keeps it until the
+    /// returned hold is released.
+    ///
+    /// A transport nothing else is using is taken at once, even by a task that is already cancelled:
+    /// the ceremony is then the transport's only user, and its own cancellation handling closes the
+    /// transport as it would any other it is on, instead of leaving a fresh connection open that
+    /// nothing owns. A transport another ceremony holds is waited for, and a cancellation while
+    /// queued throws `CancellationError` without taking it: the transport stays with its holder, and
+    /// the caller must not have adopted it, so that its cleanup closes nothing of the holder's.
+    ///
+    /// - Throws: `CancellationError` when the calling task is cancelled while queued behind another
+    ///   ceremony on `transport`.
+    static func adopt(_ transport: any LedgerAPDUTransport) async throws -> LedgerCeremonyHold {
+        let gates = LedgerCeremonyGates.shared
+        let gate = await gates.gate(for: transport)
+        if await gate.tryAcquire() {
+            return LedgerCeremonyHold(transport: transport, gate: gate)
+        }
+        do {
+            try await gate.acquire()
+        } catch {
+            await gates.release(transport)
+            throw CancellationError()
+        }
+        return LedgerCeremonyHold(transport: transport, gate: gate)
+    }
+}
+
+/// A ceremony's hold on one transport, from `LedgerCeremony.adopt(_:)`; `LedgerCeremony.run(on:_:)`
+/// holds its transport the same way for the span of its body. Release it exactly once, when the
+/// ceremony is done with the transport, success or failure.
+struct LedgerCeremonyHold {
+    fileprivate let transport: any LedgerAPDUTransport
+    fileprivate let gate: LedgerSerialGate
+
+    /// Lets the next ceremony queued on the transport, if any, proceed.
+    func release() async {
+        await gate.release()
+        await LedgerCeremonyGates.shared.release(transport)
     }
 }
 
