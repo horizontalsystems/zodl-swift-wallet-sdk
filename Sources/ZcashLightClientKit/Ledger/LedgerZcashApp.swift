@@ -94,7 +94,9 @@ public enum LedgerZcashApp {
     ) async throws -> any LedgerAPDUTransport {
         // Holds `transport` for the whole switch, so no other ceremony the SDK runs over it can put a
         // command between the query and the open; see `LedgerCeremony`. A transport `reconnect`
-        // returns is new and is not under that hold, exactly as with `LedgerDevice.pairAccount`.
+        // returns is new and is not under this hold while `reconnect` runs; the switch takes that
+        // transport's own ceremony before its first command on it and keeps it until it is replaced
+        // in turn or the switch is over, exactly as `LedgerDevice.pairAccount` does.
         try await LedgerCeremony.run(on: transport) {
             try await launcher().ensureZcashAppOpen(transport: transport, reconnect: reconnect)
         }
@@ -182,20 +184,24 @@ final class LedgerAppLauncher {
         let appSwitch = AppSwitch(original: transport, reconnect: reconnect, launcher: self)
         do {
             let running = try await appSwitch.queryOnFreshConnectionOnce()
-            if running.isZcash {
-                return appSwitch.current
+            if !running.isZcash {
+                if !running.isDashboard {
+                    try await appSwitch.closeRunningApp()
+                    try await appSwitch.awaitApp { $0.isDashboard }
+                }
+                try await appSwitch.openZcashApp()
+                try await appSwitch.awaitApp { $0.isZcash }
             }
-            if !running.isDashboard {
-                try await appSwitch.closeRunningApp()
-                try await appSwitch.awaitApp { $0.isDashboard }
-            }
-            try await appSwitch.openZcashApp()
-            try await appSwitch.awaitApp { $0.isZcash }
-            return appSwitch.current
         } catch {
             await appSwitch.closeReplacement()
+            await appSwitch.releaseReplacementHold()
             throw error
         }
+        // The caller gets the transport to run its own ceremony on, so the switch's hold on a
+        // replacement ends here; the caller's original stays held by the public wrapper until this
+        // returns.
+        await appSwitch.releaseReplacementHold()
+        return appSwitch.current
     }
 
     /// A fresh deadline for a wait of `transitionTimeout`, starting now.
@@ -207,6 +213,11 @@ final class LedgerAppLauncher {
 /// The transport through an app switch that `LedgerAppLauncher.ensureZcashAppOpen(transport:reconnect:)`
 /// drives: `current` is the caller's transport until a dropped link is replaced with one from
 /// `reconnect`.
+///
+/// The caller's transport is held for the switch by `LedgerZcashApp.ensureZcashAppOpen`. Every
+/// replacement is held here instead, from before the switch's first command on it until the next
+/// replacement takes over or the switch ends (`releaseReplacementHold()`), so no other ceremony over
+/// a replacement can put a command between two of the switch's; see `LedgerCeremony.adopt(_:)`.
 private final class AppSwitch {
     private let original: any LedgerAPDUTransport
     private let reconnect: @Sendable () async throws -> any LedgerAPDUTransport
@@ -215,6 +226,9 @@ private final class AppSwitch {
     private(set) var current: any LedgerAPDUTransport
     private var usable = true
     private var didReplaceTransport = false
+    /// The switch's hold on `current` while it is a replacement; `nil` while `current` is the
+    /// caller's own transport.
+    private var replacementHold: LedgerCeremonyHold?
 
     init(
         original: any LedgerAPDUTransport,
@@ -236,9 +250,7 @@ private final class AppSwitch {
             return running
         }
 
-        current = try await raceReconnect()
-        didReplaceTransport = true
-        usable = true
+        try await adopt(try await raceReconnect())
         return try await launcher.currentApp(transport: current)
     }
 
@@ -330,9 +342,7 @@ private final class AppSwitch {
     /// propagates uncaught, never as a reconnect failure.
     private func replace() async throws -> ZcashError? {
         do {
-            current = try await raceReconnect()
-            didReplaceTransport = true
-            usable = true
+            try await adopt(try await raceReconnect())
             return nil
         } catch {
             guard isLinkFailure(error), let zcashError = error as? ZcashError else { throw error }
@@ -358,6 +368,26 @@ private final class AppSwitch {
     private func markUnusable() async {
         usable = false
         await closeQuietly(current)
+    }
+
+    /// Makes `replacement` the switch's transport, once the switch holds its ceremony. A replacement
+    /// nothing else uses is taken at once; one another ceremony holds is waited for, and a
+    /// cancellation while queued throws without adopting it, so the switch's cleanup closes nothing
+    /// of the holder's -- `current` is still the transport that dropped, already closed.
+    private func adopt(_ replacement: any LedgerAPDUTransport) async throws {
+        let hold = try await LedgerCeremony.adopt(replacement)
+        await releaseReplacementHold()
+        replacementHold = hold
+        current = replacement
+        didReplaceTransport = true
+        usable = true
+    }
+
+    /// Ends the switch's hold on its current replacement, if any: when the next replacement takes
+    /// over, when the switch hands the replacement to the caller, or when the switch fails.
+    func releaseReplacementHold() async {
+        await replacementHold?.release()
+        replacementHold = nil
     }
 
     /// Closes a transport opened through `reconnect` that is still open; one that failed was closed

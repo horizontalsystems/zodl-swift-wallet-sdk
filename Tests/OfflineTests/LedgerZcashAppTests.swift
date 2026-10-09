@@ -79,6 +79,45 @@ private func withTestTimeout<T: Sendable>(
     }
 }
 
+/// Polls `condition` with a short yield between checks, failing the test after `timeoutSeconds` if
+/// it never becomes true. Not named `waitUntil`: `XCTestCase` has a member of that name (from
+/// `TestUtils`) that returns the outcome instead of failing, and member lookup would win.
+private func expectEventually(
+    timeoutSeconds: TimeInterval = 2,
+    file: StaticString = #filePath,
+    line: UInt = #line,
+    _ condition: () async -> Bool
+) async {
+    let deadline = DispatchTime.now() + timeoutSeconds
+    while DispatchTime.now() < deadline {
+        if await condition() {
+            return
+        }
+        await Task.yield()
+    }
+    XCTFail("condition did not become true within \(timeoutSeconds) s", file: file, line: line)
+}
+
+/// A one-shot signal: `wait()` returns once `open()` has been called, at once if it already has.
+private actor Latch {
+    private(set) var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func open() {
+        isOpen = true
+        let resumed = waiters
+        waiters = []
+        resumed.forEach { $0.resume() }
+    }
+
+    func wait() async {
+        guard !isOpen else { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            waiters.append(continuation)
+        }
+    }
+}
+
 private func isSame(_ lhs: any LedgerAPDUTransport, _ rhs: any LedgerAPDUTransport) -> Bool {
     (lhs as AnyObject) === (rhs as AnyObject)
 }
@@ -1125,5 +1164,82 @@ final class LedgerZcashAppTests: XCTestCase {
 
         let received = await transport.received
         XCTAssertTrue(received.isEmpty, "a cancelled caller sends nothing")
+    }
+
+    // MARK: - A replacement another ceremony holds
+
+    /// Holds `transport`'s ceremony from another task until `release` opens, and reports through
+    /// `entered` once it does hold it.
+    private func holdCeremony(on transport: any LedgerAPDUTransport, entered: Latch, release: Latch) -> Task<Void, Error> {
+        Task {
+            try await LedgerCeremony.run(on: transport) {
+                await entered.open()
+                await release.wait()
+            }
+        }
+    }
+
+    /// The transport `reconnect` returns can already be in use by another ceremony. The switch then
+    /// waits for it before its first command on it, instead of putting that command in the middle of
+    /// the other ceremony, and its hold on the replacement ends when the switch hands it back.
+    func testTheSwitchWaitsForACeremonyAlreadyHoldingItsReplacement() async throws {
+        let original = ScriptedLedgerTransport { _, _ in throw ZcashError.ledgerBluetoothDisconnected }
+        let afterSwitch = scripted([zcashReply])
+        let entered = Latch()
+        let release = Latch()
+        let holder = holdCeremony(on: afterSwitch, entered: entered, release: release)
+        await entered.wait()
+
+        let switching = Task { try await launcher.ensureZcashAppOpen(transport: original) { afterSwitch } }
+        // Waits for the switch to have actually queued on the replacement's ceremony gate.
+        await expectEventually { await LedgerCeremonyGates.shared.queuedCeremonies(on: afterSwitch) == 1 }
+        let receivedWhileHeld = await afterSwitch.received
+        XCTAssertTrue(receivedWhileHeld.isEmpty, "the switch sends nothing on a replacement another ceremony holds")
+
+        await release.open()
+        try await holder.value
+        let result = try await switching.value
+
+        XCTAssertTrue(isSame(result, afterSwitch))
+        let received = await afterSwitch.received
+        XCTAssertEqual(received.count, 1, "the query ran once the holder was done")
+
+        // The switch's hold ended with the switch: a ceremony on the returned transport is admitted.
+        let afterwards = Latch()
+        let next = holdCeremony(on: afterSwitch, entered: afterwards, release: afterwards)
+        await expectEventually { await afterwards.isOpen }
+        try await next.value
+    }
+
+    /// The same, but the switch is cancelled while it waits for the replacement: it fails with the
+    /// cancellation, and closes nothing -- the replacement it never came to hold least of all.
+    func testTheSwitchCancelledWhileQueuedForAHeldReplacementClosesNothing() async throws {
+        let original = ScriptedLedgerTransport { _, _ in throw ZcashError.ledgerBluetoothDisconnected }
+        let afterSwitch = scripted([zcashReply])
+        let entered = Latch()
+        let release = Latch()
+        let holder = holdCeremony(on: afterSwitch, entered: entered, release: release)
+        await entered.wait()
+
+        let switching = Task { try await launcher.ensureZcashAppOpen(transport: original) { afterSwitch } }
+        await expectEventually { await LedgerCeremonyGates.shared.queuedCeremonies(on: afterSwitch) == 1 }
+        switching.cancel()
+
+        do {
+            _ = try await switching.value
+            XCTFail("a switch cancelled while queued must fail")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        await release.open()
+        try await holder.value
+
+        let afterSwitchCloseCount = await afterSwitch.closeCount
+        XCTAssertEqual(afterSwitchCloseCount, 0, "a replacement the cancelled switch never came to hold is not closed")
+        let received = await afterSwitch.received
+        XCTAssertTrue(received.isEmpty, "the cancelled switch never sent anything on the replacement")
+        let originalCloseCount = await original.closeCount
+        XCTAssertEqual(originalCloseCount, 1, "the dropped original was closed when its link failed, and only then")
     }
 }
