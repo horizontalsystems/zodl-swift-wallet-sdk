@@ -82,6 +82,78 @@ private actor SignaledExportTransport: LedgerAPDUTransport {
     }
 }
 
+/// A replacement transport two devices share: it answers the firmware-version and identity reads
+/// and the first `GET_VK` chunk normally, parking on that first reply for ``releaseExport()`` like
+/// `SignaledExportTransport`, and parks again on its first ``close()`` for ``releaseClose()``. An
+/// exchange reaching it once `close()` has fully finished is refused.
+private actor SignaledExportAndCloseTransport: LedgerAPDUTransport {
+    private(set) var received: [Data] = []
+    private(set) var closeCount = 0
+    private(set) var isWaitingForExportSignal = false
+    private(set) var isClosing = false
+    private var releaseExportContinuation: CheckedContinuation<Void, Never>?
+    private var releaseCloseContinuation: CheckedContinuation<Void, Never>?
+    private var exportReleased = false
+    private var isClosed = false
+    private let chunks: [Data]
+
+    init(ufvk: String) {
+        self.chunks = LedgerReplies.viewingKeyChunks(ufvk)
+    }
+
+    var instructions: [UInt8] { received.map { $0[1] } }
+
+    func exchange(_ apdu: Data, timeout: TimeInterval?) async throws -> Data {
+        guard !isClosed else { throw ZcashError.ledgerTransportClosed }
+        let history = received
+        received.append(apdu)
+        switch apdu[1] {
+        case LedgerReplies.getFirmwareVersion:
+            return LedgerReplies.firmwareVersion(3, 9, 3)
+        case LedgerReplies.getWalletPublicKey:
+            return LedgerReplies.walletPublicKey(LedgerReplies.seedIdentityPoint)
+        case LedgerReplies.getVK:
+            if !exportReleased {
+                isWaitingForExportSignal = true
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    releaseExportContinuation = continuation
+                }
+                isWaitingForExportSignal = false
+            }
+            return chunks[history.filter { $0[1] == LedgerReplies.getVK }.count]
+        default:
+            return LedgerReplies.status(0x6D00)
+        }
+    }
+
+    /// Parks on the first call, for ``releaseClose()``, before counting itself done; every call
+    /// after that one returns at once, closing twice having no effect beyond the count.
+    func close() async {
+        closeCount += 1
+        guard !isClosing, !isClosed else { return }
+        isClosing = true
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            releaseCloseContinuation = continuation
+        }
+        isClosing = false
+        isClosed = true
+    }
+
+    /// Lets a `GET_VK` reply waiting in `exchange(_:timeout:)` proceed; every export chunk after it
+    /// answers at once.
+    func releaseExport() {
+        exportReleased = true
+        releaseExportContinuation?.resume()
+        releaseExportContinuation = nil
+    }
+
+    /// Lets a `close()` waiting to finish proceed.
+    func releaseClose() {
+        releaseCloseContinuation?.resume()
+        releaseCloseContinuation = nil
+    }
+}
+
 final class LedgerReconnectCeremonyTests: XCTestCase {
     private func testnetUFVK() throws -> UnifiedFullViewingKey {
         let tool = DerivationTool(networkType: .testnet)
@@ -312,6 +384,75 @@ final class LedgerReconnectCeremonyTests: XCTestCase {
             instructions,
             pairingThenProbeInstructions(ufvk: ufvk.stringEncoded),
             "the second device's probe comes after every command of the pairing on the reconnected transport"
+        )
+    }
+
+    // MARK: - A replacement closed by a cancelled pairing
+
+    /// Device 1 reconnects onto a replacement and is cancelled while exporting, between two of its
+    /// chunks. Closing the replacement is this call's own to do, and it must finish before device 2,
+    /// queued on the same replacement, is handed its turn: device 2 must not be admitted while that
+    /// close is still in flight, only once it is done, and then finds the replacement already closed.
+    func testAPairingCancelledOnAReplacementClosesItBeforeASecondDeviceIsAdmitted() async throws {
+        let ufvk = try testnetUFVK()
+        XCTAssertGreaterThan(
+            LedgerReplies.viewingKeyChunks(ufvk.stringEncoded).count,
+            1,
+            "the export must take more than one chunk for a cancellation between two of them to be possible"
+        )
+        let stalled = stalledTransport()
+        let replacement = SignaledExportAndCloseTransport(ufvk: ufvk.stringEncoded)
+        let device1 = LedgerDevice(transport: stalled, networkType: .testnet)
+
+        let pairing = Task {
+            try await device1.pairAccount(zip32AccountIndex: Zip32AccountIndex(0), reconnect: { replacement })
+        }
+        await expectEventually { await replacement.isWaitingForExportSignal }
+
+        let device2 = LedgerDevice(transport: replacement, networkType: .testnet)
+        let probe = Task { try await device2.appVersion() }
+        // Waits for the second device to have actually queued on the replacement's own ceremony
+        // gate, behind device 1's hold, before device 1 is cancelled.
+        await expectEventually { await LedgerCeremonyGates.shared.queuedCeremonies(on: replacement) == 1 }
+
+        // Cancelling here is inert: device 1 is parked in `replacement.exchange(_:timeout:)`, on a
+        // continuation that does not observe cancellation. It takes effect only at the next chunk's
+        // `LedgerCommands.exchange`, whose cancellation check runs before it ever touches the
+        // replacement -- so the chunk below is never sent, and the close that follows is this call's
+        // own, not one forced by a failed exchange.
+        pairing.cancel()
+        await replacement.releaseExport()
+
+        // The replacement's own close has started -- device 1's cancellation reached it -- but has
+        // not finished: it is parked here for `releaseClose()`. Device 2 must still be queued behind
+        // device 1's hold at this point, never handed the gate while this close was still in flight.
+        await expectEventually { await replacement.isClosing }
+        let queuedWhileClosing = await LedgerCeremonyGates.shared.queuedCeremonies(on: replacement)
+        XCTAssertEqual(queuedWhileClosing, 1, "device 2 is still queued while the replacement's close is in flight")
+
+        await replacement.releaseClose()
+
+        do {
+            _ = try await pairing.value
+            XCTFail("a pairing cancelled while exporting must fail")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        do {
+            _ = try await probe.value
+            XCTFail("a call admitted to an already-closed replacement must fail")
+        } catch let error as ZcashError {
+            guard case .ledgerTransportClosed = error else {
+                return XCTFail("Unexpected error \(error.code)")
+            }
+        }
+
+        let instructions = await replacement.instructions
+        XCTAssertEqual(
+            instructions,
+            [LedgerReplies.getFirmwareVersion, LedgerReplies.getWalletPublicKey, LedgerReplies.getVK],
+            "only device 1's retried reads and its first export chunk reached the replacement; nothing from device 2"
         )
     }
 }

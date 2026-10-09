@@ -283,6 +283,11 @@ public actor LedgerDevice {
     /// and no other ceremony on the reconnected transport can run until `afterReads` returns.
     /// `afterReads` itself is never retried, on the first attempt or after a reconnect: only a
     /// failure of the reads before it is.
+    ///
+    /// Once this call does hold the replacement's own ceremony, a cancellation closes the
+    /// replacement before giving up that hold, so a ceremony queued behind it is not handed a
+    /// transport on its way out; `serialized`'s own close of the live transport, reached once this
+    /// error propagates out of here, then finds it already closed.
     private func readBeforeExport<T>(
         readTimeout: TimeInterval,
         reconnect: (@Sendable () async throws -> any LedgerAPDUTransport)?,
@@ -309,6 +314,22 @@ public actor LedgerDevice {
                 await hold?.release()
                 return result
             } catch {
+                // Only a replacement this call itself adopted (`hold != nil`) is closed here.
+                // `hold == nil` means `reconnect` handed back the device's own transport, already
+                // held by `serialized`'s outer ceremony, which closes it on this same condition.
+                if let hold {
+                    if error is LedgerExchangeNotStarted {
+                        // The transport never saw this exchange: nothing queued behind it needs
+                        // protecting from a close.
+                    } else if error is CancellationError || Task.isCancelled {
+                        // A ceremony queued behind this hold must not be handed a transport this
+                        // call is giving up on, so it is closed before the release admits the next
+                        // one. `serialized`'s own close of the live transport, once this error
+                        // reaches it, then finds this one already closed, since closing is
+                        // idempotent.
+                        await replacement.close()
+                    }
+                }
                 await hold?.release()
                 throw error
             }
@@ -386,8 +407,9 @@ public actor LedgerDevice {
                         // exchange. `transport` is read again here, live, instead of reusing
                         // `startingTransport`: a call that reconnected partway through
                         // (`readBeforeExport`) has moved it on, and this closes the one the call is
-                        // actually on when it fails. Closing is idempotent, so a transport a failed
-                        // exchange already closed is not affected.
+                        // actually on when it fails. Closing is idempotent, so a transport already
+                        // closed -- by a failed exchange, or by `readBeforeExport`'s own close of a
+                        // replacement it gave up on cancellation -- is not affected.
                         await transport.close()
                     }
                     throw ledgerZcashError(error)
