@@ -65,6 +65,11 @@ public final class LedgerBluetoothScanner: @unchecked Sendable {
     ///   connecting, or `CancellationError`.
     public func connect(to device: LedgerBluetoothDevice, timeout: TimeInterval = 60) async throws -> LedgerBluetoothTransport {
         try await central.waitUntilPoweredOn()
+        // The state change that ends the wait resumes every waiter at once, a caller cancelled in
+        // that same instant included; such a caller must not go on to displace a connection a
+        // live caller is making. `central.connect` displaces synchronously, so nothing can be
+        // cancelled between this check and the displacement.
+        try Task.checkCancellation()
         let connection = try await central.connect(to: device, timeout: timeout)
         return LedgerBluetoothTransport(device: device, connection: connection)
     }
@@ -77,7 +82,13 @@ final class LedgerBluetoothCentral: NSObject, CBCentralManagerDelegate, @uncheck
     let logger: Logger?
 
     private var manager: CBCentralManager?
-    private var stateWaiters: [CheckedContinuation<Void, Error>] = []
+    /// The callers of ``waitUntilPoweredOn()`` parked until the central's state is known, by the
+    /// waiter's own id so a cancelled one can be taken out again.
+    private var stateWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
+    /// Waiters whose task was cancelled before their continuation was parked: the cancellation
+    /// handler and the parking both run on `queue`, in either order, so whichever runs second
+    /// resolves the wait.
+    private var cancelledStateWaiters: Set<UUID> = []
     private var scanID = 0
     private var scanContinuation: AsyncThrowingStream<[LedgerBluetoothDevice], Error>.Continuation?
     private var discovered: [UUID: LedgerBluetoothDevice] = [:]
@@ -103,16 +114,35 @@ final class LedgerBluetoothCentral: NSObject, CBCentralManagerDelegate, @uncheck
     // MARK: - State
 
     /// Returns once Bluetooth is powered on, or throws the reason it is not available.
+    ///
+    /// A caller cancelled while the state is still unknown (or resetting) is taken out of the wait
+    /// and thrown `CancellationError` at once, instead of staying parked until Bluetooth comes up and
+    /// then going on to connect for a caller that is no longer there.
     func waitUntilPoweredOn() async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                queue.async {
+                    guard self.cancelledStateWaiters.remove(id) == nil else {
+                        continuation.resume(throwing: CancellationError())
+                        return
+                    }
+                    switch self.availability(for: self.manager?.state ?? .unknown) {
+                    case .success(true):
+                        continuation.resume()
+                    case .success(false):
+                        self.stateWaiters[id] = continuation
+                    case .failure(let error):
+                        continuation.resume(throwing: error)
+                    }
+                }
+            }
+        } onCancel: {
             queue.async {
-                switch self.availability(for: self.manager?.state ?? .unknown) {
-                case .success(true):
-                    continuation.resume()
-                case .success(false):
-                    self.stateWaiters.append(continuation)
-                case .failure(let error):
-                    continuation.resume(throwing: error)
+                if let waiter = self.stateWaiters.removeValue(forKey: id) {
+                    waiter.resume(throwing: CancellationError())
+                } else {
+                    self.cancelledStateWaiters.insert(id)
                 }
             }
         }
@@ -148,8 +178,8 @@ final class LedgerBluetoothCentral: NSObject, CBCentralManagerDelegate, @uncheck
 
         switch availability(for: state) {
         case .success(true):
-            let waiters = stateWaiters
-            stateWaiters = []
+            let waiters = stateWaiters.values
+            stateWaiters = [:]
             waiters.forEach { $0.resume() }
         case .success(false):
             guard state == .resetting else {
@@ -168,8 +198,8 @@ final class LedgerBluetoothCentral: NSObject, CBCentralManagerDelegate, @uncheck
             peripherals = [:]
             discovered = [:]
         case .failure(let error):
-            let waiters = stateWaiters
-            stateWaiters = []
+            let waiters = stateWaiters.values
+            stateWaiters = [:]
             waiters.forEach { $0.resume(throwing: error) }
             scanContinuation?.finish(throwing: error)
             scanContinuation = nil

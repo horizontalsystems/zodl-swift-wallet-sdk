@@ -18,7 +18,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LedgerBluetoothTransport` with `connect(to:timeout:)`. The app must declare
   `NSBluetoothAlwaysUsageDescription`, and a sandboxed macOS app the
   `com.apple.security.device.bluetooth` entitlement. The first connection to a device brings up
-  Bluetooth pairing. A `LedgerBluetoothTransport` closes itself once an exchange fails after its
+  Bluetooth pairing. A `connect(to:timeout:)` cancelled while it still waits for Bluetooth to come up
+  throws `CancellationError` at once and never goes on to connect, or to displace a connection
+  another caller has made since. A `LedgerBluetoothTransport` closes itself once an exchange fails after its
   first frame went out (a timeout, a disconnect, a reply that does not reassemble, or a cancelled
   task), whoever the caller is; every later call then throws the error that closed it, or
   `ZcashError.ledgerTransportClosed` after a cancellation or `close()`. Open a new connection then.
