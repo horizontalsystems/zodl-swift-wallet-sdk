@@ -226,3 +226,20 @@ zakura-wallet-lib = { git = "https://github.com/zodl-inc/zakura-wallet-libraries
 #zcash_protocol = { git = "https://github.com/zcash/librustzcash", rev = "13ce6c4ef57a6c7e8837d797d85112ae16ac7455" }
 #zcash_transparent = { git = "https://github.com/zcash/librustzcash", rev = "13ce6c4ef57a6c7e8837d797d85112ae16ac7455" }
 #zip321 = { git = "https://github.com/zcash/librustzcash", rev = "13ce6c4ef57a6c7e8837d797d85112ae16ac7455" }
+
+# The Ledger tests build the Orchard proving key once, to extract and verify a proof-bearing
+# transaction a device signed. Key generation synthesizes the Orchard circuit, which takes minutes
+# in unoptimized halo2 and curve arithmetic and seconds optimized, so the test profile optimizes
+# those crates; nothing else, and no other profile, changes.
+[profile.test.package.halo2_proofs]
+opt-level = 3
+[profile.test.package.halo2_gadgets]
+opt-level = 3
+[profile.test.package.orchard]
+opt-level = 3
+[profile.test.package.pasta_curves]
+opt-level = 3
+[profile.test.package.ff]
+opt-level = 3
+[profile.test.package.group]
+opt-level = 3

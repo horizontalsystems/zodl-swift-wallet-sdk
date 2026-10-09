@@ -1080,10 +1080,62 @@ fn a_ledger_signed_transparent_pczt_combines_with_the_proving_pczt_and_extracts(
         .expect("the combined PCZT extracts to a transaction");
 }
 
-/// The shielded half of the same property: device signatures, the zip32 derivations shaping stamps
-/// on every action (dummies included), the redacted witness and dummy keys, and the marked
-/// transparent change all merge into the prover's PCZT. Extraction needs Orchard proofs, which
-/// merge as a field only the prover sets.
+/// The shielded half of the same property, run to the end: the prover's copy gets its Orchard proof
+/// from the unredacted PCZT, the Ledger's copy its signatures from the redacted one, and the
+/// combined PCZT has to finalize and extract. `TransactionExtractor` verifies the Orchard bundle
+/// as it goes -- the proof, and every spend authorization signature against the shielded sighash
+/// of the transaction that was actually built -- so this is also the check that the device's
+/// signature, made over the redacted and stamped copy, is a valid signature on the real
+/// transaction: a stamp or redaction that changed a sighash-relevant field would fail here, not
+/// after the user's approval on a device.
+///
+/// Building the Orchard proving key is the slow part, so the quicker merge check below runs
+/// separately as well.
+#[test]
+fn a_ledger_signed_orchard_pczt_combines_with_the_proving_pczt_and_extracts() {
+    use orchard::circuit::{OrchardCircuitVersion, ProvingKey};
+    use pczt::roles::prover::Prover;
+
+    let wallet = Wallet::new();
+    let original = orchard_spend_pczt(&wallet);
+    let state = build_session(
+        original.clone(),
+        wallet.inputs(DeviceCaps::from_version(3, 9, 3)),
+        &|address| wallet.lookup(address),
+    )
+    .expect("session");
+
+    let (signed, received) = run_ceremony(state, &wallet);
+    assert_eq!(received.last(), Some(&0x57), "the spend was signed");
+    let signed = Pczt::parse(&signed).expect("the signed PCZT parses");
+
+    // `v5_network()` activates NU6.2 and nothing after it, so the bundle is proven with the fixed
+    // post-NU6.2 circuit; the extractor builds the matching verifying key from the bundle itself.
+    let proving_key = ProvingKey::build(OrchardCircuitVersion::FixedPostNu6_2);
+    let proven = Prover::new(original)
+        .create_orchard_proof(crate::system_rng(), &proving_key)
+        .expect("the unredacted PCZT proves")
+        .finish();
+
+    let combined = Combiner::new(vec![proven, signed])
+        .combine()
+        .expect("the Combiner accepts the proven and the Ledger-signed PCZTs");
+    let finalized = SpendFinalizer::new(combined)
+        .finalize_spends()
+        .expect("the spend finalizer accepts the combined PCZT");
+    let transaction = TransactionExtractor::new(finalized)
+        .extract(crate::system_rng())
+        .expect("the combined PCZT extracts to a transaction whose Orchard bundle verifies");
+    assert!(
+        transaction.orchard_bundle().is_some(),
+        "the extracted transaction carries the Orchard bundle"
+    );
+}
+
+/// The merge alone, without the proof: device signatures, the zip32 derivations shaping stamps on
+/// every action (dummies included), the redacted witness and dummy keys, and the marked
+/// transparent change all merge into the prover's PCZT, and the device's signature survives the
+/// merge. Extraction needs the Orchard proof, which only the prover sets; the test above does that.
 #[test]
 fn a_ledger_signed_orchard_pczt_combines_with_the_proving_pczt() {
     let wallet = Wallet::new();
