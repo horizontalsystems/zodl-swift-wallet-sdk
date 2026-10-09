@@ -152,7 +152,8 @@ public actor LedgerDevice {
     ///   ``ZcashError/ledgerUserRejected`` when the user declines the export,
     ///   ``ZcashError/ledgerDeviceMismatch`` when the exported key of account 0 does not derive the
     ///   device's identity, ``ZcashError/ledgerMalformedReply(_:)`` when the exported key of account 0
-    ///   has no transparent item,
+    ///   has no transparent item, or when the exported key of any account has no Orchard item -- the
+    ///   signing session refuses an account without one,
     ///   ``ZcashError/ledgerDerivationBudgetExhausted`` when the user must reopen the Zcash app first,
     ///   ``ZcashError/ledgerBluetoothConnectionFailed(_:)`` when a retry's own `reconnect` does not
     ///   finish within `readTimeout`.
@@ -176,6 +177,16 @@ public actor LedgerDevice {
                 // Only the key of account 0 derives the identity; see the method documentation.
                 if zip32AccountIndex.index == 0 {
                     try ZcashLedgerBackend.checkAccountZeroIdentity(ufvk: ufvk, identity: identity, networkType: networkType)
+                }
+
+                // Every account's key needs an Orchard item: the signing session refuses one
+                // without it. `expectedUnifiedAddress` reports a missing Orchard item as
+                // `ledgerInvalidInput`, the only input error it can raise for a key just parsed for
+                // this network; any other error passes through unchanged.
+                do {
+                    _ = try Self.expectedUnifiedAddress(ufvk: ufvk, networkType: networkType)
+                } catch ZcashError.ledgerInvalidInput {
+                    throw ZcashError.ledgerMalformedReply("the exported viewing key has no Orchard item")
                 }
 
                 return LedgerAccountPairing(

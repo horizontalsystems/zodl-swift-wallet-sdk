@@ -230,6 +230,53 @@ final class LedgerDeviceTests: XCTestCase {
         return try tool.deriveUnifiedFullViewingKey(from: usk)
     }
 
+    /// A testnet unified full viewing key with a transparent and a Sapling item but no Orchard item,
+    /// derived once, offline, from the all-`0x01` 32-byte seed -- nothing here ties it to a real
+    /// wallet or device.
+    private let testnetUFVKWithNoOrchardItem = """
+    uviewtest1pfe0uls0td9a3zvqchscp9yvv2wumu6873hg8pqfe86tqlhsq60xdspfedc90j8y4fwfshtss3xahmhcwwxr8cugndfh9hsr4\
+    sq3a8pvdezz48d57s7y87uv46dyvllsfaj4n24u9mejfpelsrvfuthp6j7lnf54qw0yq57ramzqrd0rt6s9sksseqqxrjf0d3vuj7nwnqkc\
+    tsrw3xs2vgc5lrtr358hxhwg9ec5jr9hvatt95mech7p249znhjk5vgytkhvllakczp5v29fvmx8jnj4hee3sj0t5ytdk30ns5r5s2kcth2\
+    e30h7gpany3nhxd9ycus6rarwy634zejy0ht
+    """
+
+    func testTheNoOrchardFixtureParsesAsAUnifiedFullViewingKey() throws {
+        _ = try UnifiedFullViewingKey(encoding: testnetUFVKWithNoOrchardItem, network: .testnet)
+    }
+
+    /// The key of a nonzero account never derives the identity, so this exercises only the Orchard
+    /// check, the same one account 0 would reach right after its own identity check.
+    func testPairAccountRefusesAnAccountOneKeyWithNoOrchardItem() async throws {
+        let transport = device(ufvk: testnetUFVKWithNoOrchardItem) { _ in LedgerReplies.generatorPoint }
+        let ledger = LedgerDevice(transport: transport, networkType: .testnet)
+
+        do {
+            _ = try await ledger.pairAccount(zip32AccountIndex: Zip32AccountIndex(1))
+            XCTFail("A key with no Orchard item must be refused")
+        } catch let error as ZcashError {
+            guard case let .ledgerMalformedReply(reason) = error else {
+                return XCTFail("Unexpected error \(error.code)")
+            }
+            XCTAssertEqual(reason, "the exported viewing key has no Orchard item")
+        }
+    }
+
+    /// The same, for a second nonzero account: the Orchard check does not depend on which one.
+    func testPairAccountRefusesAnAccountTwoKeyWithNoOrchardItem() async throws {
+        let transport = device(ufvk: testnetUFVKWithNoOrchardItem) { _ in LedgerReplies.generatorPoint }
+        let ledger = LedgerDevice(transport: transport, networkType: .testnet)
+
+        do {
+            _ = try await ledger.pairAccount(zip32AccountIndex: Zip32AccountIndex(2))
+            XCTFail("A key with no Orchard item must be refused")
+        } catch let error as ZcashError {
+            guard case let .ledgerMalformedReply(reason) = error else {
+                return XCTFail("Unexpected error \(error.code)")
+            }
+            XCTAssertEqual(reason, "the exported viewing key has no Orchard item")
+        }
+    }
+
     /// A device on app 3.9.3 that exports `ufvk` and answers the identity probe with `identityKey(n)`
     /// for its n-th probe. By default it answers with the identity of `Environment.seedBytes`, the seed
     /// of `testnetUFVK()`.

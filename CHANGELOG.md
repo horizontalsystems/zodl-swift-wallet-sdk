@@ -65,7 +65,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refuses the pairing with `ZcashError.ledgerDeviceMismatch` when it is not the identity the device
   gave, or with `ledgerMalformedReply` when the key has no transparent item. The key of any other
   account does not derive the identity, so `pairAccount` does not check it for those accounts;
-  `displayUnifiedAddress` checks their keys. The app-version and identity reads before the export take `readTimeout` (`LedgerDevice.defaultReadTimeout`,
+  `displayUnifiedAddress` checks their keys. Every account's exported key, account 0 included, is
+  also refused with `ledgerMalformedReply` when it has no Orchard item, since the signing session
+  needs one. The app-version and identity reads before the export take `readTimeout` (`LedgerDevice.defaultReadTimeout`,
   the engine's normal timeout, by default; `LedgerDevice.defaultPairingReadTimeout`, 10 seconds,
   detects a stalled device early).
   When one of those reads fails on the connection and `reconnect` is given, the failed transport
