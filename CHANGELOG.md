@@ -18,17 +18,6 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   across the FFI.
 - The payment-URI result types expose public initialisers, so consumers can build canned values
   for tests and dependency doubles.
-
-## Removed
-
-- `ZcashEip681Backend` and the `zcashlc_eip681_*` FFI are gone. `PaymentURIParser` now handles
-  every `ethereum:` URI, so the two parse paths no longer disagree about a request's
-  `schemaPrefix`. This matches the Android SDK, which retired its EIP-681 path in the same way.
-  One behaviour is lost with it: non-`ethereum:` EIP-681 scheme prefixes such as `celo:` are no
-  longer accepted, and a URI's own scheme text is normalised to `"ethereum"`.
-
-## Fixed
-
 - `PaymentURIParser` rejects Ethereum native recipients, ERC-20 recipients, and token contracts
   whose hexadecimal address is not exactly 40 digits. The pinned EIP-681 parser previously
   accepted over-length addresses as validated requests.
@@ -39,12 +28,20 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as omitted.
 - `PaymentURIParser` rejects SPL-token amounts that cannot fit the `u64` used by any SPL transfer,
   while leaving mint-specific decimal validation to the consumer that resolves the mint.
-- `PaymentURIParserError.parserFailure(_:)` no longer exposes a raw Rust panic string. Its
+- `PaymentURIParserError.parserFailure(_:)` never exposes a raw Rust panic string. Its
   `RedactedRustError` payload is safe to include in support reports; raw detail remains only in
   device-local Rust diagnostics.
 - `PaymentURIParser` reports missing, retyped, or unknown fields in the Rust result envelope as
-  `invalidEnvelope` instead of `invalidURI`. Callers can distinguish an SDK/core mismatch from a
+  `invalidEnvelope` rather than `invalidURI`. Callers can distinguish an SDK/core mismatch from a
   bad scanned URI without asking the user to rescan.
+
+## Removed
+
+- `ZcashEip681Backend` and the `zcashlc_eip681_*` FFI are gone. `PaymentURIParser` now handles
+  every `ethereum:` URI, so the two parse paths no longer disagree about a request's
+  `schemaPrefix`. This matches the Android SDK, which retired its EIP-681 path in the same way.
+  One behaviour is lost with it: non-`ethereum:` EIP-681 scheme prefixes such as `celo:` are no
+  longer accepted, and a URI's own scheme text is normalised to `"ethereum"`.
 
 # 5.2.0 - 2026-10-09
 
@@ -412,6 +409,7 @@ Sources/ZcashLightClientKit/Resources/checkpoints/testnet/4360000.json
 ...
 Sources/ZcashLightClientKit/Resources/checkpoints/testnet/4470000.json
 ````
+
 # 5.0.0 - 2026-09-23
 
 ## Added
