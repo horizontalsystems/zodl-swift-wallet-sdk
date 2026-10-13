@@ -43,6 +43,11 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   One behaviour is lost with it: non-`ethereum:` EIP-681 scheme prefixes such as `celo:` are no
   longer accepted, and a URI's own scheme text is normalised to `"ethereum"`.
 
+## Fixed
+
+- Transaction submission through `Broadcaster` now treats a server rejection as accepted when that
+  same server confirms it already knows the transaction. No caller changes are required.
+
 # 5.2.0 - 2026-10-09
 
 ## Added
@@ -541,8 +546,6 @@ Sources/ZcashLightClientKit/Resources/checkpoints/testnet/4470000.json
   reads it as empty.
 
 ## Fixed
-
-- Transaction submission through `Broadcaster` now treats a server rejection as accepted when that same server confirms it already knows the transaction. No caller changes are required.
 
 - A bounded Tor GET cancelled or expired before runtime ownership now completes without waiting for a busy
   Tor or synchronizer actor. Later actor admission observes the original deadline and starts no HTTP work.
