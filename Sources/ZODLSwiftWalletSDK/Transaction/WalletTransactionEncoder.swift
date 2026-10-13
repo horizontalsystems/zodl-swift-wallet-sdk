@@ -128,18 +128,28 @@ class WalletTransactionEncoder: TransactionEncoder {
 
     func createProposedTransactions(
         proposal: Proposal,
-        spendingKey: UnifiedSpendingKey
+        spendingKey: UnifiedSpendingKey,
+        ovkPolicy: OvkPolicy
     ) async throws -> [CreatedTransaction] {
-        guard ensureParams(spend: self.spendParamsURL, output: self.outputParamsURL) else {
-            throw ZcashError.walletTransEncoderCreateTransactionMissingSaplingParams
+        // The rust layer only reads the parameter files for a proposal with a Sapling bundle, so
+        // their absence is only an error for such a proposal.
+        if try requiresSaplingParameters(for: proposal) {
+            guard ensureParams(spend: self.spendParamsURL, output: self.outputParamsURL) else {
+                throw ZcashError.walletTransEncoderCreateTransactionMissingSaplingParams
+            }
         }
 
         let txIds = try await rustBackend.createProposedTransactions(
             proposal: proposal.inner,
-            usk: spendingKey
+            usk: spendingKey,
+            ovkPolicy: ovkPolicy
         )
 
         return try await createdTransactions(forTxIds: txIds)
+    }
+
+    func requiresSaplingParameters(for proposal: Proposal) throws -> Bool {
+        try ZcashRustBackend.proposalRequiresSaplingParams(proposal.inner)
     }
 
     func createdTransactions(forTxIds txIds: [Data]) async throws -> [CreatedTransaction] {
@@ -185,17 +195,12 @@ class WalletTransactionEncoder: TransactionEncoder {
     }
 
     func isTransactionKnownToServer(txId: Data) async -> Bool {
-        do {
-            let response = try await self.lightWalletService.fetchTransaction(
-                txId: txId,
-                mode: await sdkFlags.torEnabled
-                ? ServiceMode.txIdGroup(prefix: "submit", txId: txId)
-                : ServiceMode.direct
-            )
-            return response.status != .txidNotRecognized
-        } catch {
-            return false
-        }
+        await lightWalletService.isTransactionKnownToServer(
+            txId: txId,
+            mode: await sdkFlags.torEnabled
+            ? ServiceMode.txIdGroup(prefix: "submit", txId: txId)
+            : ServiceMode.direct
+        )
     }
 
     func ensureParams(spend: URL, output: URL) -> Bool {

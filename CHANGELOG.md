@@ -6,7 +6,36 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 # Unreleased
 
-Changes are relative to `5.0.0`.
+Changes are relative to `5.2.0`.
+
+## Added
+
+- `PaymentURIParser` and the typed `PaymentURIRequest` results provide Rust-backed parsing and
+  validation for Bitcoin, Ethereum (EIP-681, native and ERC-20), Litecoin, and Solana payment
+  request URIs, including Solana Pay interactive transaction-request links.
+- `PaymentURIParserError` distinguishes a bad URI (`invalidURI`, `rejected(_:)`) from an
+  SDK/Rust-core mismatch (`unsupportedEnvelope(version:)`, `invalidEnvelope`) and from a parser
+  crash (`parserFailure(_:)`, carrying a redacted `RedactedRustError`). `PaymentURIRejection`
+  reports which check the Rust parser failed, without carrying any fragment of the caller's input
+  across the FFI.
+- The payment-URI result types expose public initialisers, so consumers can build canned values
+  for tests and dependency doubles.
+- `PaymentURIParser` rejects Ethereum native recipients, ERC-20 recipients, and token contracts
+  whose hexadecimal address is not exactly 40 digits. The pinned EIP-681 parser previously
+  accepted over-length addresses as validated requests.
+- `PaymentURIParser` accepts all-uppercase Bitcoin and Litecoin bech32 addresses used by QR
+  encoders without changing Litecoin's case-sensitive BIP-21 query-key semantics.
+- `PaymentURIParser` rejects overflowing explicit ERC-20 chain IDs and conflicting native
+  Ethereum `value`, `gas`/`gasLimit`, or `gasPrice` parameters instead of reporting those fields
+  as omitted.
+- `PaymentURIParser` rejects SPL-token amounts that cannot fit the `u64` used by any SPL transfer,
+  while leaving mint-specific decimal validation to the consumer that resolves the mint.
+- `PaymentURIParserError.parserFailure(_:)` never exposes a raw Rust panic string. Its
+  `RedactedRustError` payload is safe to include in support reports; raw detail remains only in
+  device-local Rust diagnostics.
+- `PaymentURIParser` reports missing, retyped, or unknown fields in the Rust result envelope as
+  `invalidEnvelope` rather than `invalidURI`. Callers can distinguish an SDK/core mismatch from a
+  bad scanned URI without asking the user to rescan.
 
 ## Changed
 
@@ -27,6 +56,386 @@ Changes are relative to `5.0.0`.
   SPM resource bundle is `zodl-swift-wallet-sdk_ZODLSwiftWalletSDK.bundle` instead of
   `ZcashLightClientKit_ZcashLightClientKit.bundle`; code that matched either literal must be
   updated. See MIGRATING.md.
+
+## Removed
+
+- `ZcashEip681Backend` and the `zcashlc_eip681_*` FFI are gone. `PaymentURIParser` now handles
+  every `ethereum:` URI, so the two parse paths no longer disagree about a request's
+  `schemaPrefix`. This matches the Android SDK, which retired its EIP-681 path in the same way.
+  One behaviour is lost with it: non-`ethereum:` EIP-681 scheme prefixes such as `celo:` are no
+  longer accepted, and a URI's own scheme text is normalised to `"ethereum"`.
+
+## Fixed
+
+- Transaction submission through `Broadcaster` now treats a server rejection as accepted when that
+  same server confirms it already knows the transaction. No caller changes are required.
+
+# 5.2.0 - 2026-10-09
+
+## Added
+
+### Ledger hardware wallets over Bluetooth
+
+- Pairing accounts on, and signing PCZTs with, a Ledger device running the Zcash app (3.6.0 or newer;
+  3.9.0 or newer for a transaction with Ironwood outputs) over Bluetooth LE. `docs/LEDGER.md` walks
+  through the whole flow.
+- `LedgerBluetoothScanner(logger:)` finds Ledger devices. `devices()` is an `AsyncThrowingStream` of
+  `[LedgerBluetoothDevice]` that yields every device found so far each time the list changes,
+  devices the system is already connected to included. A `LedgerBluetoothDevice` carries the
+  device's `id`, advertised `name`, `model` (a `LedgerDeviceModel`, with its `productName`) and
+  `rssi`. The stream ends with `ZcashError.ledgerBluetoothUnsupported`,
+  `ledgerBluetoothUnauthorized` or `ledgerBluetoothPoweredOff` when Bluetooth is unavailable, or
+  with `ledgerBluetoothDisconnected` when Bluetooth resets while it is the active scan. One scan
+  runs at a time: a new one ends the previous stream, and scanning stops when the iteration ends.
+  The app must declare `NSBluetoothAlwaysUsageDescription`, and a sandboxed macOS app the
+  `com.apple.security.device.bluetooth` entitlement.
+- `LedgerBluetoothScanner.connect(to:timeout:)` opens a `LedgerBluetoothTransport` (`device`,
+  `exchange(_:timeout:)`, `close()`). The first connection to a device brings up Bluetooth pairing,
+  and `timeout` (60 seconds by default) covers it: the user confirms the pairing code on the device
+  within it. A device that was reset, or unpaired on the phone, fails with
+  `ZcashError.ledgerBluetoothPairingRefused`, and the user removes it from the system Bluetooth
+  settings and pairs again; one that is merely slow to answer times out with `ledgerTimeout`. A
+  `connect(to:timeout:)` cancelled while it still waits for Bluetooth to come up throws
+  `CancellationError` at once and never goes on to connect, or to displace a connection another
+  caller has made since. Connecting again to a device that already has a live connection replaces
+  it: the displaced connection fails with the non-restartable `ZcashError.ledgerTransportReplaced`
+  instead, since the restartable `ledgerTransportClosed` would invite it to reconnect and displace
+  the new connection in turn. A Bluetooth reset fails every open connection, and a connect still in
+  progress, with the restartable `ledgerBluetoothDisconnected`.
+- A `LedgerBluetoothTransport` closes itself once an exchange fails after its first frame went out
+  (a timeout, a disconnect, a reply that does not reassemble, or a cancelled task), whoever the
+  caller is; every later call then throws the error that closed it, or
+  `ZcashError.ledgerTransportClosed` after a cancellation or `close()`. Open a new connection then.
+- `LedgerAPDUTransport`, the protocol the pairing and signing code depends on
+  (`exchange(_:timeout:)`, `close()`), for custom transports and test doubles. A conformer is a
+  class or an actor: the SDK identifies a transport by instance to hold it for a whole ceremony.
+- `LedgerExchangeNotStarted`, the error a transport's `exchange(_:timeout:)` throws to report that
+  this exchange never sent anything, such as a caller cancelled while queued behind another exchange
+  on the same transport; the SDK's own commands normalize it to `CancellationError`.
+- Every pairing, signing ceremony and app query or switch holds its transport for all of its
+  commands: two of them over one transport run one after the other, whichever `LedgerDevice`,
+  `Synchronizer.signPCZTWithLedger` or `LedgerZcashApp` call started them, so neither can put a
+  command between two of the other's and corrupt the device's ceremony. A call cancelled while it
+  waits for its turn throws `CancellationError`, sends nothing and closes nothing. A pairing that
+  reconnects partway through holds the replacement transport the same way for the rest of the call,
+  so a second device or ceremony on it waits too.
+- `LedgerDevice`'s commands and signing close the transport on any exchange that fails, except one
+  that throws `LedgerExchangeNotStarted`: the device never received that command, so the connection
+  of whoever is using it is not closed out from under them. A `LedgerDevice` call or a signing
+  ceremony that is cancelled once it holds the device closes the transport, whatever step it was
+  at; a call cancelled while it waits for its turn, before it reaches the device, closes nothing.
+  `LedgerZcashApp.ensureZcashAppOpen` closes the caller's transport only when its link fails, and
+  closes a transport its `reconnect` opened whenever the call fails; `LedgerZcashApp.currentApp`
+  never closes the transport it is given.
+- `LedgerDevice(transport:networkType:)`: `appVersion()` (a `LedgerAppVersion`: `major`, `minor`,
+  `patch`, and `supportsPczt`, whether that version can sign for this SDK), `deviceIdentity()` (a
+  `LedgerDeviceIdentity`), `pairAccount(zip32AccountIndex:readTimeout:reconnect:)` (a
+  `LedgerAccountPairing` carrying the account's `UnifiedFullViewingKey`, the `LedgerAccountBinding`
+  to store with the imported account, and the app version) and
+  `displayUnifiedAddress(ufvk:zip32AccountIndex:transparentAddressIndex:)`.
+  `pairAccount` asks the user to approve the export on the device, refuses an app that cannot sign,
+  and reads the device's identity once, before the export (the Zcash app leaves a status screen up
+  after the export and drops the next command, so a second probe never gets its reply). For ZIP 32
+  account 0, `pairAccount` derives the identity from the transparent item of the exported key and
+  refuses the pairing with `ZcashError.ledgerDeviceMismatch` when it is not the identity the device
+  gave, or with `ledgerMalformedReply` when the key has no transparent item. The key of any other
+  account does not derive the identity, so `pairAccount` does not check it for those accounts;
+  `displayUnifiedAddress` checks their keys. Every account's exported key, account 0 included, is
+  also refused with `ledgerMalformedReply` when it has no Orchard item, since the signing session
+  needs one. The app-version and identity reads before the export take `readTimeout`
+  (`LedgerDevice.defaultReadTimeout`, the engine's normal timeout, by default;
+  `LedgerDevice.defaultPairingReadTimeout`, 10 seconds, detects a stalled device early). When one of
+  those reads fails on the connection and `reconnect` is given, the failed transport (already
+  closed) is replaced with one from `reconnect` and both reads are asked again from the start; a
+  second such failure, or a refusal, is not retried, and nothing is retried once the export command
+  has been sent. `LedgerDevice.transport` names the transport the device currently talks over; the
+  caller owns every transport, the reconnected ones included, and closes each one it opened.
+- `LedgerDevice.expectedUnifiedAddress(ufvk:networkType:)` derives, with no device, the unified
+  address a Ledger device displays for an account: the account's Orchard receiver at diversifier
+  index 0, external scope, alone. The account's default unified address also carries a transparent
+  receiver and never matches the device screen. `displayUnifiedAddress` shows the device's address,
+  throws `ZcashError.ledgerDeviceMismatch` when the device replies with an address that `ufvk` does
+  not derive, and otherwise returns the address derived from `ufvk`, never the device's reply. Show
+  `expectedUnifiedAddress` to the user while the device waits for confirmation, for the user to
+  compare with the device screen.
+- `LedgerDeviceIdentity` is validated on construction (`init(encoding:)`, and when decoded), and
+  `LedgerAccountBinding` (`init(deviceIdentity:zip32AccountIndex:)`) is `Codable`. The identity
+  names the device's seed on one network; it is linkable to the device's first transparent address
+  once that address has spent on chain, so a wallet stores it and never logs it. Its `description`
+  prints a placeholder.
+- `Synchronizer.signPCZTWithLedger(pczt:accountUUID:binding:transport:progress:)` signs the PCZT
+  `createPCZTFromProposal` returned, reporting `LedgerSigningProgress` (`.identifyingDevice`,
+  `.streaming(sent:total:)`, `.awaitingReviewOnDevice`, `.signing`, `.complete`); pass its result,
+  with the result of `addProofsToPCZT` on the same PCZT, to `createTransactionFromPCZT`. Before
+  anything is sent it checks that the device runs a Zcash app that can sign and is the device in the
+  binding, and that the transaction breaks none of the device's rules; the user then reviews the
+  transaction on the device, with no timeout. The method has a default implementation that reports
+  the capability as unavailable, so custom `Synchronizer` conformers and test doubles keep compiling
+  unchanged; `SDKSynchronizer` and `SlipstreamSynchronizer` implement it.
+- `Account.ledgerKeySource` (`"ledger"`, compared case-insensitively), the `keySource` to import a
+  Ledger account with. `proposeTransfer`, `proposefulfillingPaymentURI` and `proposeShielding` read
+  it to keep a Ledger-tagged account's proposals to at most one change output, matching the Ledger
+  Zcash app's one-change-output limit; migration run sizing is unaffected and stays the default.
+- `LedgerZcashApp`, which drives the device's dashboard commands. `currentApp(transport:)` returns
+  the `LedgerRunningApp` (`name`, `version`, `isDashboard`, `isZcash`) the device is running.
+  `ensureZcashAppOpen(transport:reconnect:)` opens the Zcash app when the device is elsewhere — on
+  its dashboard, as it is after a first Bluetooth pairing, or in another app, which it closes first
+  — once the user confirms on the device, and returns the transport to keep using: the Bluetooth
+  link may drop while the device switches apps, and a dropped link is replaced through `reconnect`.
+  It throws `ZcashError.ledgerAppNotInstalled` when the device has no Zcash app to open, and
+  `ledgerAppOpenRejected` when the user declines opening it on the device. A device that does not
+  reach the Zcash app in time, that reports its dashboard or another running app, or that reports
+  any other unrecognized command, fails with `ledgerWrongApp`.
+- `LedgerZcashApp.ensureZcashAppOpen` waits up to 10 seconds for the Zcash app after the user's
+  confirmation, each poll waiting up to 3 seconds for its answer; a poll that loses the link or gets
+  no answer is always followed by a reconnect before those 10 seconds can end the wait, and the time
+  a reconnect that succeeds takes does not count towards them. Each reconnect during that wait has
+  10 seconds of its own, enforced for a `reconnect` that honors cancellation; one that ignores it is
+  waited for, and any transport it then produces is closed, unless another ceremony is already
+  running on it, rather than used. A failed one restarts the 10-second wait, since the device may
+  still be rebooting into the app, and is tried again after 500 milliseconds, then after twice the
+  previous wait, at most 2 seconds. It keeps trying for 10 seconds from the first of the reconnects
+  that failed in a row, and the first one that fails once they have passed propagates its own
+  failure instead of the generic timeout; a reconnect that succeeds ends the row, so a later failure
+  starts again from 500 milliseconds. The first app query waits up to 10 seconds; if it stalls or
+  the link fails, it is asked once more on a fresh connection, which `reconnect` has 10 seconds to
+  open, before anything else is sent, and the open command is never sent twice.
+- `ZcashError.ledgerIsRestartable` says whether a fresh attempt at the same Ledger operation could
+  succeed, and is `nil` for an error that did not come from the Ledger integration. It is `true`
+  after the user declined on the device (`ledgerUserRejected`, `ledgerAppOpenRejected`); after
+  `ledgerWrongApp` and `ledgerDerivationBudgetExhausted`, since opening or reopening the Zcash app
+  on the device lets a fresh attempt succeed; after a `ledgerDeviceRefused` whose condition can
+  clear, such as a locked device; and after a Bluetooth or transport failure, where a new
+  connection may succeed (`ledgerBluetoothPoweredOff`, `ledgerDeviceNotFound`,
+  `ledgerBluetoothConnectionFailed`, `ledgerBluetoothDisconnected`, `ledgerTimeout`,
+  `ledgerTransportClosed`, `ledgerTransportFailed`). It is `false` for every other Ledger case. It
+  never means "resend the last command": a fresh attempt starts over.
+- `LedgerAccountBinding`, `LedgerAccountPairing`, `UnifiedFullViewingKey`, `UnifiedAddress`,
+  `Zip32AccountIndex` and `NetworkType` are `Sendable`, so everything `LedgerDevice`'s methods take
+  and return crosses its actor boundary under Swift 6 strict concurrency without `@preconcurrency`.
+
+## Changed
+
+- `ZcashError` and `ZcashErrorCode` gain twenty-four Ledger cases, `ZLEDG0001` to `ZLEDG0024`, one
+  per Ledger failure the wallet handles differently (user rejection, wrong app, app too old, device
+  mismatch, derivation budget spent, device refusal with its status word, transaction not
+  signable, and the Bluetooth and transport failures). Only the Ledger API throws them, and no
+  error reason carries command or reply bytes, a PCZT, a viewing key, an address, a device identity
+  or a signature. An exhaustive `switch` over either stops compiling until they are handled; see
+  `MIGRATING.md`.
+- The Rust logging the SDK installs at load caps the network stack under the sync engine (`h2`,
+  `hyper`, `hyper_util`, `rustls`, `tonic`, `tower`) at `warn`, never above the level the host asks
+  for. A host at `off`, `error` or `warn` sees no change; a host at `info` or more verbose no longer
+  sees those six crates' `info`, `debug` and `trace` lines. The SDK's own targets, and
+  `zcash_client_backend` (already capped the same way), are unchanged. No call site needs editing.
+
+## Checkpoints
+
+Mainnet
+
+````
+Sources/ZcashLightClientKit/Resources/checkpoints/mainnet/3510000.json
+````
+
+Testnet
+
+````
+Sources/ZcashLightClientKit/Resources/checkpoints/testnet/4480000.json
+````
+
+# 5.1.0 - 2026-10-07
+
+## Added
+
+- `GiftCard` reads a gift card link with `GiftCard(link:)`: any `https` URL whose fragment carries
+  a `v=1` card (`#v=1&key=…&height=…`, as `https://gift.zodl.com/` issues) or the legacy JSON
+  payment-link encoding at `/payment-links/open#vN=`; `GiftCard.Origin` names the encoding read
+  (`.zodl`, `.legacyV1`, `.legacyV2`, `.legacyV3`). It exposes the card's `origin`, `network`,
+  `birthdayHeight`, the unverified `statedAmount` and `message` the link carries, and the card
+  wallet's Orchard-only `fundingAddress`. Parsing is offline. `message` is sanitized: line breaks
+  and other control whitespace become a space, and control and invisible formatting characters
+  (bidi overrides and isolates, zero-width spaces and the like) are removed; a message that is
+  blank afterwards is `nil`. A link whose birthday is below the network's NU5 activation height is
+  refused, since cards hold Orchard funds only. An unreadable link throws one error per reason:
+  `giftCardLinkNotAGiftCard` (`ZGIFT0006`), `giftCardLinkUnsupportedVersion` (`ZGIFT0007`),
+  `giftCardLinkUnsupportedNetwork` (`ZGIFT0008`), `giftCardLinkInvalidBirthday` (`ZGIFT0009`) or
+  `giftCardLinkInvalid` (`ZGIFT0010`); none carries any part of the link. The card's seed is not
+  exposed, takes no part in `==`, and is wiped from memory when the card is released;
+  `description`, `debugDescription` and reflection of a `GiftCard` are redacted.
+- `GiftCardRedeemer` sweeps a card into the user's wallet through a temporary card wallet that runs
+  beside the app's synchronizer; `docs/GIFT_CARDS.md` describes the flow.
+  `init(card:network:endpoint:isTorEnabled:storageDirectory:loggingPolicy:)` touches neither the
+  disk nor the network; `check()`, `redeem(to:memo:)` or `redeem(to:memo:recordIn:)`, and
+  `cleanup()` follow, each described below. `card` is the card being redeemed, and `alias` is the
+  card wallet's synchronizer alias, which identifies the card but not its key and is safe to log.
+  The card wallet is a `SlipstreamSynchronizer` with its own alias and its own directory under
+  `storageDirectory` (`GiftCardRedeemer.defaultStorageDirectory` by default). It never touches the
+  main wallet's data, but the two share CPU and I/O, so checking a card can slow the main wallet's
+  sync. Only one redeemer per card may be alive in the process, including while an earlier one's
+  cleanup is still running: creating another throws `giftCardRedeemerAlreadyActive` (`ZGIFT0002`),
+  and a card for another network throws `giftCardNetworkMismatch` (`ZGIFT0001`). Calls on one
+  redeemer run one at a time in the order they are made, and a call cancelled while it waits
+  throws `CancellationError` without running. `isTorEnabled` sends the card wallet's identifying
+  requests (birthday and restore metadata, sync metadata and claim submission) over Tor, with no
+  direct fallback; Slipstream's bulk block requests remain direct. Pass the main wallet's setting:
+  with `false`, identifying requests expose the device's IP address together with the card and its
+  claim. `loggingPolicy` defaults to `.noLogging`, which keeps the transaction linking the card to
+  the user's address out of shared logs.
+- `GiftCardRedeemer.check()` creates and syncs the card wallet on first use and returns a
+  `GiftCardStatus`: `.ready`, `.pending` while the card's funds wait for their 10 confirmations,
+  `.dust` when the fee would take all of its spendable funds, or `.empty`, with `total`,
+  `spendable` and `pending` amounts. A `.ready` status also carries `fee`, the ZIP 317 fee a
+  redemption pays for the card's actual notes, and `redeemable`, what it sends to the recipient
+  after that fee, both from the same send-max preview proposal for an Orchard-capable recipient, so
+  show `redeemable` rather than `spendable` minus a guessed fee. The preview reflects current notes
+  and chain height; later note or chain changes can change the actual redemption's amount and fee.
+  `fee` is `nil` and `redeemable` is `.zero` in every other state. The card wallet starts from the
+  server's tree state for the block before the card's birthday, or from the bundled checkpoint
+  below it when the server does not provide that state, so the first check downloads and scans the
+  blocks since the card was funded. `check()` never reuses a wallet an earlier redeemer left
+  behind, and the card wallet keeps syncing after a check, so a later check reports the latest
+  balance without a new sync.
+  A balance counts only when the chain tip is known, scanning has covered it and the card account
+  exists: a funded balance returns at once, and an empty one must hold for 15 seconds direct or
+  30 seconds with Tor, restarting whenever readiness or the tip changes. A disconnected wallet may
+  recover for 60 seconds direct or 120 seconds with Tor before `giftCardCheckDisconnected`
+  (`ZGIFT0015`); a sync stall the wallet cannot recover from throws `giftCardCheckSyncStalled`
+  (`ZGIFT0016`), and the next check starts a fresh pass. Each caller waits at most 600 seconds
+  from the call, including queued time and wallet preparation, before `giftCardCheckTimedOut`
+  (`ZGIFT0014`); cancellation returns `CancellationError` without waiting for preparation to
+  finish. None of these outcomes means the card is empty or that cleanup has happened: the balance
+  is unknown, the wallet's unfinished work stays owned until it drains, and a later check reuses a
+  wallet whose preparation finished in the meantime. Sync errors are rethrown, and a cleaned-up
+  redeemer throws `giftCardRedeemerCleanedUp` (`ZGIFT0005`).
+- `GiftCardRedeemer.redeem(to:memo:)` sends the card's whole spendable balance, minus the ZIP 317
+  fee and with an optional memo, to a `UnifiedAddress` that has an Orchard receiver (other
+  receivers may be present), and returns the `TransactionSubmitResult`s. Value still waiting for
+  confirmations stays on the card. An address without an Orchard receiver throws
+  `giftCardRecipientRequiresOrchard` (`ZGIFT0013`) and one on another network
+  `giftCardNetworkMismatch`; a call before `check()` has prepared the wallet throws
+  `giftCardRedeemerNotReady` (`ZGIFT0003`), a card with nothing to sweep, `.dust` included,
+  `giftCardNothingToRedeem` (`ZGIFT0004`), and a claim that completes without any submission
+  result `giftCardRedemptionIncomplete` (`ZGIFT0012`). The claim discards the outgoing viewing
+  key, so the card's key, which the card's issuer can rederive, reveals neither the recipient nor
+  the amount. Sapling parameters are needed only when the actual proposal has Sapling inputs or
+  outputs; an Orchard recipient alone does not rule that out. A redemption can be cancelled until
+  native transaction creation begins; from then on it finishes creation, submission and recording
+  even if the caller cancels, and `cleanup()` waits for it. Creation already underway cannot be
+  rolled back, so check the card again before retrying after a cancellation that raced it. After a
+  submission fails, the card wallet treats the notes as spent until the transaction expires: clean
+  up and create a new redeemer to retry.
+- `GiftCardRedeemer.redeem(to:memo:recordIn:)` takes the user's own `Synchronizer` and, after the
+  sweep is accepted, stores the claim transaction in it as a trusted receive (ZIP 315): the main
+  wallet shows the incoming gift at once and can spend it after the default 3 confirmations. This
+  works while the destination is stopped, and only with the SDK's own synchronizers
+  (`SDKSynchronizer`, `SlipstreamSynchronizer`). It returns a `GiftCardRedeemer.Redemption` with
+  the submission `results`, the `fee` paid, the `amount` sent to the recipient, and
+  `recordedInDestination`, which is `false` (never an error) when the destination could not record
+  the claim, including when the claim does not involve the destination's wallet and so was not
+  stored there; the funds are on chain once mined. Recording is attempted for every accepted
+  transaction, even after a later submission error or a failure to record another. When trust was
+  never recorded and the claim pays the destination wallet, normal sync can discover it as an
+  ordinary untrusted receive; an unrelated `recordIn:` wallet does not receive the claim. A failure
+  to record is logged with `ZcashError.synchronizerTrustedTransactionIdMismatch` (`ZSYNCO0010`) or
+  `ZcashError.rustSetTransactionTrust` (`ZRUST0158`). Anyone holding the card link, including
+  whoever minted the card, can sign a competing spend of its notes: a reorg after three to nine
+  claim confirmations could replace a claim already spent from, a residual risk the shorter wait
+  accepts for faster spendability. Externally funded card notes still need ten confirmations.
+  `redeem(to:memo:)` records nothing.
+- `GiftCardRedeemer.cleanup()` stops the card wallet, waits for its unfinished work, wipes it,
+  closes its service connections and Tor runtime, and deletes all of its files; a new redeemer can
+  then claim the card. Unredeemed funds stay on the card, since its key is in the link. Each caller
+  waits at most 30 seconds, including queued work, before `giftCardCleanupTimedOut` (`ZGIFT0011`),
+  and cancellation returns `CancellationError`. Neither stops the cleanup, which keeps the card
+  claimed until it succeeds, so keep the UI in a cleanup state rather than creating a replacement.
+  Wipe and storage failures reach the caller and are retried with capped exponential delay.
+  Releasing a redeemer that was checked, or whose cleanup was requested, finishes the teardown in
+  the background.
+- `GiftCardRedeemer.removeLeftoverWallets(in:)` deletes the card wallets that a crash or a killed
+  app left in a storage directory, and returns how many it deleted. Such a wallet holds the card's
+  keys and the claim's recipient, so call it at launch. It never touches a wallet whose redeemer or
+  teardown is alive in the process, nor anything that is not a card wallet.
+  `GiftCardRedeemer.defaultStorageDirectory` is the directory both use by default.
+- `AwaitableStopSynchronizer.stopAndWait()` lets clients of `SDKSynchronizer` and
+  `SlipstreamSynchronizer` wait until the synchronizer's stop operation finishes, including
+  earlier queued lifecycle work in Slipstream. Idle and unprepared calls complete without waiting
+  for a new state-stream event. Existing `Synchronizer` conformers need no new requirement, and
+  `stop()` still returns immediately. The classic synchronizer joins processor-owned sync,
+  mempool, rewind, polling and action work and supersedes queued automatic restarts. Slipstream can still
+  report a non-quiescent stop. Coordinate subsequent starts when pausing the main wallet for a gift claim.
+- `OvkPolicy` (`.sender`, `.discard`) and
+  `Synchronizer.createProposedTransactions(proposal:spendingKey:ovkPolicy:)` /
+  `Broadcaster.createProposedTransactions(proposal:spendingKey:ovkPolicy:)`. With `.discard` the
+  transactions' recipients, amounts and memos cannot be recovered from the chain by anyone holding
+  the spending account's keys, including this wallet after a restore from seed (its local record
+  of the transaction is unaffected). The existing two-argument calls keep `.sender`. Both new
+  requirements have default implementations, so custom conformers still compile; those defaults
+  throw for `.discard` rather than create recoverable outputs.
+- `createProposedTransactions` (on `Synchronizer` and `Broadcaster`) no longer downloads the Sapling
+  parameters, nor throws `walletTransEncoderCreateTransactionMissingSaplingParams`, for a proposal
+  with no Sapling input, payment, change or dummy output; only Sapling proposals need them. A new
+  wallet that only spends Orchard or Ironwood funds never downloads the 50 MB of parameter files.
+  A proposal that cannot be inspected throws `ZcashError.rustProposalRequiresSaplingParams`
+  (`ZRUST0157`).
+- `NetworkActivationHeights.nu7` sets the NU7 activation height of a custom or regtest network.
+  A `nil` height means "not activated".
+
+## Changed
+
+- `ZcashError` and `ZcashErrorCode` gain the sixteen gift-card cases named above (`ZGIFT0001` to
+  `ZGIFT0016`), `synchronizerTrustedTransactionIdMismatch` (`ZSYNCO0010`),
+  `rustProposalRequiresSaplingParams` (`ZRUST0157`) and `rustSetTransactionTrust` (`ZRUST0158`).
+  An exhaustive `switch` over either stops compiling until they are handled; see `MIGRATING.md`.
+- `TxId.init(_ id: [UInt8])` now throws `ZcashError.txIdNot32Bytes` (`ZMODEL0001`) unless `id` is
+  exactly 32 bytes, so call sites need `try`. `TxId.id` is now a `let`: assigning to it no longer
+  compiles; create a new `TxId` instead.
+- `ZcashTransaction.Overview.getState(for:)` (and the `state` it fills in on the transactions the
+  synchronizer returns) reports a trusted receive (`isTrusted`, ZIP 315) as `.confirmed` once it
+  is 3 blocks deep, the depth at which its funds become spendable, instead of 10. Untrusted
+  receives, sent, self-send and shielding transactions are unchanged. No call site needs editing.
+
+### NU7 pre-release crates
+
+- The SDK now builds on the NU7 pre-release generation of the underlying Zcash Rust crates and the
+  `zodl-slipstream` 0.4.0-pre.1 engine.
+- Every unified address, unified full viewing key and unified incoming viewing key string the SDK
+  returns is ZIP 316 revision 0, with every receiver or item it carries. Revision 2 is used only
+  for a value revision 0 cannot represent (one with expiry metadata, a P2SH viewing-key item, or
+  only transparent items). Decoding still accepts both revisions.
+- Coinholder voting is built on `zcash_voting` 5.1.1-rc.3 as it stands at the head of
+  valargroup/zcash_voting#373, the pull request that moves its librustzcash backend to the NU7
+  pre-release crates. No release carries that change yet, so the Rust core takes the crate, and
+  the crates under it that the change also needs, from git revisions; they are replaced by the
+  releases once those exist. The voting API is unchanged.
+
+## Fixed
+
+- Explicit starts requested from rewind completion wait for retained rewind callbacks to finish,
+  preserve retry intent and coalesce into one sync run. A later stop or wipe cancels that request.
+- `SDKSynchronizer.rewind(_:)` keeps stopped and never-started wallets stopped after success or failure.
+  A stop requested during rewind also prevents automatic polling from restarting. Call `start()` explicitly to resume syncing.
+- Block download shutdown now waits for in-flight storage writes even when its caller is
+  cancelled. Cancellation during the final write no longer starts an extended download range,
+  and `SDKSynchronizer.wipe()` waits for a block download that a cancelled sync action started
+  before it deletes anything. No call-site changes are required.
+
+## Checkpoints
+
+Mainnet
+
+````
+Sources/ZcashLightClientKit/Resources/checkpoints/mainnet/3485000.json
+...
+Sources/ZcashLightClientKit/Resources/checkpoints/mainnet/3507500.json
+````
+
+Testnet
+
+````
+Sources/ZcashLightClientKit/Resources/checkpoints/testnet/4360000.json
+...
+Sources/ZcashLightClientKit/Resources/checkpoints/testnet/4470000.json
+````
 
 # 5.0.0 - 2026-09-23
 

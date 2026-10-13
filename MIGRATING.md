@@ -49,6 +49,65 @@ bridged to `NSError` has the domain `ZODLSwiftWalletSDK.ZcashError`, and the SPM
 is `zodl-swift-wallet-sdk_ZODLSwiftWalletSDK.bundle`. Match on `ZcashError`'s code or cases
 rather than on either string.
 
+## `ZcashError` gained cases — Ledger hardware wallets
+
+`ZcashError` and `ZcashErrorCode` have twenty-four new cases, `ZLEDG0001` to `ZLEDG0024`, which
+only the Ledger API throws: `LedgerBluetoothScanner`, `LedgerBluetoothTransport`, `LedgerDevice`,
+`LedgerZcashApp`, `LedgerDeviceIdentity` and `Synchronizer.signPCZTWithLedger`. An exhaustive
+`switch` over either type stops compiling until they are handled. Ten of them carry a payload: a
+status word (`ledgerWrongApp`, and `ledgerDeviceRefused`, which also says whether the refusal is
+transient), a reason (`ledgerAppTooOld`, `ledgerCapsMismatch`, `ledgerTransactionNotSignable`,
+`ledgerMalformedReply`, `ledgerInvalidInput`, `ledgerInternal`) or the underlying error
+(`ledgerBluetoothConnectionFailed`, `ledgerTransportFailed`). `ZcashError.ledgerIsRestartable`
+says which of them a fresh attempt could get past.
+
+```swift
+case .ledgerUserRejected, .ledgerAppOpenRejected:
+    // The user declined on the device: offer another attempt.
+    break
+case .ledgerTransportReplaced:
+    // Another connection to the same device displaced this one: do not reconnect from here.
+    break
+case .ledgerBluetoothDisconnected, .ledgerTimeout, .ledgerTransportClosed, .ledgerTransportFailed:
+    // The transport is closed: open a new connection before trying again.
+    break
+```
+
+## `ZcashError` gained cases — gift cards, claim recording, Sapling parameters
+
+`ZcashError` and `ZcashErrorCode` have nineteen new cases: the gift-card errors `ZGIFT0001` to
+`ZGIFT0016`, which only `GiftCard(link:)` and `GiftCardRedeemer` throw;
+`rustProposalRequiresSaplingParams` (`ZRUST0157`), which `createProposedTransactions` throws for a
+proposal it cannot inspect; and `synchronizerTrustedTransactionIdMismatch` (`ZSYNCO0010`) and
+`rustSetTransactionTrust` (`ZRUST0158`), which `GiftCardRedeemer` only logs. An exhaustive
+`switch` over either type stops compiling until they are handled. The gift-card cases carry no
+payload.
+
+```swift
+case .giftCardCheckTimedOut, .giftCardCheckDisconnected, .giftCardCheckSyncStalled:
+    // The card's balance is unknown, not zero: offer another check.
+    break
+case .giftCardCleanupTimedOut:
+    // Cleanup continues and keeps the card: wait for it before creating another redeemer.
+    break
+```
+
+## `TxId` validates its length — `init(_: [UInt8])` throws
+
+`TxId.init(_ id: [UInt8])` now throws `ZcashError.txIdNot32Bytes` for anything but 32 bytes,
+and `TxId.id` is a `let`.
+
+```swift
+// Before
+let txId = TxId(bytes)
+var copy = txId
+copy.id = otherBytes
+
+// After
+let txId = try TxId(bytes)
+let copy = try TxId(otherBytes)
+```
+
 ## Bounded Tor GET requests
 
 After successful Tor enablement, use
