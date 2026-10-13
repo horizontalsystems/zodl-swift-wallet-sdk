@@ -65,7 +65,7 @@ info: ## Print the resolved toolchain and FFI state
 		else echo "absent (not macOS)"; fi
 	@printf "XCFramework:  "; \
 		if [ -d "$(XCFRAMEWORK)" ]; then echo "$(XCFRAMEWORK)"; \
-		else echo "<not built; run make ffi-macos>"; fi
+		else echo "<not built; run make ffi-ci>"; fi
 	@printf "LocalPackages:"; \
 		if [ -d LocalPackages ]; then echo " present (local FFI in use)"; \
 		else echo " absent (Package.swift uses the released FFI)"; fi
@@ -223,6 +223,8 @@ ffi-macos: require-macos ## Build the macOS FFI and assemble the XCFramework
 # every slice with LTO. The previous macOS products go first, because the lipo
 # step bundles every static library it finds there, a stale x86_64 one
 # included.
+# Keep the rm on a line of its own: make -n still executes any line that runs
+# $(MAKE), and the script tests dry-run this target.
 .PHONY: ffi-ci
 ffi-ci: require-macos ## Build the FFI the way CI does: arm64 macOS only, without fat LTO
 	rm -rf $(BUILD_SUPPORT)/products/macos

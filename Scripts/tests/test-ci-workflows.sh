@@ -3,6 +3,8 @@
 # test-workflow.sh, these never run cargo, gh or a workflow. `make -n` prints
 # the commands a target would run; GNU make still descends into `$(MAKE)`
 # lines under -n, but only to print their commands too.
+# A recipe line that joins another command to `$(MAKE)` would run that command
+# for real here, which is why ffi-ci keeps its rm on a line of its own.
 
 # The dry run of `make <target>`, saved to a scratch file whose path is printed.
 _dry_run() {

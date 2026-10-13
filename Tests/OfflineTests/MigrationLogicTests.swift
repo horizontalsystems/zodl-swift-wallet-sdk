@@ -1180,9 +1180,9 @@ final class MigrationLogicTests: ZcashTestCase {
     }
 
     static func makeSchedule(count: Int) -> MigrationSchedule {
-        // An explicit accumulator rather than `(0..<count).map { ... }`: CI's Xcode 16.0 compiler
-        // times out type-checking the closure-wrapped multi-argument literal expression ("unable to
-        // type-check this expression in reasonable time"); newer local toolchains accept either form.
+        // An explicit accumulator rather than `(0..<count).map { ... }`: Xcode 16.0's compiler
+        // timed out type-checking the closure-wrapped multi-argument literal expression ("unable to
+        // type-check this expression in reasonable time"); newer toolchains accept either form.
         var transfers: [MigrationTransferProposal] = []
         for index in 0..<count {
             let amount = Zatoshi(Int64((index + 1) * 100_000))

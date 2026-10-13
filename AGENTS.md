@@ -198,7 +198,7 @@ rather than a second table reader.
 ## Pre-push validation
 
 Before opening a PR or pushing to an existing PR branch, run the checks CI runs.
-On a cache miss CI builds the Rust FFI from source (30-minute timeout) before it
+On a cache miss CI builds the Rust FFI from source (60-minute timeout) before it
 compiles a line of Swift, so a mistake that a local build would have caught in a
 minute can cost most of an hour to surface.
 
@@ -258,10 +258,10 @@ says nothing about them; `swift.yml` runs both.
 | Any change to an FFI signature or a new FFI function | `make ffi-all` (all five architectures) before PRing |
 | Bumping the pinned `zcash_client_backend` | `./Scripts/update-proposal-proto.sh --check` |
 
-`make ffi-ci`, `make ffi-macos` and `make rebuild-ffi` cover a single platform. A mismatch
-between the generated `zcashlc.h` and the Swift call site compiles cleanly on
-both sides and fails at *runtime*, so a change to the Swift↔Rust boundary needs
-a real build and the offline suite — never a lint pass alone.
+`make ffi-ci`, `make ffi-macos` and `make rebuild-ffi` cover a single platform.
+A mismatch between the generated `zcashlc.h` and the Swift call site compiles
+cleanly on both sides and fails at *runtime*, so a change to the Swift↔Rust
+boundary needs a real build and the offline suite — never a lint pass alone.
 
 ## Worktree layout
 

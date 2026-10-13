@@ -61,7 +61,8 @@ jobs:
       contents: read
 
     # Xcode 27 ships only on this image, which GitHub still marks as a public
-    # preview. If it misbehaves, macos-26 with Xcode 26.6 is the fallback.
+    # preview (https://github.com/actions/runner-images/issues/14404). If it
+    # misbehaves, macos-26 with Xcode 26.6 is the fallback.
     runs-on: xcode-27
 
     steps:
@@ -76,7 +77,7 @@ jobs:
     - name: Run release-script tests
       run: make test-scripts
 
-    # Generate a hash of all Rust source files for cache key
+    # Hash every input of the FFI build for the XCFramework cache key.
     - name: Generate FFI source hash
       id: ffi-hash
       run: |
