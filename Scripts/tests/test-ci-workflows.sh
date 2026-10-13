@@ -42,3 +42,73 @@ test_ffi_macos_still_builds_both_macos_architectures_with_lto() {
     assert_file_contains "$f" "target aarch64-apple-darwin" "make ffi-macos still builds arm64"
     assert_file_lacks "$f" "CARGO_PROFILE_RELEASE_LTO" "make ffi-macos keeps the release profile's lto"
 }
+
+_swift_workflow() { printf '%s\n' "$REPO_ROOT/.github/workflows/swift.yml"; }
+
+# The paths-ignore entries under trigger $1 (pull_request or push) of file $2.
+_paths_ignore_of() {
+    awk -v t="  $1:" '
+        $0 == t { in_t = 1; next }
+        in_t && /^  [a-z_]+:/ { in_t = 0 }
+        in_t && /^    paths-ignore:/ { in_l = 1; next }
+        in_l && /^      - / { print; next }
+        in_l { in_l = 0 }
+    ' "$2"
+}
+
+test_swift_workflow_also_runs_on_pushes_to_main() {
+    local f; f="$SCRATCH/swift-on.txt"
+    awk '/^on:/ { f = 1; next } f && /^[a-z]/ { exit } f' "$(_swift_workflow)" > "$f"
+    assert_file_contains "$f" "  push:" "swift.yml also triggers on push"
+    assert_file_contains "$f" "    branches: [main]" "only on pushes to main"
+}
+
+test_swift_workflow_push_and_pull_request_ignore_the_same_paths() {
+    local pr push
+    pr="$(_paths_ignore_of pull_request "$(_swift_workflow)")"
+    push="$(_paths_ignore_of push "$(_swift_workflow)")"
+    assert_succeeds "pull_request has a paths-ignore list" test -n "$pr"
+    assert_eq "$pr" "$push" "push ignores exactly the paths pull_request ignores"
+}
+
+# The `if:` line of the step named $1.
+_step_condition() {
+    awk -v n="name: $1" 'index($0, n) { f = 1; next } f && /^ *if:/ { print; exit } f && /^ *- name:/ { exit }' "$(_swift_workflow)"
+}
+
+test_swift_workflow_runs_the_rust_tests_on_push() {
+    local f; f="$SCRATCH/rust-tests-if.txt"
+    _step_condition "Run Rust unit tests" > "$f"
+    assert_file_contains "$f" "github.event_name == 'push'" "the Rust test step runs on pushes to main"
+}
+
+test_swift_workflow_authorizes_cargo_on_push() {
+    local f; f="$SCRATCH/authorize-if.txt"
+    _step_condition "Authorize cargo against the private slipstream repository" > "$f"
+    assert_file_contains "$f" "github.event_name == 'push'" "cargo is authorized on pushes to main"
+}
+
+test_swift_workflow_builds_the_ffi_with_ffi_ci() {
+    assert_file_contains "$(_swift_workflow)" "run: make ffi-ci" "swift.yml builds the FFI with make ffi-ci"
+    assert_file_lacks "$(_swift_workflow)" "run: make ffi-macos" "swift.yml no longer builds the universal slice"
+}
+
+test_swift_workflow_installs_only_the_arm64_macos_rust_target() {
+    assert_file_contains "$(_swift_workflow)" "targets: aarch64-apple-darwin" "swift.yml installs aarch64-apple-darwin"
+    assert_file_lacks "$(_swift_workflow)" "x86_64-apple-darwin" "swift.yml installs no x86_64 target"
+}
+
+test_swift_workflow_cache_keys_name_the_ci_build() {
+    assert_file_contains "$(_swift_workflow)" "key: ffi-xcframework-macos-arm64-nolto-" "the XCFramework key names the ffi-ci build"
+    assert_file_contains "$(_swift_workflow)" "cargo-v2-" "the cargo key is bumped to v2"
+    assert_file_lacks "$(_swift_workflow)" "cargo-v1-" "no v1 cargo key remains"
+}
+
+test_swift_workflow_hashes_the_root_makefile() {
+    assert_file_contains "$(_swift_workflow)" "find rust Cargo.toml Cargo.lock BuildSupport Makefile -type f" \
+        "the FFI source hash covers the root Makefile, where ffi-ci lives"
+}
+
+test_swift_workflow_interpolates_nothing_into_run_scripts() {
+    assert_eq "" "$(_run_script_interpolations "$(_swift_workflow)")" "no \${{ }} in swift.yml reaches a run: script"
+}
