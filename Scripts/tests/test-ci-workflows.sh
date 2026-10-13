@@ -112,3 +112,40 @@ test_swift_workflow_hashes_the_root_makefile() {
 test_swift_workflow_interpolates_nothing_into_run_scripts() {
     assert_eq "" "$(_run_script_interpolations "$(_swift_workflow)")" "no \${{ }} in swift.yml reaches a run: script"
 }
+
+_codeql_workflow() { printf '%s\n' "$REPO_ROOT/.github/workflows/codeql.yml"; }
+_build_ffi_workflow() { printf '%s\n' "$REPO_ROOT/.github/workflows/build-ffi.yml"; }
+
+test_no_workflow_selects_xcode_16() {
+    assert_eq "" "$(grep -rl 'Xcode_16' "$REPO_ROOT/.github/workflows")" "no workflow selects Xcode 16"
+}
+
+test_swift_workflow_runs_on_xcode_27() {
+    assert_file_contains "$(_swift_workflow)" "runs-on: xcode-27" "swift.yml builds on the xcode-27 image"
+    assert_file_contains "$(_swift_workflow)" "/Applications/Xcode_27.0.app" "swift.yml selects Xcode 27.0"
+}
+
+test_build_ffi_workflow_runs_on_xcode_27() {
+    assert_file_contains "$(_build_ffi_workflow)" "runs-on: xcode-27" "build-ffi.yml builds on the xcode-27 image"
+    assert_file_contains "$(_build_ffi_workflow)" "/Applications/Xcode_27.0.app" "build-ffi.yml selects Xcode 27.0"
+}
+
+# Xcode 27 ships Swift 6.4, which CodeQL's Swift extractor cannot analyze yet.
+test_codeql_swift_job_uses_xcode_26_6() {
+    assert_file_contains "$(_codeql_workflow)" "runner: macos-26" "CodeQL's Swift job runs on macos-26"
+    assert_file_contains "$(_codeql_workflow)" "/Applications/Xcode_26.6.app" "CodeQL's Swift job selects Xcode 26.6"
+}
+
+test_no_workflow_calls_slipstream_a_private_cargo_clone() {
+    assert_eq "" "$(grep -rl 'PRIVATE zodl-inc/slipstream' "$REPO_ROOT/.github/workflows")" \
+        "no cache comment still describes slipstream as a private git dependency"
+}
+
+# The toolchain floats on stable. After a Rust release, a cache restored by an
+# exact key hit would hold artifacts the new compiler cannot reuse, and nothing
+# would ever save the rebuilt ones, so the key has to name the rustc version.
+test_swift_workflow_cargo_key_includes_the_toolchain() {
+    assert_file_contains "$(_swift_workflow)" "id: toolchain" "the build job's Rust setup step has an id"
+    assert_file_contains "$(_swift_workflow)" 'cargo-v2-${{ steps.toolchain.outputs.cachekey }}-' \
+        "the cargo cache key carries the rustc version"
+}

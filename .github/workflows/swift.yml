@@ -60,7 +60,9 @@ jobs:
     permissions:
       contents: read
 
-    runs-on: macos-15
+    # Xcode 27 ships only on this image, which GitHub still marks as a public
+    # preview. If it misbehaves, macos-26 with Xcode 26.6 is the fallback.
+    runs-on: xcode-27
 
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -69,7 +71,7 @@ jobs:
       timeout-minutes: 1
 
     - name: Select Xcode version
-      run: sudo xcode-select -s '/Applications/Xcode_16.0.app/Contents/Developer'
+      run: sudo xcode-select -s '/Applications/Xcode_27.0.app/Contents/Developer'
 
     - name: Run release-script tests
       run: make test-scripts
@@ -96,8 +98,8 @@ jobs:
 
     # Runs whenever anything in this job will invoke cargo: an FFI cache miss
     # (the FFI build below), or the Rust test step, which runs for internal PRs
-    # and pushes to main. `~/.cargo/git` is deliberately left out of the cache --
-    # see `Cache Cargo` -- so every cargo invocation clones the git dependencies
+    # and pushes to main. `~/.cargo/git` is deliberately left out of the cache —
+    # see `Cache Cargo` — so every cargo invocation clones the git dependencies
     # afresh, with this token in case one of them is private. Fork PRs get no
     # secrets, which is why the Rust test step skips them.
     - name: Authorize cargo against the private slipstream repository
@@ -111,6 +113,7 @@ jobs:
     # compiles the crate's test profile and so needs the toolchain. Only the
     # arm64 macOS target: `make ffi-ci` builds nothing else.
     - name: Setup Rust
+      id: toolchain
       uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
       with:
         toolchain: stable
@@ -124,25 +127,27 @@ jobs:
         # Deliberately enumerated rather than caching `~/.cargo` wholesale (which is what
         # Swatinem/rust-cache did): that includes `~/.cargo/git`, where cargo keeps its clones of
         # git dependencies. Every git dependency on main is public today (slipstream, once a
-        # private git dependency, now comes from crates.io), but a private one can return -- other
-        # branches already pull some -- and the public twin of this repository lets workflow runs
+        # private git dependency, now comes from crates.io), but a private one can return — other
+        # branches already pull some — and the public twin of this repository lets workflow runs
         # from forked pull requests restore caches created on main. A cached clone would hand those
         # runs the private source without their ever holding the App credential, so the clones are
         # fetched afresh on every run instead.
         #
         # `registry/` is crates.io content and safe to cache. `target/` holds compiled rlib/rmeta
         # files, never sources: a far smaller disclosure should a private dependency return, and
-        # too expensive to rebuild every run. The key carries the build: v2 is ffi-ci's arm64-only,
-        # LTO-off build, so bump it whenever CI's build settings change.
+        # too expensive to rebuild every run. The key names what built `target/`: v2 is ffi-ci's
+        # arm64-only, LTO-off build, so bump it whenever CI's build settings change, and the
+        # toolchain's cachekey starts a fresh cache with each stable Rust release, whose compiler
+        # cannot reuse the old one's artifacts.
         path: |
           target
           ~/.cargo/bin
           ~/.cargo/registry/index
           ~/.cargo/registry/cache
           ~/.cargo/registry/src
-        key: ${{ runner.os }}-cargo-v2-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+        key: ${{ runner.os }}-cargo-v2-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
         restore-keys: |
-          ${{ runner.os }}-cargo-v2-
+          ${{ runner.os }}-cargo-v2-${{ steps.toolchain.outputs.cachekey }}-
 
     # Build the arm64 macOS slice without fat LTO (`make ffi-ci`), which is all
     # the Swift build and the offline tests need. Releases still build every
