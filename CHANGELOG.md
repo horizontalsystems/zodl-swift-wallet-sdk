@@ -43,6 +43,11 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   One behaviour is lost with it: non-`ethereum:` EIP-681 scheme prefixes such as `celo:` are no
   longer accepted, and a URI's own scheme text is normalised to `"ethereum"`.
 
+## Fixed
+
+- Transaction submission through `Broadcaster` now treats a server rejection as accepted when that
+  same server confirms it already knows the transaction. No caller changes are required.
+
 # 5.2.0 - 2026-10-09
 
 ## Added
