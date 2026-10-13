@@ -338,6 +338,33 @@ public protocol Synchronizer: AnyObject {
         spendingKey: UnifiedSpendingKey
     ) async throws -> AsyncThrowingStream<TransactionSubmitResult, Error>
 
+    /// Creates the transactions in the given proposal, encrypting their outputs according to
+    /// `ovkPolicy`, and submits them.
+    ///
+    /// With ``OvkPolicy/discard`` the transactions' recipients, amounts and memos cannot be
+    /// recovered from the chain by anyone holding the spending account's keys — not even by this
+    /// wallet after a restore from seed. Use it when others may hold those keys, such as when
+    /// sweeping a gift card. `createProposedTransactions(proposal:spendingKey:)` is this call with
+    /// ``OvkPolicy/sender``.
+    ///
+    /// The Sapling proving parameters are only downloaded when the proposal has a Sapling input,
+    /// payment, change or dummy output.
+    ///
+    /// A conformer that does not override this throws for ``OvkPolicy/discard`` rather than
+    /// silently creating recoverable outputs.
+    ///
+    /// - Parameter proposal: the proposal for which to create transactions.
+    /// - Parameter spendingKey: the `UnifiedSpendingKey` associated with the account for which the proposal was created.
+    /// - Parameter ovkPolicy: the outgoing viewing key policy for the created transactions.
+    ///
+    /// If `prepare()` hasn't already been called since creation of the synchronizer instance
+    /// or since the last wipe then this method throws `SynchronizerErrors.notPrepared`.
+    func createProposedTransactions(
+        proposal: Proposal,
+        spendingKey: UnifiedSpendingKey,
+        ovkPolicy: OvkPolicy
+    ) async throws -> AsyncThrowingStream<TransactionSubmitResult, Error>
+
     /// Attempts to propose fulfilling a [ZIP-321](https://zips.z.cash/zip-0321) payment URI by spending from the ZIP 32 account with the given index.
     ///  - Parameter uri: a valid ZIP-321 payment URI
     ///  - Parameter accountUUID: the account providing spend authority.
@@ -396,6 +423,42 @@ public protocol Synchronizer: AnyObject {
     ///
     /// - Throws  PcztException.ExtractAndStoreTxFromPcztException as a common indicator of the operation failure
     func createTransactionFromPCZT(pcztWithProofs: Pczt, pcztWithSigs: Pczt) async throws -> AsyncThrowingStream<TransactionSubmitResult, Error>
+
+    /// Signs a PCZT with the Ledger device the account was paired with.
+    ///
+    /// Pass the PCZT ``createPCZTFromProposal(accountUUID:proposal:)`` returned, unredacted: this method
+    /// prepares its own copy for the device. The signing and the proving are independent, so
+    /// ``addProofsToPCZT(pczt:)`` can run on the same PCZT at the same time; hand both results to
+    /// ``createTransactionFromPCZT(pcztWithProofs:pcztWithSigs:)``.
+    ///
+    /// The ceremony first confirms that the connected device runs a Zcash app that can sign and is the
+    /// device in `binding`, and checks the transaction against every rule the device enforces. Nothing
+    /// of the transaction is sent until both pass. The device then shows the transaction for the user
+    /// to review; no timeout applies while it waits.
+    ///
+    /// When an exchange fails on the transport, or the task is cancelled once the ceremony's first
+    /// command has reached the device, the transport is closed: open a new connection before trying
+    /// again. A task cancelled while it waits for its turn on the transport closes nothing. Every
+    /// other failure leaves it open.
+    ///
+    /// - Parameters:
+    ///   - pczt: The PCZT to sign.
+    ///   - accountUUID: The Ledger account the PCZT spends from.
+    ///   - binding: The binding stored when the account was paired.
+    ///   - transport: The connection to the device, such as a ``LedgerBluetoothTransport``.
+    ///   - progress: Called as the ceremony advances, on an arbitrary thread.
+    /// - Returns: The PCZT carrying the device's signatures. It differs from the input by more than the
+    ///   signatures (key paths and change markings for the device); the combine step in
+    ///   ``createTransactionFromPCZT(pcztWithProofs:pcztWithSigs:)`` accepts it with the proven PCZT.
+    /// - Throws: A ``ZcashError`` from the `ledger` family, whose ``ZcashError/ledgerIsRestartable`` says
+    ///   whether a fresh attempt could succeed, or `CancellationError`.
+    func signPCZTWithLedger(
+        pczt: Pczt,
+        accountUUID: AccountUUID,
+        binding: LedgerAccountBinding,
+        transport: LedgerAPDUTransport,
+        progress: (@Sendable (LedgerSigningProgress) -> Void)?
+    ) async throws -> Pczt
 
     /// all the transactions that are on the blockchain
     var transactions: [ZcashTransaction.Overview] { get async }
@@ -1550,6 +1613,16 @@ private struct RestartSyncUnimplemented: LocalizedError {
     }
 }
 
+/// Error thrown by the default `Synchronizer.signPCZTWithLedger` implementation.
+private struct LedgerSigningUnimplemented: LocalizedError {
+    var errorDescription: String? {
+        """
+        Synchronizer.signPCZTWithLedger has no default implementation. \
+        Override this member in your Synchronizer conformer to provide Ledger signing.
+        """
+    }
+}
+
 /// Error thrown by the default `Synchronizer.broadcaster` implementation.
 private struct BroadcasterUnimplemented: LocalizedError {
     var errorDescription: String? {
@@ -1626,6 +1699,24 @@ private final class UnimplementedBroadcaster: Broadcaster {
 }
 
 public extension Synchronizer {
+    /// Default implementation so adding `createProposedTransactions(proposal:spendingKey:ovkPolicy:)`
+    /// to the protocol is not a source-breaking change for downstream conformers. The sender
+    /// policy is what `createProposedTransactions(proposal:spendingKey:)` already does; a conformer
+    /// that cannot honor ``OvkPolicy/discard`` refuses it instead of weakening the caller's
+    /// privacy request.
+    func createProposedTransactions(
+        proposal: Proposal,
+        spendingKey: UnifiedSpendingKey,
+        ovkPolicy: OvkPolicy
+    ) async throws -> AsyncThrowingStream<TransactionSubmitResult, Error> {
+        switch ovkPolicy {
+        case .sender:
+            return try await createProposedTransactions(proposal: proposal, spendingKey: spendingKey)
+        case .discard:
+            throw OvkPolicyUnsupported(member: "Synchronizer.createProposedTransactions(proposal:spendingKey:ovkPolicy:)")
+        }
+    }
+
     /// Alternate conformers open direct-route sessions and explicitly refuse the Tor route.
     ///
     /// Only a conformer that owns a Tor client can open a round on Tor, and the refusal is the
@@ -1650,6 +1741,19 @@ public extension Synchronizer {
     /// source-compatible and report that the capability is unavailable.
     func getLocalAccountBalances() async throws -> [AccountUUID: AccountBalance]? {
         nil
+    }
+
+    /// Default implementation so adding `signPCZTWithLedger` to the protocol is not a
+    /// source-breaking change for downstream conformers. Both shipped synchronizers override it; the
+    /// rest report the capability as unavailable.
+    func signPCZTWithLedger(
+        pczt: Pczt,
+        accountUUID: AccountUUID,
+        binding: LedgerAccountBinding,
+        transport: LedgerAPDUTransport,
+        progress: (@Sendable (LedgerSigningProgress) -> Void)?
+    ) async throws -> Pczt {
+        throw LedgerSigningUnimplemented()
     }
 
     /// Default implementation so adding `transactionSubmissionStatus(for:)` to the protocol is
@@ -2180,4 +2284,27 @@ extension UUID {
     static var nullID: UUID {
         UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
     }
+}
+
+// MARK: - Immediate incoming transactions
+
+/// A wallet that can store a trusted transaction before its next sync. `SDKSynchronizer` and
+/// `SlipstreamSynchronizer` conform. Gift-card claims use this internal contract to apply the
+/// three-confirmation trusted policy. The card's shared spending key still permits competing
+/// spends during a reorg, even though this device constructed the claim.
+protocol TrustedTransactionRecording: AnyObject {
+    /// Stores `rawTransaction` at once (the receive shows before any sync, unmined) and explicitly
+    /// marks it as trusted, including when recorded again. The default transfer policy requires
+    /// three confirmations before its funds become spendable. This goes straight to the wallet
+    /// database and works while the synchronizer is stopped.
+    ///
+    /// - Parameters:
+    ///   - rawTransaction: the complete serialized transaction, as broadcast.
+    ///   - txId: the transaction's id. It must be the id of `rawTransaction`.
+    /// - Throws: `ZcashError.rustDecryptAndStoreTransaction` if the transaction cannot be stored,
+    ///   `ZcashError.synchronizerTrustedTransactionIdMismatch` if `txId` is not the id of
+    ///   `rawTransaction` (the transaction is stored, but its trust status is unchanged), and
+    ///   `ZcashError.rustSetTransactionTrust` if the trust status cannot be recorded, which
+    ///   includes a transaction that does not involve this wallet and so was not stored.
+    func recordTrustedTransaction(_ rawTransaction: Data, txId: TxId) async throws
 }
