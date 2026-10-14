@@ -16,6 +16,24 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   portable arithmetic, because `pasta_curves` has no assembly backend for Apple's x86-64 targets.
   Every result is the same as before; only the speed changes. No call site needs editing.
 
+## Checkpoints
+
+Mainnet
+
+````
+Sources/ZcashLightClientKit/Resources/checkpoints/mainnet/3512500.json
+...
+Sources/ZcashLightClientKit/Resources/checkpoints/mainnet/3515000.json
+````
+
+Testnet
+
+````
+Sources/ZcashLightClientKit/Resources/checkpoints/testnet/4490000.json
+...
+Sources/ZcashLightClientKit/Resources/checkpoints/testnet/4500000.json
+````
+
 # 5.2.0 - 2026-10-09
 
 ## Added
