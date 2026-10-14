@@ -1,5 +1,6 @@
-# Offline, text-only checks on how CI builds and caches the FFI: the root
-# Makefile's ffi-ci target and the workflows that call it. Like
+# Offline, text-only checks on how CI builds and caches the FFI (the root
+# Makefile's ffi-ci target and the workflows that call it) and on whether the
+# FFI build's deployment targets agree with Package.swift. Like
 # test-workflow.sh, these never run cargo, gh or a workflow. `make -n` prints
 # the commands a target would run; GNU make still descends into `$(MAKE)`
 # lines under -n, but only to print their commands too.
@@ -43,6 +44,45 @@ test_ffi_macos_still_builds_both_macos_architectures_with_lto() {
     assert_file_contains "$f" "target x86_64-apple-darwin" "make ffi-macos still builds x86_64"
     assert_file_contains "$f" "target aarch64-apple-darwin" "make ffi-macos still builds arm64"
     assert_file_lacks "$f" "CARGO_PROFILE_RELEASE_LTO" "make ffi-macos keeps the release profile's lto"
+}
+
+# Package.swift's platforms, printed as "iOS <major> macOS <major>" (for example
+# "iOS 16 macOS 14") whatever the layout or order of the platforms array.
+# Comment lines are ignored.
+_package_platforms() {
+    local manifest ios macos
+    manifest="$(grep -v '^[[:space:]]*//' "$REPO_ROOT/Package.swift")"
+    ios="$(printf '%s\n' "$manifest" | grep -oE '\.iOS\(\.v[0-9]+\)' | tr -dc '0-9\n' | paste -sd' ' -)"
+    macos="$(printf '%s\n' "$manifest" | grep -oE '\.macOS\(\.v[0-9]+\)' | tr -dc '0-9\n' | paste -sd' ' -)"
+    printf 'iOS %s macOS %s\n' "$ios" "$macos"
+}
+
+test_ffi_builds_pass_the_deployment_targets() {
+    local f; f="$(_dry_run ffi-ci)"
+    assert_file_contains "$f" "MACOSX_DEPLOYMENT_TARGET=14.0 IPHONEOS_DEPLOYMENT_TARGET=16.0 cargo build" \
+        "make ffi-ci passes both deployment targets to cargo"
+    f="$(_dry_run ffi-all)"
+    local builds; builds="$(grep -c 'cargo build' "$f")"
+    assert_succeeds "make ffi-all runs cargo at least once" test "$builds" -gt 0
+    assert_eq "$builds" \
+        "$(grep -c 'MACOSX_DEPLOYMENT_TARGET=14.0 IPHONEOS_DEPLOYMENT_TARGET=16.0 cargo build' "$f")" \
+        "every cargo build in make ffi-all carries both deployment targets"
+}
+
+test_deployment_targets_agree_with_package_swift() {
+    assert_eq "iOS 16 macOS 14" "$(_package_platforms)" "Package.swift declares iOS 16 and macOS 14"
+    local s
+    for s in Scripts/init-local-ffi.sh Scripts/rebuild-local-ffi.sh; do
+        assert_file_contains "$REPO_ROOT/$s" "export MACOSX_DEPLOYMENT_TARGET=14.0" "$s exports the macOS target"
+        assert_file_contains "$REPO_ROOT/$s" "export IPHONEOS_DEPLOYMENT_TARGET=16.0" "$s exports the iOS target"
+    done
+    assert_file_contains "$REPO_ROOT/BuildSupport/Makefile" "MACOSX_DEPLOYMENT_TARGET = 14.0" \
+        "BuildSupport/Makefile's macOS target"
+    assert_file_contains "$REPO_ROOT/BuildSupport/Makefile" "IPHONEOS_DEPLOYMENT_TARGET = 16.0" \
+        "BuildSupport/Makefile's iOS target"
+    assert_eq "<string>14.0</string>" \
+        "$(grep -A1 '<key>LSMinimumSystemVersion</key>' "$REPO_ROOT/Scripts/version-macos-framework.sh" | tail -1 | tr -d '[:space:]')" \
+        "the macOS framework's Info.plist names macOS 14 as its minimum"
 }
 
 _swift_workflow() { printf '%s\n' "$REPO_ROOT/.github/workflows/swift.yml"; }

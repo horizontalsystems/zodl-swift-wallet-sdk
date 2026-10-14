@@ -420,6 +420,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `libzcashlc` is built for minimum iOS 16 and macOS 14 on every slice (the iOS simulator included);
+  its C objects previously claimed the building Xcode SDK's version.
 - `zcashlc_set_custom_network` takes a trailing `nu7` activation height. As for the other
   heights, a negative value means "not activated on this network".
 - `zcashlc_create_proposed_transactions` takes a trailing `ovk_policy: u32`: `0` encrypts the

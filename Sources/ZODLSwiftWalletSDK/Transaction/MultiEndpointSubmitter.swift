@@ -38,7 +38,7 @@ final class MultiEndpointSubmitter {
         )
 
         // The worker is created before the cancellation handler is installed and
-        // captured immutably by both closures — no lock needed (iOS 13 safe).
+        // captured immutably by both closures — no lock needed.
         let worker = Task {
             await race.run()
         }

@@ -56,6 +56,9 @@ Changes are relative to `5.2.0`.
   SPM resource bundle is `zodl-swift-wallet-sdk_ZODLSwiftWalletSDK.bundle` instead of
   `ZcashLightClientKit_ZcashLightClientKit.bundle`; code that matched either literal must be
   updated. See MIGRATING.md.
+- The package's minimum platforms are now iOS 16 and macOS 14, up from iOS 13 and macOS 12, and the
+  `libzcashlc` XCFramework is built for the same minimums. An app or package whose deployment target is
+  lower no longer builds against the SDK: raise it to at least iOS 16 / macOS 14; see `MIGRATING.md`.
 - `RustErrorKind` has a new case, `anchorNotFound`: creating transactions from a proposal failed
   because the wallet has not scanned to a height it can anchor them on. Such failures were reported
   as `proposalInvalid`, and a wallet could only tell them apart by the upstream error text, which
@@ -81,6 +84,9 @@ Changes are relative to `5.2.0`.
   wallet whose database does not exist or was never initialized; they throw instead. Such a call
   used to leave behind a database file holding a single table, which a wallet could mistake for
   an existing one.
+- The `libzcashlc` XCFramework's C objects claimed the Xcode SDK version they were built with as their
+  minimum OS, above the package's platforms, so linking it could warn that objects were "built for
+  newer version". They now claim iOS 16 / macOS 14. No caller changes are required.
 
 # 5.2.0 - 2026-10-09
 
