@@ -496,7 +496,7 @@ final class GiftCardCheckReadinessTests: ZcashTestCase {
         await fulfillment(of: [harness.clock.expectSleep(at: 15_000_000_000)], timeout: 5)
         caller.cancel()
         do {
-            _ = try await caller.value
+            _ = try await boundedValue(of: caller)
             XCTFail("Cancelled attempt must throw")
         } catch is CancellationError { }
         await fulfillment(of: [stateCancelled, eventCancelled, harness.clock.expectNoPendingSleeps()], timeout: 5)
@@ -505,8 +505,22 @@ final class GiftCardCheckReadinessTests: ZcashTestCase {
         harness.events.send(.syncStalled(attempt: 9, gaveUp: true))
         harness.clock.advance(to: 15_000_000_000)
         next.states.send(state(tip: 100, scanned: 100, value: 90_000))
-        let accepted = try await nextCaller.value
+        let accepted = try await boundedValue(of: nextCaller)
         XCTAssertEqual(accepted.shieldedSpendableValue, Zatoshi(90_000))
+    }
+
+    /// Awaits the attempt's value, but never longer than the hang backstop. The waiter runs on
+    /// the test clock, so a healthy attempt completes in milliseconds of wall time; this bound
+    /// exists so a regression fails the test in seconds instead of stalling the CI job until its
+    /// timeout kills the runner (run 38475223787 lost 52 minutes to exactly that).
+    private func boundedValue(of task: Task<AccountBalance, Error>, seconds: UInt64 = 30) async throws -> AccountBalance {
+        let guardTask = Task {
+            try await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+            task.cancel()
+            XCTFail("attempt did not complete within the \(seconds) s hang backstop")
+        }
+        defer { guardTask.cancel() }
+        return try await task.value
     }
 
     private func fundedArrival(at instant: UInt64) async throws {
