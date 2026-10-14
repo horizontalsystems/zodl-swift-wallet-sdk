@@ -16,7 +16,10 @@ build = "rust/build.rs"
 
 # Zcash
 orchard = { version = "0.16" }
-pasta_curves = "0.6"
+# `asm` selects the assembly field arithmetic, where most of 0.6.1's speedup is; without it every
+# target gets the portable arithmetic. pasta_curves picks the backend per target itself and has
+# none for Apple's x86-64 targets, so the x86_64 slices stay portable. 0.6.0 has no such feature.
+pasta_curves = { version = "0.6.1", features = ["asm"] }
 ff = "0.14"
 sapling = { package = "sapling-crypto", version = "0.9", default-features = false }
 # The scalar types in the Sapling prover traits, named by `rust/src/sapling_prover.rs`.

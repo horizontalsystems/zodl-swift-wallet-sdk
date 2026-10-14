@@ -6,6 +6,14 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 # Unreleased
 
+## Changed
+
+- The Rust core enables `pasta_curves`' `asm` feature, so the Pallas and Vesta field arithmetic
+  behind Orchard sends, sync and coinholder voting runs on assembly on arm64: iOS devices, the
+  arm64 iOS simulator and Apple silicon Macs. The x86_64 iOS simulator and Intel Macs keep the
+  portable arithmetic, because `pasta_curves` has no assembly backend for Apple's x86-64 targets.
+  Every result is the same as before; only the speed changes. No call site needs editing.
+
 # 5.2.0 - 2026-10-09
 
 ## Added
