@@ -124,13 +124,6 @@ jobs:
         path: BuildSupport/products/libzcashlc.xcframework
         key: ffi-xcframework-macos-only-${{ runner.os }}-${{ steps.ffi-hash.outputs.hash }}
 
-    - name: Authorize cargo against the private slipstream repository
-      if: matrix.language == 'swift' && steps.cache-ffi.outputs.cache-hit != 'true'
-      uses: ./.github/actions/authorize-slipstream
-      with:
-        app-id: ${{ secrets.SLIPSTREAM_APP_ID }}
-        app-private-key: ${{ secrets.SLIPSTREAM_APP_PRIVATE_KEY }}
-
     - name: Setup Rust
       if: matrix.language == 'swift' && steps.cache-ffi.outputs.cache-hit != 'true'
       uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
@@ -148,7 +141,7 @@ jobs:
         # private git dependency, now comes from crates.io), but a private one can return — other
         # branches already pull some — and the public twin of this repository lets workflow runs
         # from forked pull requests restore caches created on main. A cached clone would hand those
-        # runs the private source without their ever holding the App credential, so the clones are
+        # runs the private source without their ever holding a credential for it, so the clones are
         # fetched afresh on every run instead.
         #
         # `registry/` is crates.io content and safe to cache. `target/` holds compiled rlib/rmeta

@@ -97,19 +97,6 @@ jobs:
         path: BuildSupport/products/libzcashlc.xcframework
         key: ffi-xcframework-macos-arm64-nolto-${{ runner.os }}-${{ steps.ffi-hash.outputs.hash }}
 
-    # Runs whenever anything in this job will invoke cargo: an FFI cache miss
-    # (the FFI build below), or the Rust test step, which runs for internal PRs
-    # and pushes to main. `~/.cargo/git` is deliberately left out of the cache —
-    # see `Cache Cargo` — so every cargo invocation clones the git dependencies
-    # afresh, with this token in case one of them is private. Fork PRs get no
-    # secrets, which is why the Rust test step skips them.
-    - name: Authorize cargo against the private slipstream repository
-      if: steps.cache-ffi.outputs.cache-hit != 'true' || github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-      uses: ./.github/actions/authorize-slipstream
-      with:
-        app-id: ${{ secrets.SLIPSTREAM_APP_ID }}
-        app-private-key: ${{ secrets.SLIPSTREAM_APP_PRIVATE_KEY }}
-
     # Needed unconditionally: even on an FFI cache hit, the Rust test step below
     # compiles the crate's test profile and so needs the toolchain. Only the
     # arm64 macOS target: `make ffi-ci` builds nothing else.
@@ -131,7 +118,7 @@ jobs:
         # private git dependency, now comes from crates.io), but a private one can return — other
         # branches already pull some — and the public twin of this repository lets workflow runs
         # from forked pull requests restore caches created on main. A cached clone would hand those
-        # runs the private source without their ever holding the App credential, so the clones are
+        # runs the private source without their ever holding a credential for it, so the clones are
         # fetched afresh on every run instead.
         #
         # `registry/` is crates.io content and safe to cache. `target/` holds compiled rlib/rmeta
@@ -164,10 +151,10 @@ jobs:
 
     # The Rust unit tests cover the FFI layer below the Swift package, so no
     # `swift test` filter reaches them. Without this step a failing Rust test
-    # can sit on a branch indefinitely. Pushes to main run them too, so main's
-    # cargo cache holds the test profile every pull request starts from.
+    # can sit on a branch indefinitely. Every run executes them, pushes to main
+    # included, so main's cargo cache holds the test profile every pull request
+    # starts from.
     - name: Run Rust unit tests
-      if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
       timeout-minutes: 30
       run: make test-rust
 

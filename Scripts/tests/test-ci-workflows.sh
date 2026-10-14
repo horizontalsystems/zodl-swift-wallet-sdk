@@ -113,21 +113,25 @@ test_swift_workflow_push_and_pull_request_ignore_the_same_paths() {
     assert_eq "$pr" "$push" "push ignores exactly the paths pull_request ignores"
 }
 
-# The `if:` line of the step named $1.
+# The whole list item of the step named $1, whichever key comes first.
+_step_block() {
+    awk -v n="name: $1" '
+        /^    - / { if (hit) { printf "%s", item; done = 1; exit } item = "" }
+        { item = item $0 "\n" }
+        index($0, n) { hit = 1 }
+        END { if (hit && !done) printf "%s", item }
+    ' "$(_swift_workflow)"
+}
+
+# The `if:` line of the step named $1, including a `- if:` written before its `name:`.
 _step_condition() {
-    awk -v n="name: $1" 'index($0, n) { f = 1; next } f && /^ *if:/ { print; exit } f && /^ *- name:/ { exit }' "$(_swift_workflow)"
+    _step_block "$1" | grep -E '^ *(- )?if:'
 }
 
-test_swift_workflow_runs_the_rust_tests_on_push() {
-    local f; f="$SCRATCH/rust-tests-if.txt"
-    _step_condition "Run Rust unit tests" > "$f"
-    assert_file_contains "$f" "github.event_name == 'push'" "the Rust test step runs on pushes to main"
-}
-
-test_swift_workflow_authorizes_cargo_on_push() {
-    local f; f="$SCRATCH/authorize-if.txt"
-    _step_condition "Authorize cargo against the private slipstream repository" > "$f"
-    assert_file_contains "$f" "github.event_name == 'push'" "cargo is authorized on pushes to main"
+test_swift_workflow_runs_the_rust_tests_on_every_run() {
+    assert_file_contains "$(_swift_workflow)" "name: Run Rust unit tests" "swift.yml has the Rust test step"
+    assert_eq "" "$(_step_condition "Run Rust unit tests")" \
+        "the Rust test step has no condition: fork pull requests run it too"
 }
 
 test_swift_workflow_builds_the_ffi_with_ffi_ci() {
@@ -181,6 +185,41 @@ test_codeql_swift_job_uses_xcode_26_6() {
 test_no_workflow_calls_slipstream_a_private_cargo_clone() {
     assert_eq "" "$(grep -rl 'PRIVATE zodl-inc/slipstream' "$REPO_ROOT/.github/workflows")" \
         "no cache comment still describes slipstream as a private git dependency"
+}
+
+# Every local action or reusable workflow (`uses: ./<path>`) that the workflow
+# or action file $1 calls, one `./<path>` per line. The value may be quoted;
+# commented-out lines are ignored.
+_local_action_refs() {
+    awk '
+        /^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*["\047]?\.\// {
+            ref = $0
+            sub(/^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*["\047]?/, "", ref)
+            sub(/["\047[:space:]#].*$/, "", ref)
+            print ref
+        }
+    ' "$1"
+}
+
+# A branch that fetches private repositories brings its authorization action
+# back with it; what must never happen is a workflow or action calling a local
+# action, or a local reusable workflow, that is not there.
+test_every_local_action_a_workflow_uses_exists() {
+    local f ref missing=""
+    for f in "$REPO_ROOT"/.github/workflows/*.yml \
+             "$REPO_ROOT"/.github/actions/*/action.yml \
+             "$REPO_ROOT"/.github/actions/*/action.yaml; do
+        [ -e "$f" ] || continue
+        while IFS= read -r ref; do
+            # A reusable workflow is the referenced file itself; an action is a
+            # directory holding action.yml or action.yaml.
+            if [ ! -f "$REPO_ROOT/$ref" ] && [ ! -f "$REPO_ROOT/$ref/action.yml" ] \
+                && [ ! -f "$REPO_ROOT/$ref/action.yaml" ]; then
+                missing="$missing $ref"
+            fi
+        done < <(_local_action_refs "$f")
+    done
+    assert_eq "" "${missing# }" "every local action a workflow or action uses exists"
 }
 
 # The toolchain floats on stable. After a Rust release, a cache restored by an
