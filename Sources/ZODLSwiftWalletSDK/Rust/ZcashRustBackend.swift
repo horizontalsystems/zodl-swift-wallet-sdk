@@ -2994,30 +2994,32 @@ extension FfiAccount {
 
     /// converts an [`FfiAccount`] into a [`Account`]
     /// - Note: This does not check that the converted value actually holds a valid Account
+    /// - Note: An account imported without derivation data, such as a view-only or a hardware-wallet account, has no seed fingerprint
+    ///   or ZIP 32 account index. It carries the viewing keys it was imported with, as every other account does.
     func unsafeToAccount() -> Account? {
         // Invalid UUID check
         guard uuidArray != [UInt8](repeating: 0, count: 16) else {
             return nil
         }
 
-        // Invalid ZIP 32 account index
+        let ufvkTyped = ufvk.map { UnifiedFullViewingKey(validatedEncoding: String(cString: $0)) }
+        let uivkTyped = uivk.map { UnifiedIncomingViewingKey(validatedEncoding: String(cString: $0)) }
+
+        // Invalid ZIP 32 account index: the account was imported without derivation data, but its viewing keys are stored all the same.
         if hd_account_index == UInt32.max {
-            return .init(
+            return Account(
                 id: AccountUUID(id: uuidArray),
                 name: account_name != nil ? String(cString: account_name) : nil,
                 keySource: key_source != nil ? String(cString: key_source) : nil,
                 seedFingerprint: nil,
                 hdAccountIndex: nil,
-                ufvk: nil,
-                uivk: nil
+                ufvk: ufvkTyped,
+                uivk: uivkTyped
             )
         }
 
-        let ufvkTyped = ufvk.map { UnifiedFullViewingKey(validatedEncoding: String(cString: $0)) }
-        let uivkTyped = uivk.map { UnifiedIncomingViewingKey(validatedEncoding: String(cString: $0)) }
-
         // Valid ZIP32 account index
-        return .init(
+        return Account(
             id: AccountUUID(id: uuidArray),
             name: account_name != nil ? String(cString: account_name) : nil,
             keySource: key_source != nil ? String(cString: key_source) : nil,

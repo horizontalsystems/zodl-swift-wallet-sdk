@@ -31,6 +31,10 @@ extension Account {
     /// because the Ledger Zcash app signs only one; its migration runs keep the default sizing,
     /// since no batch signing round bounds them.
     public static let ledgerKeySource = "ledger"
+
+    /// The `keySource` an app passes when it imports a unified full viewing key as a view-only account
+    /// (`AccountPurpose.viewOnly`).
+    public static let viewOnlyKeySource = "view_only"
 }
 
 public struct UnifiedSpendingKey: Equatable, Undescribable {

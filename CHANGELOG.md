@@ -57,6 +57,10 @@ Changes are relative to `5.2.1`.
   stop synchronization, and puts no part of the key in an error. A protocol-extension default keeps
   other `Synchronizer` conformers compiling; it throws, so a conformer that offers the lookup must
   implement it.
+- `Account.viewOnlyKeySource` (`"view_only"`) is the `keySource` to pass to
+  `Synchronizer.importAccount(ufvk:seedFingerprint:zip32AccountIndex:purpose:name:keySource:birthday:)`
+  when a wallet imports a unified full viewing key as a view-only account (`AccountPurpose.viewOnly`).
+  It is a tag for the wallet to read back from `Account.keySource`; the SDK does not act on it.
 
 ## Changed
 
@@ -113,6 +117,13 @@ Changes are relative to `5.2.1`.
 - The `libzcashlc` XCFramework's C objects claimed the Xcode SDK version they were built with as their
   minimum OS, above the package's platforms, so linking it could warn that objects were "built for
   newer version". They now claim iOS 16 / macOS 14. No caller changes are required.
+- `Synchronizer.listAccounts()` now returns `ufvk` and `uivk` for accounts imported without
+  derivation data, such as hardware-wallet and view-only accounts; they were `nil`.
+  `seedFingerprint` and `hdAccountIndex` are still `nil` for those accounts.
+- Errors from importing or decoding a unified viewing key no longer contain the key. The `rustError`
+  of `ZcashError.rustImportAccountUfvk`, `rustDeriveAddressFromUfvk` and `rustSlipstreamStart` used
+  to repeat the value that failed to decode, followed by the decoder's description of it; it is now
+  a fixed sentence.
 
 # 5.2.1 - 2026-10-14
 
