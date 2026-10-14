@@ -50,6 +50,38 @@ bridged to `NSError` has the domain `ZODLSwiftWalletSDK.ZcashError`, and the SPM
 is `zodl-swift-wallet-sdk_ZODLSwiftWalletSDK.bundle`. Match on `ZcashError`'s code or cases
 rather than on either string.
 
+## `RustErrorKind` gained a case — `anchorNotFound`
+
+`RustErrorKind`, the type of `RedactedRustError.kind`, has a new case, `anchorNotFound`: creating
+transactions from a proposal failed because the wallet has not scanned far enough to anchor them.
+Such failures were previously reported as `proposalInvalid`.
+
+An exhaustive `switch` over `RustErrorKind` stops compiling until the new case is handled. Do not
+fold it into `proposalInvalid`, where it used to land: a wallet should treat it as "scan further,
+then retry", not as a bad request.
+
+```swift
+// Before: exhaustive over the cases 5.2.0 had.
+catch ZcashError.rustCreateToAddress(let error) {
+    switch error.kind {
+    case .proposalInvalid:
+        showAsBadRequest(error.message)
+    // ... the rest of RustErrorKind's cases
+    }
+}
+
+// After: the new case is "scan further, then retry", not a bad request.
+catch ZcashError.rustCreateToAddress(let error) {
+    switch error.kind {
+    case .proposalInvalid:
+        showAsBadRequest(error.message)
+    case .anchorNotFound:
+        keepSyncingThenRetry()
+    // ... the rest of RustErrorKind's cases
+    }
+}
+```
+
 ## `ZcashError` gained cases — Ledger hardware wallets
 
 `ZcashError` and `ZcashErrorCode` have twenty-four new cases, `ZLEDG0001` to `ZLEDG0024`, which

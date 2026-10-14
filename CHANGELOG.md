@@ -56,6 +56,14 @@ Changes are relative to `5.2.0`.
   SPM resource bundle is `zodl-swift-wallet-sdk_ZODLSwiftWalletSDK.bundle` instead of
   `ZcashLightClientKit_ZcashLightClientKit.bundle`; code that matched either literal must be
   updated. See MIGRATING.md.
+- `RustErrorKind` has a new case, `anchorNotFound`: creating transactions from a proposal failed
+  because the wallet has not scanned to a height it can anchor them on. Such failures were reported
+  as `proposalInvalid`, and a wallet could only tell them apart by the upstream error text, which
+  redaction now removes; the new case lets it say "scan further and retry". An exhaustive `switch`
+  over `RustErrorKind` stops compiling until the new case is handled.
+- `migrationProgress(accountUUID:)` and `recordImmediateMigration(accountUUID:txid:)` use a record
+  that `prepare()` now creates, so on a wallet upgraded from an earlier SDK version they throw until
+  the synchronizer has been prepared with this version.
 
 ## Removed
 
@@ -69,6 +77,10 @@ Changes are relative to `5.2.0`.
 
 - Transaction submission through `Broadcaster` now treats a server rejection as accepted when that
   same server confirms it already knows the transaction. No caller changes are required.
+- The migration APIs no longer create a wallet database, or any table in one, when called for a
+  wallet whose database does not exist or was never initialized; they throw instead. Such a call
+  used to leave behind a database file holding a single table, which a wallet could mistake for
+  an existing one.
 
 # 5.2.0 - 2026-10-09
 
