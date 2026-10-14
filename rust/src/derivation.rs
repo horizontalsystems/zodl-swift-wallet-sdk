@@ -1518,7 +1518,11 @@ mod tests {
         let len = crate::zcashlc_last_error_length();
         assert!(len > 0, "a last error must be set");
         let mut buf = vec![0u8; len as usize];
-        unsafe { crate::zcashlc_error_message_utf8(buf.as_mut_ptr().cast::<c_char>(), len) };
+        let written =
+            unsafe { crate::zcashlc_error_message_utf8(buf.as_mut_ptr().cast::<c_char>(), len) };
+        // A failed copy leaves the buffer zeroed, which would read as an empty message that
+        // trivially contains no part of the key.
+        assert_eq!(written, len, "the whole message must be copied");
         CStr::from_bytes_until_nul(&buf)
             .expect("the message is NUL-terminated")
             .to_string_lossy()
