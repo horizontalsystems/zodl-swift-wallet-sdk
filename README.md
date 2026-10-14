@@ -27,11 +27,12 @@ Add a package with the source "https://github.com/zodl-inc/zodl-swift-wallet-sdk
 either Xcode's GUI or in your `Package.swift` file. The package is named
 `zodl-swift-wallet-sdk` and its library product and module are `ZODLSwiftWalletSDK`.
 SwiftPM derives the `package:` argument of `.product(name:package:)` from the last path
-component of the repository URL, which now matches the package name:
+component of the repository URL, which now matches the package name. `6.0.0` is the first
+release that contains the rename; until it is published, depend on a revision of `main`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/zodl-inc/zodl-swift-wallet-sdk.git", from: "3.0.0")
+    .package(url: "https://github.com/zodl-inc/zodl-swift-wallet-sdk.git", from: "6.0.0")
 ],
 targets: [
     .target(

@@ -28,8 +28,9 @@ let height: ZcashLightClientKit.BlockHeight = 1
 After:
 
 ```swift
-// Package.swift
-.package(url: "https://github.com/zodl-inc/zodl-swift-wallet-sdk.git", from: "4.0.0")
+// Package.swift — 6.0.0 is the first release containing the rename (unreleased as of
+// this writing; until it exists, pin a revision of main instead of a version range).
+.package(url: "https://github.com/zodl-inc/zodl-swift-wallet-sdk.git", from: "6.0.0")
 .product(name: "ZODLSwiftWalletSDK", package: "zodl-swift-wallet-sdk")
 ```
 
