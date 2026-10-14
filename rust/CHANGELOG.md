@@ -417,6 +417,14 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transactions from a proposal (`zcashlc_create_proposed_transactions`) fails because the wallet
   has not scanned to a height it can anchor them on. Such failures were reported as
   `ProposalInvalid` (`17`).
+- `zcashlc_describe_unified_full_viewing_key` reports which items (P2PKH, P2SH, Sapling, Orchard,
+  unknown) a unified full viewing key carries. It takes the key as a null-terminated string and a
+  `network_id`, ignores whitespace around the key, and returns a bitmask of the items: `1` P2PKH,
+  `2` P2SH, `4` Sapling, `8` Orchard, and `16` for an item of a typecode the library does not
+  recognize. It returns `-1`, with no last error set, when the input is not a unified full viewing
+  key for `network_id`, and `-2`, with the last error set, on an internal failure: a null pointer,
+  input that is not UTF-8, an invalid `network_id`, or a panic. The last error never contains any
+  part of the key.
 
 ### Changed
 

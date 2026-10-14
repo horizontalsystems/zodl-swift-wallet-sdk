@@ -300,6 +300,89 @@ pub unsafe extern "C" fn zcashlc_is_valid_unified_full_viewing_key(
     unwrap_exc_or(res, false)
 }
 
+bitflags::bitflags! {
+    /// The kinds of item a unified full viewing key carries, as reported over the FFI by
+    /// [`zcashlc_describe_unified_full_viewing_key`]. The values match the receiver flags used
+    /// elsewhere in this crate where they overlap.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) struct UfvkComponentFlags: i32 {
+        /// The key has a transparent P2PKH item.
+        const P2PKH = 0b0000_0001;
+        /// The key has a transparent P2SH viewing key item.
+        const P2SH = 0b0000_0010;
+        /// The key has a Sapling item.
+        const SAPLING = 0b0000_0100;
+        /// The key has an Orchard item.
+        const ORCHARD = 0b0000_1000;
+        /// The key has at least one data item of a typecode this library does not recognize.
+        const UNKNOWN = 0b0001_0000;
+    }
+}
+
+/// The components of `encoding` when it is a unified full viewing key for `network`, `None`
+/// otherwise. Surrounding whitespace is ignored. Never echoes the input.
+pub(crate) fn describe_ufvk(
+    network: &impl Parameters,
+    encoding: &str,
+) -> Option<UfvkComponentFlags> {
+    // The steps of `UnifiedFullViewingKey::decode`, taken one by one so that the container
+    // decoded here also yields the unknown items, which `UnifiedFullViewingKey` does not expose.
+    let (found, _revision, container) = unified::Ufvk::decode(encoding.trim()).ok()?;
+    if found != network.network_type() {
+        return None;
+    }
+    let ufvk = UnifiedFullViewingKey::parse(&container).ok()?;
+
+    let mut flags = UfvkComponentFlags::empty();
+    flags.set(UfvkComponentFlags::P2PKH, ufvk.p2pkh().is_some());
+    flags.set(UfvkComponentFlags::P2SH, ufvk.p2sh().is_some());
+    flags.set(UfvkComponentFlags::SAPLING, ufvk.has_sapling());
+    flags.set(UfvkComponentFlags::ORCHARD, ufvk.has_orchard());
+    flags.set(
+        UfvkComponentFlags::UNKNOWN,
+        container
+            .items_as_parsed()
+            .iter()
+            .any(|item| matches!(item, unified::Uitem::Data(unified::Fvk::Unknown { .. }))),
+    );
+    Some(flags)
+}
+
+/// Reports which items the provided unified full viewing key carries, for the specified network.
+/// Whitespace around the key is ignored.
+///
+/// Returns:
+/// - a bitmask of the items the key carries: `1` for P2PKH, `2` for P2SH, `4` for Sapling, `8`
+///   for Orchard, and `16` when it carries at least one item of a typecode this library does
+///   not recognize;
+/// - `-1` when `ufvk` is not a unified full viewing key for `network_id`. This is not an error,
+///   and no last error is set;
+/// - `-2` on an internal failure: a null `ufvk`, a `ufvk` that is not UTF-8, an invalid
+///   `network_id`, or a panic. The last error is set, and never contains any part of the key.
+///
+/// # Safety
+///
+/// - `ufvk` must be null or must point to a null-terminated string.
+/// - The memory referenced by `ufvk` must not be mutated for the duration of the
+///   function call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zcashlc_describe_unified_full_viewing_key(
+    ufvk: *const c_char,
+    network_id: u32,
+) -> i32 {
+    let res = catch_panic(|| {
+        if ufvk.is_null() {
+            return Err(anyhow!("no unified full viewing key was supplied"));
+        }
+        let network = parse_network(network_id)?;
+        let encoding = unsafe { CStr::from_ptr(ufvk) }
+            .to_str()
+            .map_err(|_| anyhow!("the unified full viewing key is not UTF-8"))?;
+        Ok(describe_ufvk(&network, encoding).map_or(-1, |flags| flags.bits()))
+    });
+    unwrap_exc_or(res, -2)
+}
+
 /// Returns true when the provided key encoding is a valid unified incoming viewing key for the
 /// given network, false in any other case.
 ///
@@ -1326,13 +1409,17 @@ mod tests {
         );
     }
 
+    /// A mainnet UFVK with a P2SH viewing-key item and an Orchard item: the first vector with a
+    /// P2SH item (Orchard, no expiry) in `zcash_keys`'s
+    /// `src/keys/test_vectors/unified_viewing_keys_r2.rs`, from `zcash/zcash-test-vectors`'s
+    /// `unified_viewing_keys_r2.py`.
+    const P2SH_ORCHARD_UFVK_VECTOR: &str = "uvf1td5cvtvcvlmxqgaxus3m2m745ykzk5gncx4z7x5zrk9l256qjfmfg6n8efrg0htq5sac4kg54aejsepkcl6hgaqyk6dlstk4fpnkmxjcvl72zh97r3fz7wa02wt4mmcayn6ukzck9d96tcqmkk2j5rzdr44f6haa9v7qzqsserruscf6lqum38xr8k84yesq8ecxa25aqg04uh3gweg8d25055v9z5u4c75mtt06g57eu8mq8eldg2gn9su23hkv0jrq7asc6tad5kaxs4r330uyf8qmydxkhe0nmtx26nux84sftau7072hp72qhfdzyhwu3ndhdq4glu8zjxp7srdaep9nn96swfl8td478n3jey0r73x5du50gjqr37ta39dpg25vkqw0q59pvfxp4xhl8392keskzl202njjeh677tphgcuayn09kl9vkxqkcy2pq7tar8vcjgewvem8hptycrd7v659lgzsnr85udpx7kv785m4a4259wr0snunfndya9x44m0zqt3py4x9md4vcdrj628qxmam6t836dp5zwsv744ay";
+
     /// A P2SH viewing-key item is revision-2-only (ZIP 316), so a UFVK with one encodes at
-    /// revision 2. The vector is the first one with a P2SH item (Orchard, no expiry) in
-    /// `zcash_keys`'s `src/keys/test_vectors/unified_viewing_keys_r2.rs`, from
-    /// `zcash/zcash-test-vectors`'s `unified_viewing_keys_r2.py`.
+    /// revision 2.
     #[test]
     fn p2sh_ufvk_falls_back_to_revision_2_instead_of_erroring() {
-        let p2sh_ufvk_str = "uvf1td5cvtvcvlmxqgaxus3m2m745ykzk5gncx4z7x5zrk9l256qjfmfg6n8efrg0htq5sac4kg54aejsepkcl6hgaqyk6dlstk4fpnkmxjcvl72zh97r3fz7wa02wt4mmcayn6ukzck9d96tcqmkk2j5rzdr44f6haa9v7qzqsserruscf6lqum38xr8k84yesq8ecxa25aqg04uh3gweg8d25055v9z5u4c75mtt06g57eu8mq8eldg2gn9su23hkv0jrq7asc6tad5kaxs4r330uyf8qmydxkhe0nmtx26nux84sftau7072hp72qhfdzyhwu3ndhdq4glu8zjxp7srdaep9nn96swfl8td478n3jey0r73x5du50gjqr37ta39dpg25vkqw0q59pvfxp4xhl8392keskzl202njjeh677tphgcuayn09kl9vkxqkcy2pq7tar8vcjgewvem8hptycrd7v659lgzsnr85udpx7kv785m4a4259wr0snunfndya9x44m0zqt3py4x9md4vcdrj628qxmam6t836dp5zwsv744ay";
+        let p2sh_ufvk_str = P2SH_ORCHARD_UFVK_VECTOR;
 
         let decoded = UnifiedFullViewingKey::decode(&MAIN_NETWORK, p2sh_ufvk_str)
             .expect("the upstream vector decodes");
@@ -1356,6 +1443,258 @@ mod tests {
             decoded.encode(&MAIN_NETWORK).unwrap(),
             p2sh_uivk_str,
             "must reproduce the upstream vector exactly"
+        );
+    }
+
+    /// The seed-derived key the description tests start from. It carries a P2PKH, a Sapling and
+    /// an Orchard item.
+    fn describe_test_key(network: &impl Parameters) -> UnifiedFullViewingKey {
+        UnifiedSpendingKey::from_seed(network, &[7u8; 32], zip32::AccountId::ZERO)
+            .expect("a spending key derives")
+            .to_unified_full_viewing_key()
+    }
+
+    /// The encoding of [`describe_test_key`] for `network`.
+    fn describe_test_ufvk(network: &impl Parameters) -> String {
+        describe_test_key(network)
+            .encode(network)
+            .expect("the UFVK encodes")
+    }
+
+    /// The data items of the mainnet [`describe_test_key`]: Orchard, Sapling and P2PKH.
+    fn describe_test_items() -> (unified::Fvk, unified::Fvk, unified::Fvk) {
+        let key = describe_test_key(&MAIN_NETWORK);
+        let orchard = unified::Fvk::Orchard(
+            key.orchard()
+                .expect("the test key has an Orchard item")
+                .to_bytes(),
+        );
+        let sapling = unified::Fvk::Sapling(
+            key.sapling()
+                .expect("the test key has a Sapling item")
+                .to_bytes(),
+        );
+        let p2pkh = unified::Fvk::P2pkh(
+            key.p2pkh()
+                .expect("the test key has a P2PKH item")
+                .serialize()
+                .try_into()
+                .expect("an account public key is 65 bytes"),
+        );
+        (orchard, sapling, p2pkh)
+    }
+
+    /// Encodes a mainnet revision 0 UFVK holding `items`.
+    fn ufvk_from_items(items: Vec<unified::Fvk>) -> String {
+        unified::Ufvk::try_from_items(
+            unified::Revision::R0,
+            items.into_iter().map(unified::Uitem::Data).collect(),
+        )
+        .expect("the items form a valid revision 0 UFVK")
+        .encode(&MAIN_NETWORK.network_type())
+    }
+
+    /// Calls [`zcashlc_describe_unified_full_viewing_key`] with `input`, after clearing the last
+    /// error so that the caller can tell whether this call set one.
+    fn describe(input: impl Into<Vec<u8>>, network_id: u32) -> i32 {
+        let input = CString::new(input).expect("the input has no interior NUL");
+        crate::zcashlc_clear_last_error();
+        unsafe { zcashlc_describe_unified_full_viewing_key(input.as_ptr(), network_id) }
+    }
+
+    /// Asserts that the FFI reports `input` as not a UFVK for `network_id`: `-1`, which is not an
+    /// error, so no last error is set.
+    fn assert_not_a_ufvk(input: impl Into<Vec<u8>>, network_id: u32, case: &str) {
+        assert_eq!(describe(input, network_id), -1, "{case}");
+        assert_eq!(
+            crate::zcashlc_last_error_length(),
+            0,
+            "{case} must not set a last error"
+        );
+    }
+
+    /// The last error message set on this thread.
+    fn last_error_message() -> String {
+        let len = crate::zcashlc_last_error_length();
+        assert!(len > 0, "a last error must be set");
+        let mut buf = vec![0u8; len as usize];
+        unsafe { crate::zcashlc_error_message_utf8(buf.as_mut_ptr().cast::<c_char>(), len) };
+        CStr::from_bytes_until_nul(&buf)
+            .expect("the message is NUL-terminated")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// The flag values are the C contract of [`zcashlc_describe_unified_full_viewing_key`].
+    #[test]
+    fn describe_flag_values_match_the_ffi_contract() {
+        assert_eq!(UfvkComponentFlags::P2PKH.bits(), 1);
+        assert_eq!(UfvkComponentFlags::P2SH.bits(), 2);
+        assert_eq!(UfvkComponentFlags::SAPLING.bits(), 4);
+        assert_eq!(UfvkComponentFlags::ORCHARD.bits(), 8);
+        assert_eq!(UfvkComponentFlags::UNKNOWN.bits(), 16);
+    }
+
+    /// A key derived from a seed carries a P2PKH, a Sapling and an Orchard item, on either
+    /// network.
+    #[test]
+    fn describe_reports_every_component_of_a_seed_derived_key() {
+        let every_component =
+            (UfvkComponentFlags::P2PKH | UfvkComponentFlags::SAPLING | UfvkComponentFlags::ORCHARD)
+                .bits();
+
+        assert_eq!(
+            describe(describe_test_ufvk(&MAIN_NETWORK), crate::NETWORK_ID_MAINNET),
+            every_component
+        );
+        assert_eq!(
+            describe(describe_test_ufvk(&TEST_NETWORK), crate::NETWORK_ID_TESTNET),
+            every_component
+        );
+    }
+
+    /// A key with a single shielded item reports that item alone.
+    #[test]
+    fn describe_reports_orchard_only_and_sapling_only_keys() {
+        let (orchard, sapling, _) = describe_test_items();
+
+        assert_eq!(
+            describe(ufvk_from_items(vec![orchard]), crate::NETWORK_ID_MAINNET),
+            UfvkComponentFlags::ORCHARD.bits()
+        );
+        assert_eq!(
+            describe(ufvk_from_items(vec![sapling]), crate::NETWORK_ID_MAINNET),
+            UfvkComponentFlags::SAPLING.bits()
+        );
+    }
+
+    /// A P2SH viewing-key item is reported as P2SH, never as P2PKH.
+    #[test]
+    fn describe_reports_a_p2sh_key_apart_from_p2pkh() {
+        assert_eq!(
+            describe(P2SH_ORCHARD_UFVK_VECTOR, crate::NETWORK_ID_MAINNET),
+            (UfvkComponentFlags::P2SH | UfvkComponentFlags::ORCHARD).bits()
+        );
+    }
+
+    /// A data item of a typecode this library does not recognize sets the unknown flag, next to
+    /// the flags of the items it does recognize.
+    #[test]
+    fn describe_reports_unknown_items() {
+        let (orchard, sapling, p2pkh) = describe_test_items();
+        let unknown = unified::Fvk::Unknown {
+            typecode: 0xff00,
+            data: vec![1, 2, 3, 4],
+        };
+
+        assert_eq!(
+            describe(
+                ufvk_from_items(vec![orchard, sapling, p2pkh, unknown]),
+                crate::NETWORK_ID_MAINNET
+            ),
+            (UfvkComponentFlags::P2PKH
+                | UfvkComponentFlags::SAPLING
+                | UfvkComponentFlags::ORCHARD
+                | UfvkComponentFlags::UNKNOWN)
+                .bits()
+        );
+    }
+
+    /// A key for one network is not a UFVK for the other.
+    #[test]
+    fn describe_returns_minus_one_for_wrong_network() {
+        assert_not_a_ufvk(
+            describe_test_ufvk(&MAIN_NETWORK),
+            crate::NETWORK_ID_TESTNET,
+            "a mainnet key on testnet",
+        );
+        assert_not_a_ufvk(
+            describe_test_ufvk(&TEST_NETWORK),
+            crate::NETWORK_ID_MAINNET,
+            "a testnet key on mainnet",
+        );
+    }
+
+    /// An incoming viewing key, strings that are no key at all, and a key with one character
+    /// changed are not UFVKs.
+    #[test]
+    fn describe_returns_minus_one_for_uivk_garbage_and_bad_checksum() {
+        let uivk = describe_test_key(&MAIN_NETWORK)
+            .to_unified_incoming_viewing_key()
+            .encode(&MAIN_NETWORK)
+            .expect("the UIVK encodes");
+        let mut bad_checksum = describe_test_ufvk(&MAIN_NETWORK);
+        let last = bad_checksum.pop().expect("the UFVK is not empty");
+        bad_checksum.push(if last == 'q' { 'p' } else { 'q' });
+
+        for (input, case) in [
+            (uivk, "a UIVK"),
+            ("garbage".to_string(), "garbage"),
+            (String::new(), "an empty string"),
+            (bad_checksum, "a UFVK with one character changed"),
+        ] {
+            assert_not_a_ufvk(input, crate::NETWORK_ID_MAINNET, case);
+        }
+    }
+
+    /// Whitespace around a key does not change its description.
+    #[test]
+    fn describe_ignores_surrounding_whitespace() {
+        let ufvk = describe_test_ufvk(&MAIN_NETWORK);
+        let unpadded = describe(ufvk.as_str(), crate::NETWORK_ID_MAINNET);
+        assert_eq!(
+            unpadded,
+            (UfvkComponentFlags::P2PKH | UfvkComponentFlags::SAPLING | UfvkComponentFlags::ORCHARD)
+                .bits(),
+            "the unpadded key must describe as a UFVK"
+        );
+
+        assert_eq!(
+            describe(format!("  \n{ufvk}\t"), crate::NETWORK_ID_MAINNET),
+            unpadded
+        );
+    }
+
+    /// The last error of an internal failure holds no part of the key the call was given: no
+    /// 16-character window of the key appears in it.
+    #[test]
+    fn describe_errors_never_contain_the_input() {
+        const WINDOW: usize = 16;
+        let ufvk = describe_test_ufvk(&MAIN_NETWORK);
+        let mut not_utf8 = ufvk.clone().into_bytes();
+        not_utf8.push(0xff);
+
+        for (input, network_id, case) in [
+            (ufvk.clone().into_bytes(), 99, "an invalid network id"),
+            (
+                not_utf8,
+                crate::NETWORK_ID_MAINNET,
+                "input that is not UTF-8",
+            ),
+        ] {
+            assert_eq!(describe(input, network_id), -2, "{case}");
+            let message = last_error_message().to_lowercase();
+            for start in 0..=ufvk.len() - WINDOW {
+                assert!(
+                    !message.contains(&ufvk[start..start + WINDOW]),
+                    "the error for {case} echoes the key at offset {start}"
+                );
+            }
+        }
+    }
+
+    /// A null pointer is an internal failure: `-2`, with a last error set.
+    #[test]
+    fn describe_returns_minus_two_for_a_null_pointer() {
+        crate::zcashlc_clear_last_error();
+        let result = unsafe {
+            zcashlc_describe_unified_full_viewing_key(std::ptr::null(), crate::NETWORK_ID_MAINNET)
+        };
+
+        assert_eq!(result, -2);
+        assert!(
+            crate::zcashlc_last_error_length() > 0,
+            "a null pointer must set a last error"
         );
     }
 }
