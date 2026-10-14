@@ -229,7 +229,8 @@ public actor GiftCardRedeemer {
             storageDirectory: storageDirectory,
             loggingPolicy: loggingPolicy,
             container: DIContainer(),
-            makeSynchronizer: { SlipstreamSynchronizer(initializer: $0) }
+            makeSynchronizer: { SlipstreamSynchronizer(initializer: $0) },
+            saplingParamsSourceURL: .default
         )
     }
 
@@ -245,7 +246,7 @@ public actor GiftCardRedeemer {
         cleanupTiming: GiftCardCleanupTiming = .live,
         checkTiming: GiftCardCleanupTiming = .live,
         checkPolicy: GiftCardCheckPolicy? = nil,
-        saplingParamsSourceURL: SaplingParamsSourceURL = .default
+        saplingParamsSourceURL: SaplingParamsSourceURL
     ) throws {
         guard card.network == network.networkType else {
             throw ZcashError.giftCardNetworkMismatch

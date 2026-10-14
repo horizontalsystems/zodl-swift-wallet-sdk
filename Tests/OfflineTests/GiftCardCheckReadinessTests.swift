@@ -514,13 +514,22 @@ final class GiftCardCheckReadinessTests: ZcashTestCase {
     /// exists so a regression fails the test in seconds instead of stalling the CI job until its
     /// timeout kills the runner (run 38475223787 lost 52 minutes to exactly that).
     private func boundedValue(of task: Task<AccountBalance, Error>, seconds: UInt64 = 30) async throws -> AccountBalance {
-        let guardTask = Task {
-            try await Task.sleep(nanoseconds: seconds * 1_000_000_000)
-            task.cancel()
-            XCTFail("attempt did not complete within the \(seconds) s hang backstop")
+        // The guard runs inside the group so it is always joined before this function returns:
+        // a backstop failure can never be posted late and attributed to a later test.
+        try await withThrowingTaskGroup(of: AccountBalance?.self) { group in
+            group.addTask { try await task.value }
+            group.addTask {
+                guard (try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)) != nil else { return nil }
+                task.cancel()
+                XCTFail("attempt did not complete within the \(seconds) s hang backstop")
+                return nil
+            }
+            defer { group.cancelAll() }
+            while let result = try await group.next() {
+                if let value = result { return value }
+            }
+            throw CancellationError()
         }
-        defer { guardTask.cancel() }
-        return try await task.value
     }
 
     private func fundedArrival(at instant: UInt64) async throws {
