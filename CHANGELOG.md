@@ -6,6 +6,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 # Unreleased
 
+# 5.2.1 - 2026-10-14
+
 ## Changed
 
 - The Rust core enables `pasta_curves`' `asm` feature, so the Pallas and Vesta field arithmetic
