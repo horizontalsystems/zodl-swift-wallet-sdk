@@ -182,6 +182,19 @@ test_codeql_swift_job_uses_xcode_26_6() {
     assert_file_contains "$(_codeql_workflow)" "/Applications/Xcode_26.6.app" "CodeQL's Swift job selects Xcode 26.6"
 }
 
+test_codeql_swift_job_builds_with_ffi_ci() {
+    assert_file_contains "$(_codeql_workflow)" "run: make ffi-ci" "CodeQL's Swift job builds with make ffi-ci"
+    assert_file_lacks "$(_codeql_workflow)" "run: make ffi-macos" "CodeQL no longer builds the universal slice"
+    assert_file_contains "$(_codeql_workflow)" "key: codeql-ffi-xcframework-macos-arm64-nolto-" \
+        "CodeQL's XCFramework key names the ffi-ci build"
+    assert_file_contains "$(_codeql_workflow)" 'codeql-${{ runner.os }}-cargo-v2-${{ steps.toolchain.outputs.cachekey }}-' \
+        "CodeQL's cargo key carries the rustc version"
+    assert_file_contains "$(_codeql_workflow)" "find rust Cargo.toml Cargo.lock BuildSupport Makefile -type f" \
+        "CodeQL's FFI hash covers the root Makefile"
+    assert_file_contains "$(_codeql_workflow)" "id: toolchain" "CodeQL's Setup Rust step has an id"
+    assert_file_lacks "$(_codeql_workflow)" "x86_64-apple-darwin" "CodeQL installs no x86_64 target"
+}
+
 test_no_workflow_calls_slipstream_a_private_cargo_clone() {
     assert_eq "" "$(grep -rl 'PRIVATE zodl-inc/slipstream' "$REPO_ROOT/.github/workflows")" \
         "no cache comment still describes slipstream as a private git dependency"

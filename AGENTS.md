@@ -214,7 +214,8 @@ hand-written `swift` command:
 | `zizmor.yml` | every PR | matters when you change a workflow file |
 
 `codeql.yml` does **not** run per PR — only on merges to `main` and weekly,
-because its Swift matrix entry needs `build-mode: manual` and a full FFI build.
+because its Swift matrix entry needs `build-mode: manual` and an FFI build
+(`make ffi-ci`).
 
 The `paths-ignore` list is specific: `README.md`, `CHANGELOG.md`,
 `CONTRIBUTING.md`, `SWIFTLINT.md`, `responsible_disclosure.md`, `SECURITY.md`,

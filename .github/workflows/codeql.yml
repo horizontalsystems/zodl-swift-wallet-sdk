@@ -15,8 +15,8 @@ name: "CodeQL Advanced"
 #
 # Rationale:
 # - The Swift matrix entry requires `build-mode: manual` (CodeQL's Swift extractor
-#   hooks the compiler), so it has to run a full Rust FFI + Swift build on a
-#   macOS runner. On Cargo.lock-changing PRs this is a 30-50 min cold build,
+#   hooks the compiler), so it has to build the Rust FFI (`make ffi-ci`, the
+#   arm64 macOS slice) and the Swift package on a macOS runner; a cold build,
 #   per push, with no concurrency cancellation.
 # - The build-integration signal that matters at PR time (does Rust still link
 #   with Swift? do offline tests pass?) is already covered by `swift.yml` on
@@ -112,7 +112,7 @@ jobs:
       if: matrix.language == 'swift'
       id: ffi-hash
       run: |
-        FFI_HASH=$(find rust Cargo.toml Cargo.lock BuildSupport -type f \( -name "*.rs" -o -name "*.toml" -o -name "*.lock" -o -name "Makefile" -o -name "*.h" -o -name "*.c" -o -name "*.plist" -o -name "*.modulemap" \) -exec shasum {} \; | sort | shasum | cut -d' ' -f1)
+        FFI_HASH=$(find rust Cargo.toml Cargo.lock BuildSupport Makefile -type f \( -name "*.rs" -o -name "*.toml" -o -name "*.lock" -o -name "Makefile" -o -name "*.h" -o -name "*.c" -o -name "*.plist" -o -name "*.modulemap" \) -exec shasum {} \; | sort | shasum | cut -d' ' -f1)
         echo "hash=$FFI_HASH" >> $GITHUB_OUTPUT
         echo "FFI source hash: $FFI_HASH"
 
@@ -122,14 +122,15 @@ jobs:
       uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
       with:
         path: BuildSupport/products/libzcashlc.xcframework
-        key: ffi-xcframework-macos-only-${{ runner.os }}-${{ steps.ffi-hash.outputs.hash }}
+        key: codeql-ffi-xcframework-macos-arm64-nolto-${{ runner.os }}-${{ steps.ffi-hash.outputs.hash }}
 
     - name: Setup Rust
+      id: toolchain
       if: matrix.language == 'swift' && steps.cache-ffi.outputs.cache-hit != 'true'
       uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
       with:
         toolchain: stable
-        targets: aarch64-apple-darwin, x86_64-apple-darwin
+        targets: aarch64-apple-darwin
 
     - name: Cache Cargo
       if: matrix.language == 'swift' && steps.cache-ffi.outputs.cache-hit != 'true'
@@ -146,21 +147,25 @@ jobs:
         #
         # `registry/` is crates.io content and safe to cache. `target/` holds compiled rlib/rmeta
         # files, never sources: a far smaller disclosure should a private dependency return, and
-        # too expensive to rebuild every run.
+        # too expensive to rebuild every run. The codeql- prefix keeps these caches apart from
+        # swift.yml's, which a different Xcode builds; v2 is ffi-ci's arm64-only, LTO-off build,
+        # and the toolchain's cachekey starts a fresh cache with each stable Rust release.
         path: |
           target
           ~/.cargo/bin
           ~/.cargo/registry/index
           ~/.cargo/registry/cache
           ~/.cargo/registry/src
-        key: ${{ runner.os }}-cargo-v1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+        key: codeql-${{ runner.os }}-cargo-v2-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
         restore-keys: |
-          ${{ runner.os }}-cargo-v1-
+          codeql-${{ runner.os }}-cargo-v2-${{ steps.toolchain.outputs.cachekey }}-
 
+    # The arm64 macOS slice without fat LTO is all the Swift build needs for
+    # analysis; the universal LTO build used to run into the 30-minute limit.
     - name: Build FFI for macOS
       if: matrix.language == 'swift' && steps.cache-ffi.outputs.cache-hit != 'true'
       timeout-minutes: 30
-      run: make ffi-macos
+      run: make ffi-ci
 
     - name: Configure local FFI
       if: matrix.language == 'swift'
