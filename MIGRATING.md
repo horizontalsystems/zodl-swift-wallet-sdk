@@ -1,5 +1,19 @@
 # Migrating from previous versions to _Unreleased_
 
+## `ZcashError` gained a case — `rustDescribeUnifiedFullViewingKey`
+
+`ZcashError` and `ZcashErrorCode` have a new case, `rustDescribeUnifiedFullViewingKey` (`ZRUST0161`),
+which only `DerivationTool.describeUnifiedFullViewingKey(_:)` throws, when the rust layer fails to
+check the key. Its payload is the rust layer's message, which never contains any part of the key. An
+exhaustive `switch` over either type stops compiling until it is handled. The failure says nothing
+about the key itself, so report that the key could not be checked, not that it is invalid.
+
+```swift
+case .rustDescribeUnifiedFullViewingKey:
+    // The check itself failed, so the key is neither accepted nor rejected: offer another attempt.
+    break
+```
+
 ## The package is `zodl-swift-wallet-sdk` and the module is `ZODLSwiftWalletSDK`
 
 The package, its library product, and its module are renamed, and the repository has moved to

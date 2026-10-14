@@ -291,6 +291,8 @@ public enum ZcashErrorCode: String {
     case rustProposalRequiresSaplingParams = "ZRUST0157"
     /// Error from rust layer when calling ZcashRustBackend.setTransactionTrust
     case rustSetTransactionTrust = "ZRUST0158"
+    /// Error from rust layer when calling ZcashKeyDerivationBackend.describeUnifiedFullViewingKey
+    case rustDescribeUnifiedFullViewingKey = "ZRUST0161"
     /// Error from rust layer when calling ZcashRustBackend.migrationProgress
     case rustMigrationProgress = "ZRUST0099"
     /// Error from rust layer when calling ZcashRustBackend.migrationIsNoteSplitNeeded

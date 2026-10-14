@@ -36,6 +36,14 @@ Changes are relative to `5.2.1`.
 - `PaymentURIParser` reports missing, retyped, or unknown fields in the Rust result envelope as
   `invalidEnvelope` rather than `invalidURI`. Callers can distinguish an SDK/core mismatch from a
   bad scanned URI without asking the user to rescan.
+- `DerivationTool.describeUnifiedFullViewingKey(_:)` reports which items a `UnifiedFullViewingKey`
+  carries, as a `UnifiedFullViewingKeyComponents` with `hasP2pkh`, `hasP2sh`, `hasSapling`,
+  `hasOrchard`, `hasUnknownItems` and `hasTransparent` (a P2PKH or a P2SH item). A wallet can use it
+  to require an item, such as Orchard, before it imports a key. It returns `nil` when the key is not
+  a unified full viewing key for the tool's network, for instance a key created for the other
+  network, and throws `ZcashError.rustDescribeUnifiedFullViewingKey` (`ZRUST0161`) when the check
+  itself fails. It reads no database, makes no network request, and puts no part of the key in an
+  error.
 
 ## Changed
 
@@ -67,6 +75,9 @@ Changes are relative to `5.2.1`.
 - `migrationProgress(accountUUID:)` and `recordImmediateMigration(accountUUID:txid:)` use a record
   that `prepare()` now creates, so on a wallet upgraded from an earlier SDK version they throw until
   the synchronizer has been prepared with this version.
+- `ZcashError` and `ZcashErrorCode` gain `rustDescribeUnifiedFullViewingKey` (`ZRUST0161`), which
+  only `DerivationTool.describeUnifiedFullViewingKey(_:)` throws. An exhaustive `switch` over either
+  stops compiling until it is handled; see `MIGRATING.md`.
 
 ## Removed
 
