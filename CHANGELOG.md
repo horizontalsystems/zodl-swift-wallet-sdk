@@ -35,6 +35,17 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `invalidEnvelope` rather than `invalidURI`. Callers can distinguish an SDK/core mismatch from a
   bad scanned URI without asking the user to rescan.
 
+## Changed
+
+- `RustErrorKind` has a new case, `anchorNotFound`: creating transactions from a proposal failed
+  because the wallet has not scanned to a height it can anchor them on. Such failures were reported
+  as `proposalInvalid`, and a wallet could only tell them apart by the upstream error text, which
+  redaction now removes; the new case lets it say "scan further and retry". An exhaustive `switch`
+  over `RustErrorKind` stops compiling until the new case is handled.
+- `migrationProgress(accountUUID:)` and `recordImmediateMigration(accountUUID:txid:)` use a record
+  that `prepare()` now creates, so on a wallet upgraded from an earlier SDK version they throw until
+  the synchronizer has been prepared with this version.
+
 ## Removed
 
 - `ZcashEip681Backend` and the `zcashlc_eip681_*` FFI are gone. `PaymentURIParser` now handles
@@ -47,6 +58,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Transaction submission through `Broadcaster` now treats a server rejection as accepted when that
   same server confirms it already knows the transaction. No caller changes are required.
+- The migration APIs no longer create a wallet database, or any table in one, when called for a
+  wallet whose database does not exist or was never initialized; they throw instead. Such a call
+  used to leave behind a database file holding a single table, which a wallet could mistake for
+  an existing one.
 
 # 5.2.0 - 2026-10-09
 
