@@ -7,7 +7,7 @@
 //
 
 import XCTest
-@testable import ZcashLightClientKit
+@testable import ZODLSwiftWalletSDK
 
 // MARK: - Fixtures
 
