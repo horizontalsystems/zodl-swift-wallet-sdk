@@ -1,16 +1,28 @@
 # Migrating from previous versions to _Unreleased_
 
-## `ZcashError` gained a case — `rustDescribeUnifiedFullViewingKey`
+## `ZcashError` gained cases — viewing key checks
 
-`ZcashError` and `ZcashErrorCode` have a new case, `rustDescribeUnifiedFullViewingKey` (`ZRUST0161`),
-which only `DerivationTool.describeUnifiedFullViewingKey(_:)` throws, when the rust layer fails to
-check the key. Its payload is the rust layer's message, which never contains any part of the key. An
-exhaustive `switch` over either type stops compiling until it is handled. The failure says nothing
-about the key itself, so report that the key could not be checked, not that it is invalid.
+`ZcashError` and `ZcashErrorCode` have three new cases, which only the viewing key checks throw. An
+exhaustive `switch` over either type stops compiling until they are handled.
+
+- `rustDescribeUnifiedFullViewingKey` (`ZRUST0161`): `DerivationTool.describeUnifiedFullViewingKey(_:)`
+  could not check the key.
+- `rustFindAccountKeyOverlap` (`ZRUST0159`): `Synchronizer.findAccountSharingKeyComponents(_:)` could
+  not look the key up, for instance because the wallet database could not be read.
+- `accountKeyOverlapMultipleAccounts` (`ZRUST0160`): `Synchronizer.findAccountSharingKeyComponents(_:)`
+  found more than one account that shares a viewing key component with the key, so importing the key
+  would fail.
+
+The payloads of the first two are the rust layer's message, which never contains any part of the key.
+Those two failures say nothing about the key itself, so report that the key could not be checked, not
+that it is invalid. The third is an answer about the key: its import would fail, so refuse it.
 
 ```swift
-case .rustDescribeUnifiedFullViewingKey:
+case .rustDescribeUnifiedFullViewingKey, .rustFindAccountKeyOverlap:
     // The check itself failed, so the key is neither accepted nor rejected: offer another attempt.
+    break
+case .accountKeyOverlapMultipleAccounts:
+    // Several accounts share the key's components, so importing it would fail: refuse it.
     break
 ```
 

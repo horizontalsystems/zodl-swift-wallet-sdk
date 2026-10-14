@@ -2384,6 +2384,30 @@ class SynchronizerMock: Synchronizer {
         }
     }
 
+    // MARK: - findAccountSharingKeyComponents
+
+    var findAccountSharingKeyComponentsThrowableError: Error?
+    var findAccountSharingKeyComponentsCallsCount = 0
+    var findAccountSharingKeyComponentsCalled: Bool {
+        return findAccountSharingKeyComponentsCallsCount > 0
+    }
+    var findAccountSharingKeyComponentsReceivedUfvk: UnifiedFullViewingKey?
+    var findAccountSharingKeyComponentsReturnValue: AccountKeyOverlap?
+    var findAccountSharingKeyComponentsClosure: ((UnifiedFullViewingKey) async throws -> AccountKeyOverlap?)?
+
+    func findAccountSharingKeyComponents(_ ufvk: UnifiedFullViewingKey) async throws -> AccountKeyOverlap? {
+        if let error = findAccountSharingKeyComponentsThrowableError {
+            throw error
+        }
+        findAccountSharingKeyComponentsCallsCount += 1
+        findAccountSharingKeyComponentsReceivedUfvk = ufvk
+        if let closure = findAccountSharingKeyComponentsClosure {
+            return try await closure(ufvk)
+        } else {
+            return findAccountSharingKeyComponentsReturnValue
+        }
+    }
+
     // MARK: - importAccount
 
     var importAccountUfvkSeedFingerprintZip32AccountIndexPurposeNameKeySourceBirthdayThrowableError: Error?
@@ -4418,6 +4442,30 @@ class ZcashRustBackendWeldingMock: ZcashRustBackendWelding {
             return try await closure(ufvk, seedFingerprint, zip32AccountIndex, treeState, recoverUntil, purpose, name, keySource)
         } else {
             return importAccountUfvkSeedFingerprintZip32AccountIndexTreeStateRecoverUntilPurposeNameKeySourceReturnValue
+        }
+    }
+
+    // MARK: - findAccountKeyOverlap
+
+    var findAccountKeyOverlapUfvkThrowableError: Error?
+    var findAccountKeyOverlapUfvkCallsCount = 0
+    var findAccountKeyOverlapUfvkCalled: Bool {
+        return findAccountKeyOverlapUfvkCallsCount > 0
+    }
+    var findAccountKeyOverlapUfvkReceivedUfvk: UnifiedFullViewingKey?
+    var findAccountKeyOverlapUfvkReturnValue: AccountKeyOverlap?
+    var findAccountKeyOverlapUfvkClosure: ((UnifiedFullViewingKey) async throws -> AccountKeyOverlap?)?
+
+    func findAccountKeyOverlap(ufvk: UnifiedFullViewingKey) async throws -> AccountKeyOverlap? {
+        if let error = findAccountKeyOverlapUfvkThrowableError {
+            throw error
+        }
+        findAccountKeyOverlapUfvkCallsCount += 1
+        findAccountKeyOverlapUfvkReceivedUfvk = ufvk
+        if let closure = findAccountKeyOverlapUfvkClosure {
+            return try await closure(ufvk)
+        } else {
+            return findAccountKeyOverlapUfvkReturnValue
         }
     }
 

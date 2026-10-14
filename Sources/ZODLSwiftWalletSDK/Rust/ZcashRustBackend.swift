@@ -291,6 +291,24 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
         return uuidPtr.pointee.unsafeToAccountUUID()
     }
 
+    // DB-READ (audited 2026-10-14): read-only wallet database connection.
+    func findAccountKeyOverlap(ufvk: UnifiedFullViewingKey) async throws -> AccountKeyOverlap? {
+        let overlapPtr = zcashlc_find_account_key_overlap(
+            dbData.0,
+            dbData.1,
+            [CChar](ufvk.stringEncoded.utf8CString),
+            networkType.networkId
+        )
+
+        guard let overlapPtr else {
+            throw ZcashError.rustFindAccountKeyOverlap(lastErrorMessage(fallback: "`findAccountKeyOverlap` failed with unknown error"))
+        }
+
+        defer { zcashlc_free_account_key_overlap(overlapPtr) }
+
+        return try overlapPtr.pointee.unsafeToAccountKeyOverlap()
+    }
+
     @DBActor
     func createAccount(
         seed: [UInt8],
@@ -3008,6 +3026,41 @@ extension FfiAccount {
             ufvk: ufvkTyped,
             uivk: uivkTyped
         )
+    }
+}
+
+extension FfiAccountKeyOverlap {
+    /// Converts what `zcashlc_find_account_key_overlap` reported into the answer of
+    /// `ZcashRustBackendWelding.findAccountKeyOverlap(ufvk:)`. Call it before the struct is freed, because it reads the
+    /// strings of the account.
+    /// - Returns: `nil` when importing the key would add an account.
+    /// - Throws:
+    ///     - `accountKeyOverlapMultipleAccounts` when the components of the key match more than one account.
+    ///     - `rustFindAccountKeyOverlap` for a kind this version of the SDK does not know, or when no account is reported
+    ///       for a kind that needs one.
+    func unsafeToAccountKeyOverlap() throws -> AccountKeyOverlap? {
+        let overlapKind: AccountKeyOverlap.Kind
+
+        switch kind {
+        case FfiAccountKeyOverlapKind_None:
+            return nil
+        case FfiAccountKeyOverlapKind_MultipleAccounts:
+            throw ZcashError.accountKeyOverlapMultipleAccounts
+        case FfiAccountKeyOverlapKind_AlreadyImported:
+            overlapKind = .alreadyImported
+        case FfiAccountKeyOverlapKind_WouldUpgrade:
+            overlapKind = .wouldUpgrade
+        case FfiAccountKeyOverlapKind_Conflicting:
+            overlapKind = .conflicting
+        default:
+            throw ZcashError.rustFindAccountKeyOverlap(lastErrorMessage(fallback: "`findAccountKeyOverlap` reported an unknown kind"))
+        }
+
+        guard let overlappingAccount = account.unsafeToAccount() else {
+            throw ZcashError.rustFindAccountKeyOverlap(lastErrorMessage(fallback: "`findAccountKeyOverlap` reported no account"))
+        }
+
+        return AccountKeyOverlap(account: overlappingAccount, kind: overlapKind)
     }
 }
 
