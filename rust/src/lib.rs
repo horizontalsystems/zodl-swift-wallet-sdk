@@ -849,6 +849,130 @@ pub unsafe extern "C" fn zcashlc_import_account_ufvk(
     unwrap_exc_or_null(res)
 }
 
+/// The fixed `CorruptedData` message of `zcash_client_sqlite`'s viewing key lookup when the
+/// incoming viewing key items of a key match more than one account. If librustzcash rewords it,
+/// `overlap_multiple_accounts_reports_kind_4` fails.
+const MULTIPLE_ACCOUNTS_MATCHED_UIVK: &str = "Multiple account records matched the provided UIVK";
+
+/// Classifies what importing `candidate` would do to `existing`, an account that the wallet
+/// matched to it on at least one incoming viewing key item. The predicates are the ones
+/// `zcash_client_sqlite` applies when an imported UFVK meets an existing account.
+///
+/// The import replaces the account's viewing key exactly when `candidate` subsumes the account's
+/// incoming viewing key items and the account's viewing key does not already subsume `candidate`.
+/// Every other pair fails the import with an account collision; those are split here into a
+/// candidate the account already covers and one it does not.
+fn classify_account_key_overlap<A: Account>(
+    existing: &A,
+    candidate: &UnifiedFullViewingKey,
+) -> ffi::AccountKeyOverlapKind {
+    if existing
+        .ufvk()
+        .is_some_and(|existing_ufvk| existing_ufvk.subsumes_ufvk(candidate))
+    {
+        ffi::AccountKeyOverlapKind::AlreadyImported
+    } else if candidate.subsumes_uivk(&existing.uivk()) {
+        ffi::AccountKeyOverlapKind::WouldUpgrade
+    } else {
+        ffi::AccountKeyOverlapKind::Conflicting
+    }
+}
+
+/// Finds the account in `wallet` that shares at least one incoming viewing key item with
+/// `candidate`, and what importing `candidate` would do to it. The account is returned for the
+/// kinds `AlreadyImported`, `WouldUpgrade` and `Conflicting`, and not for the others.
+///
+/// The match is [`WalletRead::get_account_for_ufvk`], which compares the Orchard, Sapling and
+/// P2PKH incoming viewing key items: the lookup an import runs first. When the items match more
+/// than one account, that lookup fails as the import does, and this reports
+/// [`ffi::AccountKeyOverlapKind::MultipleAccounts`]. Any other failure is returned as it is.
+fn find_account_key_overlap<W>(
+    wallet: &W,
+    candidate: &UnifiedFullViewingKey,
+) -> Result<(ffi::AccountKeyOverlapKind, Option<W::Account>), SqliteClientError>
+where
+    W: WalletRead<Error = SqliteClientError>,
+{
+    match wallet.get_account_for_ufvk(candidate) {
+        Ok(Some(account)) => Ok((
+            classify_account_key_overlap(&account, candidate),
+            Some(account),
+        )),
+        Ok(None) => Ok((ffi::AccountKeyOverlapKind::None, None)),
+        Err(SqliteClientError::CorruptedData(msg)) if msg == MULTIPLE_ACCOUNTS_MATCHED_UIVK => {
+            Ok((ffi::AccountKeyOverlapKind::MultipleAccounts, None))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Finds the account in the wallet that shares an incoming viewing key component (Orchard,
+/// Sapling or transparent P2PKH) with the provided unified full viewing key, and reports what
+/// importing the key with [`zcashlc_import_account_ufvk`] would do to it. Whitespace around the
+/// key is ignored. The wallet database is opened read-only, so it is never changed.
+///
+/// The `kind` of the returned [`ffi::AccountKeyOverlap`] is one of:
+/// - `None`: no account shares a component, so the import adds an account;
+/// - `AlreadyImported`: the account's viewing key already covers every item of the key, so the
+///   import fails;
+/// - `WouldUpgrade`: the key carries every incoming viewing key item of the account and something
+///   its viewing key does not cover, so the import adds no account but replaces the account's
+///   viewing key with the key;
+/// - `Conflicting`: the key shares a component with the account but lacks or changes another, so
+///   the import fails;
+/// - `MultipleAccounts`: the key's components match more than one account, so the import fails.
+///
+/// Its `account` is that account, or [`ffi::Account::NOT_FOUND`] for `None` and
+/// `MultipleAccounts`.
+///
+/// Returns null on an error: a null key, a key that is not UTF-8 or is not a unified full viewing
+/// key for `network_id`, an invalid `network_id`, a wallet database that cannot be read, or a
+/// panic. The last error is set, and never contains any part of the key.
+///
+/// # Safety
+///
+/// - `db_data` must be non-null and valid for reads for `db_data_len` bytes, and it must have an
+///   alignment of `1`. Its contents must be a string representing a valid system path in the
+///   operating system's preferred representation.
+/// - The memory referenced by `db_data` must not be mutated for the duration of the function call.
+/// - The total size `db_data_len` must be no larger than `isize::MAX`. See the safety
+///   documentation of pointer::offset.
+/// - `ufvk` must be null or must point to a null-terminated string.
+/// - The memory referenced by `ufvk` must not be mutated for the duration of the function call.
+/// - Call [`ffi::zcashlc_free_account_key_overlap`] to free the memory associated with the
+///   returned pointer when done using it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zcashlc_find_account_key_overlap(
+    db_data: *const u8,
+    db_data_len: usize,
+    ufvk: *const c_char,
+    network_id: u32,
+) -> *mut ffi::AccountKeyOverlap {
+    let res = catch_panic(|| {
+        if ufvk.is_null() {
+            return Err(anyhow!("no unified full viewing key was supplied"));
+        }
+        let network = parse_network(network_id)?;
+        let encoding = unsafe { CStr::from_ptr(ufvk) }
+            .to_str()
+            .map_err(|_| anyhow!("the unified full viewing key is not UTF-8"))?;
+        let (_, candidate) = derivation::decode_ufvk(&network, encoding)?;
+        let db_data = unsafe { wallet_db_read_only(system_rng(), db_data, db_data_len, network)? };
+
+        let (kind, account) = find_account_key_overlap(&db_data, &candidate).map_err(|e| {
+            anyhow!("Error while finding the account that shares a viewing key component: {e}")
+        })?;
+        let account = account.map_or(Ok(ffi::Account::NOT_FOUND), |account| {
+            ffi::Account::from_account(&account, &network)
+        })?;
+        Ok(Box::into_raw(Box::new(ffi::AccountKeyOverlap {
+            kind,
+            account,
+        })))
+    });
+    unwrap_exc_or_null(res)
+}
+
 /// Checks whether the given seed is relevant to any of the accounts in the wallet.
 ///
 /// Returns:
@@ -5211,6 +5335,7 @@ pub(crate) fn parse_optional_height(value: i64) -> anyhow::Result<Option<BlockHe
 mod tests {
     use super::*;
     use tracing::Level;
+    use zcash_address::unified::{self, Container as _, Encoding as _};
 
     /// The C callers select the outgoing viewing key policy by number; only the two documented
     /// values are accepted, so a caller asking for an unrecoverable send is never silently given
@@ -5619,6 +5744,581 @@ mod tests {
     #[cfg(target_arch = "aarch64")]
     fn pasta_curves_runs_its_aarch64_assembly_backend() {
         assert_eq!(pasta_curves::BACKEND, "aarch64");
+    }
+
+    // ── The account that shares a viewing key component ──────────────────────────────────────
+
+    /// The seed of the key the overlap tests import first. A throwaway: it holds no funds.
+    const OVERLAP_BASE_SEED: [u8; 32] = [7; 32];
+
+    /// A second throwaway seed, unrelated to [`OVERLAP_BASE_SEED`].
+    const OVERLAP_OTHER_SEED: [u8; 32] = [9; 32];
+
+    /// The encoded UFVK of ZIP 32 account 0 of `seed` on `network`. It carries a P2PKH, a Sapling
+    /// and an Orchard item.
+    fn seed_ufvk(network: &impl Parameters, seed: &[u8; 32]) -> String {
+        UnifiedSpendingKey::from_seed(network, seed, zip32::AccountId::ZERO)
+            .expect("a spending key derives")
+            .to_unified_full_viewing_key()
+            .encode(network)
+            .expect("the UFVK encodes")
+    }
+
+    /// The testnet key the overlap tests import first.
+    fn overlap_base_ufvk() -> String {
+        seed_ufvk(&TestNetwork, &OVERLAP_BASE_SEED)
+    }
+
+    /// A testnet key that shares no item with [`overlap_base_ufvk`].
+    fn overlap_other_ufvk() -> String {
+        seed_ufvk(&TestNetwork, &OVERLAP_OTHER_SEED)
+    }
+
+    fn is_orchard(item: &unified::Uitem<unified::Fvk>) -> bool {
+        matches!(item, unified::Uitem::Data(unified::Fvk::Orchard(_)))
+    }
+
+    fn is_sapling(item: &unified::Uitem<unified::Fvk>) -> bool {
+        matches!(item, unified::Uitem::Data(unified::Fvk::Sapling(_)))
+    }
+
+    fn is_p2pkh(item: &unified::Uitem<unified::Fvk>) -> bool {
+        matches!(item, unified::Uitem::Data(unified::Fvk::P2pkh(_)))
+    }
+
+    /// The items of the UFVK `encoding` that `keep` accepts.
+    fn ufvk_items(
+        encoding: &str,
+        keep: impl Fn(&unified::Uitem<unified::Fvk>) -> bool,
+    ) -> Vec<unified::Uitem<unified::Fvk>> {
+        let (_, _, ufvk) = unified::Ufvk::decode(encoding).expect("the UFVK decodes");
+        ufvk.items_as_parsed()
+            .iter()
+            .filter(|item| keep(item))
+            .cloned()
+            .collect()
+    }
+
+    /// Re-encodes the UFVK `encoding` with only the items `keep` accepts, followed by `extra`.
+    fn rebuild_ufvk(
+        encoding: &str,
+        keep: impl Fn(&unified::Uitem<unified::Fvk>) -> bool,
+        extra: Vec<unified::Uitem<unified::Fvk>>,
+    ) -> String {
+        let (network, revision, _) = unified::Ufvk::decode(encoding).expect("the UFVK decodes");
+        let items = ufvk_items(encoding, keep)
+            .into_iter()
+            .chain(extra)
+            .collect();
+        unified::Ufvk::try_from_items(revision, items)
+            .expect("the items form a UFVK")
+            .encode(&network)
+    }
+
+    /// The base key's `shared` item alone, with its other items taken from the unrelated key.
+    fn sharing_only(shared: fn(&unified::Uitem<unified::Fvk>) -> bool) -> String {
+        rebuild_ufvk(
+            &overlap_base_ufvk(),
+            shared,
+            ufvk_items(&overlap_other_ufvk(), |item| !shared(item)),
+        )
+    }
+
+    /// The birthday the overlap tests import with: the block before NU5 activation on testnet,
+    /// with empty note commitment trees.
+    fn overlap_birthday() -> AccountBirthday {
+        let nu5 = TestNetwork
+            .activation_height(NetworkUpgrade::Nu5)
+            .expect("NU5 is active on testnet");
+        AccountBirthday::from_parts(
+            zcash_client_backend::data_api::chain::ChainState::empty(nu5 - 1, BlockHash([0; 32])),
+            None,
+        )
+    }
+
+    /// An initialized, empty testnet wallet database in a fresh temporary directory, with the
+    /// read-write handle the tests import through.
+    struct OverlapWallet {
+        db: WalletDb<rusqlite::Connection, NetworkParams, SystemClock, SystemRng>,
+        path: std::path::PathBuf,
+        // Declared last, so the handle closes before the directory is removed.
+        dir: tempfile::TempDir,
+    }
+
+    impl OverlapWallet {
+        fn new() -> Self {
+            use zcash_client_sqlite::wallet::init::init_wallet_db;
+
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("wallet.sqlite");
+            let mut db = WalletDb::for_path(
+                &path,
+                NetworkParams::Standard(TestNetwork),
+                SystemClock,
+                system_rng(),
+            )
+            .expect("opens a fresh wallet db");
+            init_wallet_db(&mut db, None).expect("initializes the wallet schema");
+            OverlapWallet { db, path, dir }
+        }
+
+        /// Imports the UFVK `encoding` as a view-only account.
+        fn import(
+            &mut self,
+            encoding: &str,
+        ) -> Result<zcash_client_sqlite::wallet::Account, SqliteClientError> {
+            let ufvk = UnifiedFullViewingKey::decode(&TestNetwork, encoding)
+                .expect("the test UFVK decodes");
+            self.db.import_account_ufvk(
+                "overlap",
+                &ufvk,
+                &overlap_birthday(),
+                AccountPurpose::ViewOnly,
+                None,
+            )
+        }
+
+        /// Asks [`zcashlc_find_account_key_overlap`] what importing `encoding` would do.
+        fn find_overlap(&self, encoding: &str) -> Result<ReportedOverlap, String> {
+            find_overlap(&self.path, encoding, NETWORK_ID_TESTNET)
+        }
+    }
+
+    /// What a [`zcashlc_find_account_key_overlap`] call returned, copied out of the struct it
+    /// allocated.
+    #[derive(Debug)]
+    struct ReportedOverlap {
+        kind: ffi::AccountKeyOverlapKind,
+        /// All zero when the reported account is [`ffi::Account::NOT_FOUND`].
+        account_uuid: [u8; 16],
+    }
+
+    /// Calls [`zcashlc_find_account_key_overlap`] on the wallet database at `db_path`, then frees
+    /// what it returned. A null return is the `Err` of the last error message. The last error is
+    /// cleared first, so that message was set by this call.
+    fn find_overlap(
+        db_path: &Path,
+        ufvk: impl Into<Vec<u8>>,
+        network_id: u32,
+    ) -> Result<ReportedOverlap, String> {
+        let db_data = db_path.as_os_str().as_bytes();
+        let ufvk = CString::new(ufvk).expect("the input has no interior NUL");
+        zcashlc_clear_last_error();
+        let ptr = unsafe {
+            zcashlc_find_account_key_overlap(
+                db_data.as_ptr(),
+                db_data.len(),
+                ufvk.as_ptr(),
+                network_id,
+            )
+        };
+        if ptr.is_null() {
+            return Err(last_error_message());
+        }
+        let reported = unsafe {
+            ReportedOverlap {
+                kind: (*ptr).kind,
+                account_uuid: (*ptr).account.uuid_bytes(),
+            }
+        };
+        unsafe { ffi::zcashlc_free_account_key_overlap(ptr) };
+        Ok(reported)
+    }
+
+    /// The last error message set on this thread, read through the C entry points.
+    fn last_error_message() -> String {
+        let len = zcashlc_last_error_length();
+        assert!(len > 0, "a last error must be set");
+        let mut buf = vec![0u8; len as usize];
+        let written = unsafe { zcashlc_error_message_utf8(buf.as_mut_ptr().cast::<c_char>(), len) };
+        // A failed copy leaves the buffer zeroed, which would read as an empty message that
+        // trivially contains no part of the key.
+        assert_eq!(written, len, "the whole message must be copied");
+        CStr::from_bytes_until_nul(&buf)
+            .expect("the message is NUL-terminated")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// Imports `existing` into a fresh wallet, asks the FFI what importing `candidate` would do,
+    /// then imports `candidate` and asserts that the import does what the FFI said. The
+    /// classification is checked against `zcash_client_sqlite` itself, not only against the
+    /// predicates it mirrors. Returns the reported kind.
+    fn overlap_of(existing: &str, candidate: &str) -> ffi::AccountKeyOverlapKind {
+        let mut wallet = OverlapWallet::new();
+        let existing_id = wallet
+            .import(existing)
+            .expect("imports the existing key")
+            .id();
+        let existing_uuid = existing_id.expose_uuid().into_bytes();
+
+        let reported = wallet.find_overlap(candidate).expect("the lookup succeeds");
+        let imported = wallet.import(candidate);
+        match reported.kind {
+            ffi::AccountKeyOverlapKind::None => {
+                assert_eq!(reported.account_uuid, [0; 16], "no account is reported");
+                let account = imported.expect("a key sharing no component imports as an account");
+                assert_ne!(account.id(), existing_id, "the import must add an account");
+            }
+            ffi::AccountKeyOverlapKind::WouldUpgrade => {
+                assert_eq!(reported.account_uuid, existing_uuid, "reports the account");
+                let account = imported.expect("an upgrading key imports");
+                assert_eq!(
+                    account.id(),
+                    existing_id,
+                    "the upgrade must reuse the account"
+                );
+                let candidate_ufvk = UnifiedFullViewingKey::decode(&TestNetwork, candidate)
+                    .expect("the candidate decodes");
+                assert_eq!(
+                    account
+                        .ufvk()
+                        .expect("the account has a UFVK")
+                        .encode(&TestNetwork)
+                        .expect("the upgraded UFVK encodes"),
+                    candidate_ufvk
+                        .encode(&TestNetwork)
+                        .expect("the candidate encodes"),
+                    "the upgrade must replace the account's viewing key with the candidate"
+                );
+                assert_eq!(wallet.db.get_account_ids().expect("lists").len(), 1);
+            }
+            ffi::AccountKeyOverlapKind::AlreadyImported
+            | ffi::AccountKeyOverlapKind::Conflicting => {
+                assert_eq!(reported.account_uuid, existing_uuid, "reports the account");
+                assert!(
+                    matches!(
+                        imported,
+                        Err(SqliteClientError::AccountCollision(id)) if id == existing_id
+                    ),
+                    "expected an account collision on the existing account for {:?}",
+                    reported.kind
+                );
+            }
+            ffi::AccountKeyOverlapKind::MultipleAccounts => {
+                panic!("a wallet with a single account cannot match several")
+            }
+        }
+        reported.kind
+    }
+
+    /// The kind values are part of the C contract of [`zcashlc_find_account_key_overlap`].
+    #[test]
+    fn overlap_kind_values_match_the_ffi_contract() {
+        assert_eq!(ffi::AccountKeyOverlapKind::None as u32, 0);
+        assert_eq!(ffi::AccountKeyOverlapKind::AlreadyImported as u32, 1);
+        assert_eq!(ffi::AccountKeyOverlapKind::WouldUpgrade as u32, 2);
+        assert_eq!(ffi::AccountKeyOverlapKind::Conflicting as u32, 3);
+        assert_eq!(ffi::AccountKeyOverlapKind::MultipleAccounts as u32, 4);
+    }
+
+    #[test]
+    fn overlap_none_for_an_unrelated_key() {
+        assert_eq!(
+            overlap_of(&overlap_base_ufvk(), &overlap_other_ufvk()),
+            ffi::AccountKeyOverlapKind::None
+        );
+    }
+
+    #[test]
+    fn overlap_already_imported_for_the_identical_key() {
+        let base = overlap_base_ufvk();
+        assert_eq!(
+            overlap_of(&base, &base),
+            ffi::AccountKeyOverlapKind::AlreadyImported
+        );
+    }
+
+    /// An Orchard-only key whose Orchard item belongs to an existing full key adds nothing to it.
+    #[test]
+    fn overlap_already_imported_for_a_subset_key() {
+        let base = overlap_base_ufvk();
+        let orchard_only = rebuild_ufvk(&base, is_orchard, vec![]);
+        assert_eq!(
+            overlap_of(&base, &orchard_only),
+            ffi::AccountKeyOverlapKind::AlreadyImported
+        );
+    }
+
+    /// The full key of an Orchard-only account carries the account's Orchard item and more, so
+    /// importing it widens that account instead of adding one.
+    #[test]
+    fn overlap_would_upgrade_for_a_superset_key() {
+        let base = overlap_base_ufvk();
+        let orchard_only = rebuild_ufvk(&base, is_orchard, vec![]);
+        assert_eq!(
+            overlap_of(&orchard_only, &base),
+            ffi::AccountKeyOverlapKind::WouldUpgrade
+        );
+    }
+
+    /// A Sapling item's incoming viewing key is its diversifier key and `ivk`, so a key whose
+    /// Sapling item differs only in its outgoing viewing key matches the same account. The
+    /// account's viewing key does not cover the changed outgoing viewing key, so the import
+    /// replaces it.
+    #[test]
+    fn overlap_would_upgrade_for_a_key_differing_only_in_the_sapling_ovk() {
+        let base = overlap_base_ufvk();
+        let changed_sapling = ufvk_items(&base, is_sapling)
+            .into_iter()
+            .map(|item| match item {
+                unified::Uitem::Data(unified::Fvk::Sapling(mut bytes)) => {
+                    // The item is `ak || nk || ovk || dk`, 32 bytes each.
+                    for byte in &mut bytes[64..96] {
+                        *byte ^= 0xff;
+                    }
+                    unified::Uitem::Data(unified::Fvk::Sapling(bytes))
+                }
+                other => other,
+            })
+            .collect();
+        let candidate = rebuild_ufvk(&base, |item| !is_sapling(item), changed_sapling);
+        assert_ne!(candidate, base);
+        assert_eq!(
+            overlap_of(&base, &candidate),
+            ffi::AccountKeyOverlapKind::WouldUpgrade
+        );
+    }
+
+    /// A key that shares only its P2PKH item with an account, its shielded items coming from an
+    /// unrelated key, conflicts with that account.
+    #[test]
+    fn overlap_conflicting_for_a_partial_share() {
+        assert_eq!(
+            overlap_of(&overlap_base_ufvk(), &sharing_only(is_p2pkh)),
+            ffi::AccountKeyOverlapKind::Conflicting
+        );
+    }
+
+    /// The same holds for a key that shares only its Orchard item, or only its Sapling item.
+    #[test]
+    fn overlap_conflicting_for_a_shielded_item_shared_alone() {
+        for shared in [is_orchard, is_sapling] {
+            assert_eq!(
+                overlap_of(&overlap_base_ufvk(), &sharing_only(shared)),
+                ffi::AccountKeyOverlapKind::Conflicting
+            );
+        }
+    }
+
+    /// A key whose Orchard item belongs to one account and whose Sapling item belongs to another
+    /// matches both. The FFI reports kind 4 with no account, and the import fails on the same
+    /// lookup.
+    #[test]
+    fn overlap_multiple_accounts_reports_kind_4() {
+        let base = overlap_base_ufvk();
+        let other = overlap_other_ufvk();
+        let mut wallet = OverlapWallet::new();
+        wallet.import(&base).expect("imports the first key");
+        wallet.import(&other).expect("imports the second key");
+        let candidate = rebuild_ufvk(&base, is_orchard, ufvk_items(&other, is_sapling));
+
+        let reported = wallet
+            .find_overlap(&candidate)
+            .expect("the lookup succeeds");
+        assert_eq!(reported.kind, ffi::AccountKeyOverlapKind::MultipleAccounts);
+        assert_eq!(reported.kind as u32, 4);
+        assert_eq!(reported.account_uuid, [0; 16], "no account is reported");
+
+        // This also pins the librustzcash message that `MULTIPLE_ACCOUNTS_MATCHED_UIVK` matches.
+        let error = wallet.import(&candidate).expect_err("the import fails");
+        assert!(
+            matches!(
+                &error,
+                SqliteClientError::CorruptedData(msg) if msg == MULTIPLE_ACCOUNTS_MATCHED_UIVK
+            ),
+            "{error}"
+        );
+        assert_eq!(wallet.db.get_account_ids().expect("lists").len(), 2);
+    }
+
+    /// A key encoded for the other network is refused as one. The key of the same seed on the
+    /// other network shares no item with the account either.
+    #[test]
+    fn overlap_ignores_keys_of_the_other_network() {
+        let mut wallet = OverlapWallet::new();
+        wallet
+            .import(&overlap_base_ufvk())
+            .expect("imports the existing key");
+
+        let mainnet_encoding = seed_ufvk(&MainNetwork, &OVERLAP_BASE_SEED);
+        let message = wallet
+            .find_overlap(&mainnet_encoding)
+            .expect_err("a mainnet key is refused on testnet");
+        assert!(message.contains("another network"), "{message}");
+
+        let (_, mainnet_ufvk) = derivation::decode_ufvk(&MainNetwork, &mainnet_encoding)
+            .expect("the key decodes on mainnet");
+        let (kind, account) =
+            find_account_key_overlap(&wallet.db, &mainnet_ufvk).expect("the lookup succeeds");
+        assert_eq!(kind, ffi::AccountKeyOverlapKind::None);
+        assert!(account.is_none());
+    }
+
+    /// Whitespace around the key is ignored, as `zcashlc_describe_unified_full_viewing_key`
+    /// ignores it.
+    #[test]
+    fn overlap_ignores_whitespace_around_the_key() {
+        let mut wallet = OverlapWallet::new();
+        let base = overlap_base_ufvk();
+        wallet.import(&base).expect("imports the existing key");
+
+        let reported = wallet
+            .find_overlap(&format!(" \n{base}\t "))
+            .expect("the lookup succeeds");
+        assert_eq!(reported.kind, ffi::AccountKeyOverlapKind::AlreadyImported);
+    }
+
+    /// Only the lookup failure for several matching accounts is a kind. Every other failure is an
+    /// error that names it: a missing wallet database, which is opened read-only and so is not
+    /// created; a wallet without the accounts table; and an account whose stored key does not
+    /// decode for the network asked for.
+    #[test]
+    fn overlap_reports_every_other_failure_as_an_error() {
+        let mut wallet = OverlapWallet::new();
+        let base = overlap_base_ufvk();
+        wallet.import(&base).expect("imports the existing key");
+
+        let missing = wallet.dir.path().join("missing.sqlite");
+        let message = find_overlap(&missing, base.as_str(), NETWORK_ID_TESTNET)
+            .expect_err("a missing wallet database fails the lookup");
+        assert!(message.contains("read-only"), "{message}");
+        assert!(!missing.exists(), "the lookup must not create the database");
+
+        let uninitialized = wallet.dir.path().join("uninitialized.sqlite");
+        std::fs::File::create(&uninitialized).expect("creates an empty database file");
+        let message = find_overlap(&uninitialized, base.as_str(), NETWORK_ID_TESTNET)
+            .expect_err("a wallet without the accounts table fails the lookup");
+        assert!(message.contains("no such table"), "{message}");
+
+        // The same items encoded for mainnet match the testnet account, whose stored key then
+        // does not decode for mainnet.
+        let (_, _, container) = unified::Ufvk::decode(&base).expect("the base key decodes");
+        let base_on_mainnet = container.encode(&NetworkType::Main);
+        let message = find_overlap(&wallet.path, base_on_mainnet, NETWORK_ID_MAINNET)
+            .expect_err("an account whose stored key does not decode fails the lookup");
+        assert!(message.contains("Could not decode"), "{message}");
+    }
+
+    /// Asserts that `message` contains no 16-character slice of `input`, compared
+    /// case-insensitively.
+    fn assert_no_echo(message: &str, input: &[u8], case: &str) {
+        let message = message.to_lowercase();
+        let input: Vec<char> = String::from_utf8_lossy(input)
+            .to_lowercase()
+            .chars()
+            .collect();
+        assert!(input.len() >= 16, "{case}: the input is too short to check");
+        for (offset, window) in input.windows(16).enumerate() {
+            let slice: String = window.iter().collect();
+            assert!(
+                !message.contains(&slice),
+                "the error for {case} echoes the input at offset {offset}"
+            );
+        }
+    }
+
+    /// Every failure that receives the key leaves a last error that never contains any part of
+    /// it.
+    #[test]
+    fn overlap_errors_never_contain_the_input() {
+        let mut wallet = OverlapWallet::new();
+        let base = overlap_base_ufvk();
+        wallet.import(&base).expect("imports the existing key");
+
+        let mut bad_checksum = base.clone();
+        let last = bad_checksum.pop().expect("the key is not empty");
+        bad_checksum.push(if last == 'q' { 'p' } else { 'q' });
+        let uivk = UnifiedFullViewingKey::decode(&TestNetwork, &base)
+            .expect("the base key decodes")
+            .to_unified_incoming_viewing_key()
+            .encode(&TestNetwork)
+            .expect("the UIVK encodes");
+        let (_, _, container) = unified::Ufvk::decode(&base).expect("the base key decodes");
+        let base_on_mainnet = container.encode(&NetworkType::Main);
+        let missing = wallet.dir.path().join("missing.sqlite");
+        let uninitialized = wallet.dir.path().join("uninitialized.sqlite");
+        std::fs::File::create(&uninitialized).expect("creates an empty database file");
+
+        let cases: Vec<(&Path, Vec<u8>, u32, &str)> = vec![
+            (
+                wallet.path.as_path(),
+                format!("uviewtest1{}", "thisisnotbech32payloadbio".repeat(4)).into_bytes(),
+                NETWORK_ID_TESTNET,
+                "garbage",
+            ),
+            (
+                wallet.path.as_path(),
+                bad_checksum.into_bytes(),
+                NETWORK_ID_TESTNET,
+                "a bad checksum",
+            ),
+            (
+                wallet.path.as_path(),
+                uivk.into_bytes(),
+                NETWORK_ID_TESTNET,
+                "an incoming viewing key",
+            ),
+            (
+                wallet.path.as_path(),
+                seed_ufvk(&MainNetwork, &OVERLAP_BASE_SEED).into_bytes(),
+                NETWORK_ID_TESTNET,
+                "a key for the other network",
+            ),
+            (
+                wallet.path.as_path(),
+                [base.as_bytes(), &[0xff]].concat(),
+                NETWORK_ID_TESTNET,
+                "input that is not UTF-8",
+            ),
+            (
+                wallet.path.as_path(),
+                base.clone().into_bytes(),
+                99,
+                "an invalid network id",
+            ),
+            (
+                missing.as_path(),
+                base.clone().into_bytes(),
+                NETWORK_ID_TESTNET,
+                "a missing database",
+            ),
+            (
+                uninitialized.as_path(),
+                base.clone().into_bytes(),
+                NETWORK_ID_TESTNET,
+                "a database without the accounts table",
+            ),
+            (
+                wallet.path.as_path(),
+                base_on_mainnet.into_bytes(),
+                NETWORK_ID_MAINNET,
+                "a stored key that does not decode",
+            ),
+        ];
+        for (db_path, input, network_id, case) in cases {
+            let message = find_overlap(db_path, input.clone(), network_id).expect_err(case);
+            assert_no_echo(&message, &input, case);
+        }
+
+        // A null key is refused too, with a last error.
+        let db_data = wallet.path.as_os_str().as_bytes();
+        zcashlc_clear_last_error();
+        let ptr = unsafe {
+            zcashlc_find_account_key_overlap(
+                db_data.as_ptr(),
+                db_data.len(),
+                std::ptr::null(),
+                NETWORK_ID_TESTNET,
+            )
+        };
+        assert!(ptr.is_null());
+        assert!(zcashlc_last_error_length() > 0, "a last error must be set");
+    }
+
+    #[test]
+    fn free_account_key_overlap_accepts_null() {
+        unsafe { ffi::zcashlc_free_account_key_overlap(std::ptr::null_mut()) };
     }
 }
 

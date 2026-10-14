@@ -319,19 +319,36 @@ bitflags::bitflags! {
     }
 }
 
+/// Decodes `encoding` as a unified full viewing key for `network`, ignoring surrounding
+/// whitespace, so that every caller accepts exactly the same keys. The error names the step that
+/// failed and never contains any part of the input.
+///
+/// The steps are those of `UnifiedFullViewingKey::decode`, taken one by one so that the
+/// container is returned too: it also yields the unknown items, which `UnifiedFullViewingKey`
+/// does not expose.
+pub(crate) fn decode_ufvk(
+    network: &impl Parameters,
+    encoding: &str,
+) -> anyhow::Result<(unified::Ufvk, UnifiedFullViewingKey)> {
+    let (found, _revision, container) = unified::Ufvk::decode(encoding.trim())
+        .map_err(|_| anyhow!("the value is not a unified full viewing key"))?;
+    if found != network.network_type() {
+        return Err(anyhow!(
+            "the unified full viewing key is for another network"
+        ));
+    }
+    let ufvk = UnifiedFullViewingKey::parse(&container)
+        .map_err(|_| anyhow!("the unified full viewing key holds an invalid item"))?;
+    Ok((container, ufvk))
+}
+
 /// The components of `encoding` when it is a unified full viewing key for `network`, `None`
 /// otherwise. Surrounding whitespace is ignored. Never echoes the input.
 pub(crate) fn describe_ufvk(
     network: &impl Parameters,
     encoding: &str,
 ) -> Option<UfvkComponentFlags> {
-    // The steps of `UnifiedFullViewingKey::decode`, taken one by one so that the container
-    // decoded here also yields the unknown items, which `UnifiedFullViewingKey` does not expose.
-    let (found, _revision, container) = unified::Ufvk::decode(encoding.trim()).ok()?;
-    if found != network.network_type() {
-        return None;
-    }
-    let ufvk = UnifiedFullViewingKey::parse(&container).ok()?;
+    let (container, ufvk) = decode_ufvk(network, encoding).ok()?;
 
     let mut flags = UfvkComponentFlags::empty();
     flags.set(UfvkComponentFlags::P2PKH, ufvk.p2pkh().is_some());
