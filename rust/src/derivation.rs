@@ -525,13 +525,10 @@ pub unsafe extern "C" fn zcashlc_derive_address_from_ufvk(
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
         let ufvk_str = unsafe { CStr::from_ptr(ufvk).to_str()? };
-        let ufvk = UnifiedFullViewingKey::decode(&network, ufvk_str).map_err(|e| {
-            anyhow!(
-                "Value \"{}\" did not decode as a valid UFVK: {}",
-                ufvk_str,
-                e
-            )
-        })?;
+        // The message is fixed on purpose: the value is a viewing key, and neither it nor the
+        // decoder's description of it may reach error text that ends up in app logs.
+        let ufvk = UnifiedFullViewingKey::decode(&network, ufvk_str)
+            .map_err(|_| anyhow!("The value did not decode as a valid UFVK"))?;
 
         let (ua, di) = if diversifier_index_bytes.is_null() {
             ufvk.default_address(UnifiedAddressRequest::AllAvailableKeys)
@@ -568,13 +565,10 @@ pub unsafe extern "C" fn zcashlc_derive_address_from_uivk(
     let res = catch_panic(|| {
         let network = parse_network(network_id)?;
         let uivk_str = unsafe { CStr::from_ptr(uivk).to_str()? };
-        let uivk = UnifiedIncomingViewingKey::decode(&network, uivk_str).map_err(|e| {
-            anyhow!(
-                "Value \"{}\" did not decode as a valid UIVK: {}",
-                uivk_str,
-                e
-            )
-        })?;
+        // The message is fixed on purpose: the value is a viewing key, and neither it nor the
+        // decoder's description of it may reach error text that ends up in app logs.
+        let uivk = UnifiedIncomingViewingKey::decode(&network, uivk_str)
+            .map_err(|_| anyhow!("The value did not decode as a valid UIVK"))?;
 
         let (ua, di) = if diversifier_index_bytes.is_null() {
             uivk.default_address(UnifiedAddressRequest::AllAvailableKeys)
@@ -1546,6 +1540,21 @@ mod tests {
             .into_owned()
     }
 
+    /// Asserts that `message` contains no 16-character slice of `input`, compared
+    /// case-insensitively.
+    fn assert_no_echo(message: &str, input: &str, case: &str) {
+        let message = message.to_lowercase();
+        let input: Vec<char> = input.to_lowercase().chars().collect();
+        assert!(input.len() >= 16, "{case}: the input is too short to check");
+        for (offset, window) in input.windows(16).enumerate() {
+            let slice: String = window.iter().collect();
+            assert!(
+                !message.contains(&slice),
+                "the error for {case} echoes the input at offset {offset}"
+            );
+        }
+    }
+
     /// The flag values are the C contract of [`zcashlc_describe_unified_full_viewing_key`].
     #[test]
     fn describe_flag_values_match_the_ffi_contract() {
@@ -1680,7 +1689,6 @@ mod tests {
     /// 16-character window of the key appears in it.
     #[test]
     fn describe_errors_never_contain_the_input() {
-        const WINDOW: usize = 16;
         let ufvk = describe_test_ufvk(&MAIN_NETWORK);
         let mut not_utf8 = ufvk.clone().into_bytes();
         not_utf8.push(0xff);
@@ -1694,13 +1702,7 @@ mod tests {
             ),
         ] {
             assert_eq!(describe(input, network_id), -2, "{case}");
-            let message = last_error_message().to_lowercase();
-            for start in 0..=ufvk.len() - WINDOW {
-                assert!(
-                    !message.contains(&ufvk[start..start + WINDOW]),
-                    "the error for {case} echoes the key at offset {start}"
-                );
-            }
+            assert_no_echo(&last_error_message(), &ufvk, case);
         }
     }
 
@@ -1717,5 +1719,69 @@ mod tests {
             crate::zcashlc_last_error_length() > 0,
             "a null pointer must set a last error"
         );
+    }
+
+    /// A value that does not decode as a UFVK leaves a last error that holds no part of it,
+    /// whether it is no key at all or a real key for the other network: the text reaches app
+    /// logs, and a viewing key is a secret. The error is one fixed sentence, so it cannot carry
+    /// what the decoder reports about the value either.
+    #[test]
+    fn derive_address_from_ufvk_error_omits_the_input() {
+        const EXPECTED: &str = "The value did not decode as a valid UFVK";
+        let testnet_ufvk = describe_test_ufvk(&TEST_NETWORK);
+        for (input, case) in [
+            (
+                format!("uview1notakey{}", "padding".repeat(8)),
+                "a string that is no key",
+            ),
+            (testnet_ufvk, "a key for the other network"),
+        ] {
+            let ufvk = CString::new(input.as_str()).expect("the input has no interior NUL");
+            crate::zcashlc_clear_last_error();
+            let address = unsafe {
+                zcashlc_derive_address_from_ufvk(
+                    crate::NETWORK_ID_MAINNET,
+                    ufvk.as_ptr(),
+                    std::ptr::null(),
+                )
+            };
+
+            assert!(address.is_null(), "{case} must not derive an address");
+            let message = last_error_message();
+            assert_no_echo(&message, &input, case);
+            assert_eq!(message, EXPECTED, "{case}");
+        }
+    }
+
+    /// The same for a UIVK.
+    #[test]
+    fn derive_address_from_uivk_error_omits_the_input() {
+        const EXPECTED: &str = "The value did not decode as a valid UIVK";
+        let testnet_uivk = describe_test_key(&TEST_NETWORK)
+            .to_unified_incoming_viewing_key()
+            .encode(&TEST_NETWORK)
+            .expect("the UIVK encodes");
+        for (input, case) in [
+            (
+                format!("uivk1notakey{}", "padding".repeat(8)),
+                "a string that is no key",
+            ),
+            (testnet_uivk, "a key for the other network"),
+        ] {
+            let uivk = CString::new(input.as_str()).expect("the input has no interior NUL");
+            crate::zcashlc_clear_last_error();
+            let address = unsafe {
+                zcashlc_derive_address_from_uivk(
+                    crate::NETWORK_ID_MAINNET,
+                    uivk.as_ptr(),
+                    std::ptr::null(),
+                )
+            };
+
+            assert!(address.is_null(), "{case} must not derive an address");
+            let message = last_error_message();
+            assert_no_echo(&message, &input, case);
+            assert_eq!(message, EXPECTED, "{case}");
+        }
     }
 }

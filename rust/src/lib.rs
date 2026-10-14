@@ -782,13 +782,10 @@ pub unsafe extern "C" fn zcashlc_import_account_ufvk(
         let network = parse_network(network_id)?;
         let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
         let ufvk_str = unsafe { CStr::from_ptr(ufvk).to_str()? };
-        let ufvk = UnifiedFullViewingKey::decode(&network, ufvk_str).map_err(|e| {
-            anyhow!(
-                "Value \"{}\" did not decode as a valid UFVK: {}",
-                ufvk_str,
-                e
-            )
-        })?;
+        // The message is fixed on purpose: the value is a viewing key, and neither it nor the
+        // decoder's description of it may reach error text that ends up in app logs.
+        let ufvk = UnifiedFullViewingKey::decode(&network, ufvk_str)
+            .map_err(|_| anyhow!("The value did not decode as a valid UFVK"))?;
         let treestate =
             TreeState::decode(unsafe { slice::from_raw_parts(treestate, treestate_len) })
                 .map_err(|e| anyhow!("Invalid TreeState: {}", e))?;
@@ -6320,6 +6317,107 @@ mod tests {
     fn free_account_key_overlap_accepts_null() {
         unsafe { ffi::zcashlc_free_account_key_overlap(std::ptr::null_mut()) };
     }
+
+    // ── Decode errors never contain the key ──────────────────────────────────────────────────
+
+    /// The whole error of a UFVK that does not decode.
+    const UFVK_DECODE_ERROR: &str = "The value did not decode as a valid UFVK";
+
+    /// What the decode error tests give an entry point that takes a testnet UFVK: a string that
+    /// is no key at all, and a real key for the other network, which is what a user who pastes
+    /// the wrong wallet's key would send.
+    fn undecodable_testnet_ufvks() -> [(String, &'static str); 2] {
+        [
+            (
+                format!("uviewtest1{}", "notakeypadding".repeat(5)),
+                "a string that is no key",
+            ),
+            (
+                seed_ufvk(&MainNetwork, &OVERLAP_BASE_SEED),
+                "a key for the other network",
+            ),
+        ]
+    }
+
+    /// An import refused because its key does not decode leaves a last error that holds no part
+    /// of the key. The error is one fixed sentence, so it cannot carry what the decoder reports
+    /// about the key either.
+    #[test]
+    fn import_account_ufvk_error_omits_the_input() {
+        let (_dir, db_path) = crate::voting::test_support::temp_wallet_db(NETWORK_ID_TESTNET);
+        let treestate = crate::voting::test_support::synthetic_tree_state(1_000_000);
+        let account_name = CString::new("account").expect("the name has no interior NUL");
+
+        for (input, case) in undecodable_testnet_ufvks() {
+            let ufvk = CString::new(input.as_str()).expect("the input has no interior NUL");
+            zcashlc_clear_last_error();
+            let account = unsafe {
+                zcashlc_import_account_ufvk(
+                    db_path.as_ptr(),
+                    db_path.len(),
+                    ufvk.as_ptr(),
+                    treestate.as_ptr(),
+                    treestate.len(),
+                    -1, // no recover-until height
+                    NETWORK_ID_TESTNET,
+                    1, // view-only
+                    account_name.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    u32::MAX, // no ZIP 32 account index
+                )
+            };
+
+            assert!(account.is_null(), "{case} must not import an account");
+            let message = last_error_message();
+            assert_no_echo(&message, input.as_bytes(), case);
+            assert_eq!(message, UFVK_DECODE_ERROR, "{case}");
+        }
+    }
+
+    /// A sync started with a key that does not decode leaves a last error that holds no part of
+    /// the key, and no part of what the decoder reports about it.
+    #[test]
+    fn slipstream_start_ufvk_error_omits_the_input() {
+        let (_dir, db_path) = crate::voting::test_support::temp_wallet_db(NETWORK_ID_TESTNET);
+        // A handle dials nothing until a pass is spawned, and a start that cannot decode its key
+        // never spawns one. Port 9 is the discard port, so a stray connection would fail fast.
+        let host = "127.0.0.1";
+        let handle = unsafe {
+            zcashlc_slipstream_open(
+                db_path.as_ptr(),
+                db_path.len(),
+                host.as_ptr(),
+                host.len(),
+                9,
+                false,
+                NETWORK_ID_TESTNET,
+                0, // unknown physical memory
+            )
+        };
+        assert!(!handle.is_null(), "the handle must open");
+
+        for (input, case) in undecodable_testnet_ufvks() {
+            zcashlc_clear_last_error();
+            let started = unsafe {
+                zcashlc_slipstream_start(
+                    handle,
+                    input.as_ptr(),
+                    input.len(),
+                    1_000_000,
+                    std::ptr::null(),
+                    0,
+                )
+            };
+
+            assert!(!started, "{case} must not start a sync");
+            let message = last_error_message();
+            assert_no_echo(&message, input.as_bytes(), case);
+            assert_eq!(message, UFVK_DECODE_ERROR, "{case}");
+        }
+
+        unsafe { zcashlc_slipstream_free(handle) };
+    }
 }
 
 // ── Slipstream FFI surface ────────────────────────────────────────────────────
@@ -6973,13 +7071,10 @@ pub unsafe extern "C" fn zcashlc_slipstream_start(
         // ufvk was null) — no multi-account surface added upward.
         let accounts: Vec<(UnifiedFullViewingKey, BlockHeight)> = match ufvk_str {
             Some(ufvk_str) => {
-                let ufvk = UnifiedFullViewingKey::decode(&h.network, &ufvk_str).map_err(|e| {
-                    anyhow!(
-                        "Value \"{}\" did not decode as a valid UFVK: {}",
-                        ufvk_str,
-                        e
-                    )
-                })?;
+                // The message is fixed on purpose: the value is a viewing key, and neither it nor
+                // the decoder's description of it may reach error text that ends up in app logs.
+                let ufvk = UnifiedFullViewingKey::decode(&h.network, &ufvk_str)
+                    .map_err(|_| anyhow!("The value did not decode as a valid UFVK"))?;
                 let birthday = BlockHeight::try_from(birthday_height)
                     .map_err(|e| anyhow!("invalid birthday_height {}: {}", birthday_height, e))?;
                 vec![(ufvk, birthday)]

@@ -865,6 +865,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `zcashlc_migration_*` read-write entry points no longer create the wallet database, or any table
   in it, when asked about a wallet that does not exist or was never initialized; they return an
   error instead (a stray table used to make an empty file look like a wallet).
+- Decode errors from `zcashlc_import_account_ufvk`, `zcashlc_derive_address_from_ufvk`,
+  `zcashlc_derive_address_from_uivk` and `zcashlc_slipstream_start` no longer contain the key.
 
 ## 2.8.0-rc.2 - 2026-07-28
 
