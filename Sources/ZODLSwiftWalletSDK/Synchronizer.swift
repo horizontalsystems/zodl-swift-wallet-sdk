@@ -699,8 +699,9 @@ public protocol Synchronizer: AnyObject {
         network: NetworkType
     ) async -> LightWalletEndpoint?
 
-    /// Takes a given date and finds out the closes checkpoint's height for it.
-    /// Each checkpoint has a timestamp stored so it can be used for the calculations.
+    /// The height of the newest bundled checkpoint whose time is strictly before `date`, a safe birthday for a
+    /// wallet created then; the newest checkpoint for a date at or after its time, and Sapling activation when
+    /// no checkpoint precedes `date`.
     func estimateBirthdayHeight(for date: Date) -> BlockHeight
 
     /// Takes a given height and finds out the closes checkpoint's timestamp for it.

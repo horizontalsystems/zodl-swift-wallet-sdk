@@ -46,6 +46,13 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A `SlipstreamSynchronizer` stopped and restarted within 120 seconds kept spendable balances unmasked
   (`SynchronizerState.isSpendableMasked`) even where NU7's 25-second blocks let almost five blocks arrive.
   The window is now 1.6 target blocks at the last known tip: 120 s before NU7, 40 s from NU7.
+- `estimateBirthdayHeight(for:)` returns the height of the newest bundled checkpoint whose time is strictly
+  before the date. For a date at or after the newest checkpoint's time it returns that checkpoint, and when no
+  checkpoint is before the date it returns Sapling activation, the floor. The answer does not depend on how
+  fast blocks were mined, so NU7's 25-second blocks do not affect it. It used to return an older checkpoint,
+  or Sapling activation, for some dates: those just after a checkpoint's time, those equal to one, and early
+  dates near the start of either chain. Restores from such a date scanned more blocks than needed. No caller
+  changes are required.
 
 # 6.0.0 - 2026-10-15
 

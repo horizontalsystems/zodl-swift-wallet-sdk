@@ -31,92 +31,48 @@ struct BundleCheckpointSource: CheckpointSource {
         ) ?? saplingActivation
     }
 
-    // swiftlint:disable:next cyclomatic_complexity
+    /// The height of the newest bundled checkpoint strictly before `date`, the newest checkpoint for a date at
+    /// or after its time, or Sapling activation when none precedes `date`. Checkpoint times decide; the target
+    /// spacing only picks where the walk starts.
     func estimateBirthdayHeight(for date: Date) -> BlockHeight {
-        // the average time between 2500 blocks during last 10 checkpoints (estimated March 31, 2025) is 52.33 hours for mainnet
-        // the average time between 10,000 blocks during last 10 checkpoints (estimated March 31, 2025) is 134.93 hours for testnet
-        let avgIntervalTime: TimeInterval = network == .mainnet ? 52.33 : 134.93
-        let blockInterval: Double = network == .mainnet ? 2500 : 10_000
-        let saplingActivationHeight = network == .mainnet
-        ? ZcashMainnet().constants.saplingActivationHeight
-        : ZcashTestnet().constants.saplingActivationHeight
+        let directory = BundleCheckpointURLProvider.default.url(network)
+        let heights = Checkpoint.bundledHeights(checkpointDirectory: directory)
+        let dateTime = date.timeIntervalSince1970
+        let latestCheckpoint = Checkpoint.birthday(with: .max, among: heights, checkpointDirectory: directory) ?? saplingActivation
 
-        let latestCheckpoint = latestKnownCheckpoint()
-        let latestCheckpointTime = TimeInterval(latestCheckpoint.time)
-
-        // above latest checkpoint, return it
-        guard date.timeIntervalSince1970 < latestCheckpointTime else {
+        guard dateTime < TimeInterval(latestCheckpoint.time) else {
             return latestCheckpoint.height
         }
 
-        // Phase 1, estimate possible height
-        let nowTimeIntervalSince1970 = Date().timeIntervalSince1970
-        let timeDiff = (nowTimeIntervalSince1970 - date.timeIntervalSince1970) - (nowTimeIntervalSince1970 - latestCheckpointTime)
-        let blockDiff = ((timeDiff / 3600) / avgIntervalTime) * blockInterval
-
-        var heightToLookAround = Double(Int(latestCheckpoint.height - Int(blockDiff)) / Int(blockInterval)) * blockInterval
-
-        // bellow sapling activation height
-        guard Int(heightToLookAround) > saplingActivationHeight else {
-            return saplingActivationHeight
+        // The guess assumes every block since the date took exactly its target spacing; real blocks drift, so
+        // it only picks where to start reading checkpoint times.
+        let guess = TargetBlockSpacing(networkType: network).height(
+            reachedAfter: dateTime - TimeInterval(latestCheckpoint.time),
+            from: latestCheckpoint.height
+        )
+        // The walk steps through indexes of `heights`, never through the heights the files decode to, so it ends
+        // however the files are named or what they hold.
+        var index = heights.lastIndex { $0 <= guess } ?? 0
+        guard var candidate = Checkpoint.bundledCheckpoint(at: index, among: heights, checkpointDirectory: directory) else {
+            return saplingActivation.height
         }
 
-        // Phase 2, load checkpoint and evaluate against given date
-        guard let loadedCheckpoint = Checkpoint.birthday(
-            with: BlockHeight(heightToLookAround),
-            checkpointDirectory: BundleCheckpointURLProvider.default.url(self.network)
-        ) else {
-            return saplingActivationHeight
-        }
-
-        // loaded checkpoint is exactly the one
-        var hoursApart = (TimeInterval(loadedCheckpoint.time) - date.timeIntervalSince1970) / 3600
-        if hoursApart < 0 && abs(hoursApart) < avgIntervalTime {
-            return loadedCheckpoint.height
-        }
-
-        if hoursApart < 0 {
-            // loaded checkpoint is lower, increase until reached the one
-            var closestHeight = loadedCheckpoint.height
-            while abs(hoursApart) > avgIntervalTime {
-                heightToLookAround += blockInterval
-
-                if let loadedCheckpoint = Checkpoint.birthday(
-                    with: BlockHeight(heightToLookAround),
-                    checkpointDirectory: BundleCheckpointURLProvider.default.url(self.network)
-                ) {
-                    hoursApart = (TimeInterval(loadedCheckpoint.time) - date.timeIntervalSince1970) / 3600
-                    if hoursApart < 0 && abs(hoursApart) < avgIntervalTime {
-                        return loadedCheckpoint.height
-                    } else if hoursApart >= 0 {
-                        return closestHeight
-                    }
-
-                    closestHeight = loadedCheckpoint.height
-                } else {
-                    return saplingActivationHeight
-                }
+        while TimeInterval(candidate.time) >= dateTime {
+            guard let earlier = Checkpoint.bundledCheckpoint(at: index - 1, among: heights, checkpointDirectory: directory) else {
+                return saplingActivation.height
             }
-        } else {
-            // loaded checkpoint is higher, descrease until reached the one
-            while hoursApart > 0 {
-                heightToLookAround -= blockInterval
-
-                if let loadedCheckpoint = Checkpoint.birthday(
-                    with: BlockHeight(heightToLookAround),
-                    checkpointDirectory: BundleCheckpointURLProvider.default.url(self.network)
-                ) {
-                    hoursApart = (TimeInterval(loadedCheckpoint.time) - date.timeIntervalSince1970) / 3600
-                    if hoursApart < 0 {
-                        return loadedCheckpoint.height
-                    }
-                } else {
-                    return saplingActivationHeight
-                }
-            }
+            index -= 1
+            candidate = earlier
         }
 
-        return saplingActivationHeight
+        while
+            let next = Checkpoint.bundledCheckpoint(at: index + 1, among: heights, checkpointDirectory: directory),
+            TimeInterval(next.time) < dateTime {
+            index += 1
+            candidate = next
+        }
+
+        return candidate.height
     }
 
     func estimateTimestamp(for height: BlockHeight) -> TimeInterval? {
