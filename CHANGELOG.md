@@ -97,6 +97,17 @@ Changes are relative to `5.2.1`.
   (`ZRUST0159`) and `accountKeyOverlapMultipleAccounts` (`ZRUST0160`), which only
   `Synchronizer.findAccountSharingKeyComponents(_:)` throws. An exhaustive `switch` over either
   stops compiling until they are handled; see `MIGRATING.md`.
+- `Synchronizer.listAccounts()`, and every other API that returns an `Account`, now sets `ufvk` and
+  `uivk` for an account imported without derivation data, such as a hardware-wallet or view-only
+  account; they were `nil`. Code that recognises such an account by `ufvk == nil` no longer finds
+  it: test `hdAccountIndex == nil` instead, which stays `nil` for it, as `seedFingerprint` does.
+  Whatever a wallet derives from `account.ufvk` changes for these accounts. Given `account.ufvk`,
+  `AccountMetadataKey.derivePrivateUseMetadataKey(ufvk:privateUseSubject:)` now derives different
+  keys for them, so metadata written under the keys that `ufvk: nil` gave becomes unreachable; to
+  keep it, go on passing `ufvk: nil` for an imported account that already has metadata. Such an
+  `Account` no longer equals, or hashes like, the value an earlier version returned, so match
+  accounts by `id`. Its `Codable` encoding now includes both keys, so an `Account` a wallet stores
+  or sends carries the account's viewing key. See `MIGRATING.md`.
 
 ## Removed
 

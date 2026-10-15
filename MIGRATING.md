@@ -1,5 +1,47 @@
 # Migrating from previous versions to _Unreleased_
 
+## Imported accounts return their viewing keys — `Account.ufvk` and `Account.uivk`
+
+`Synchronizer.listAccounts()`, and every other API that returns an `Account`, now returns the
+viewing keys of an account imported without derivation data, such as a hardware-wallet or a
+view-only account. Its `ufvk` and `uivk` used to be `nil`. Its `seedFingerprint` and
+`hdAccountIndex` are still `nil`, so recognise such an account by `hdAccountIndex == nil`; a test
+for `ufvk == nil` no longer matches it.
+
+Whatever a wallet derives from `account.ufvk` changes for these accounts. A wallet that passes
+`account.ufvk` to `AccountMetadataKey.derivePrivateUseMetadataKey(ufvk:privateUseSubject:)` derived
+such an account's keys from `ufvk: nil`, and now derives different ones, which cannot read the
+metadata written under the old keys. To keep that metadata reachable, go on deriving with
+`ufvk: nil` for an imported account that already has metadata.
+
+Before:
+
+```swift
+let isImported = account.ufvk == nil
+
+// `account.ufvk` was `nil` for an imported account, so this derived the keys of `ufvk: nil`.
+let keys = try metadataKey.derivePrivateUseMetadataKey(
+    ufvk: account.ufvk,
+    privateUseSubject: subject
+)
+```
+
+After:
+
+```swift
+let isImported = account.hdAccountIndex == nil
+
+// An imported account that already has metadata keeps the keys it was written under.
+let keys = try metadataKey.derivePrivateUseMetadataKey(
+    ufvk: isImported && hasStoredMetadata(for: account.id) ? nil : account.ufvk,
+    privateUseSubject: subject
+)
+```
+
+Such an `Account` also no longer equals, or hashes like, the value an earlier version returned, so
+match accounts by `id`. Its `Codable` encoding now includes `ufvk` and `uivk`: an `Account` a wallet
+stores or sends carries the account's viewing key, so keep it only where that key may go.
+
 ## `ZcashError` gained cases — viewing key checks
 
 `ZcashError` and `ZcashErrorCode` have three new cases, which only the viewing key checks throw. An
