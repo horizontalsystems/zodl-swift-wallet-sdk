@@ -1,6 +1,7 @@
 # Offline, text-only checks on how CI builds and caches the FFI (the root
-# Makefile's ffi-ci target and the workflows that call it) and on whether the
-# FFI build's deployment targets agree with Package.swift. Like
+# Makefile's ffi-ci target and the workflows that call it), on whether the
+# FFI build's deployment targets agree with Package.swift, and on Cargo.toml
+# keeping a release build's proc macros loadable. Like
 # test-workflow.sh, these never run cargo, gh or a workflow. `make -n` prints
 # the commands a target would run; GNU make still descends into `$(MAKE)`
 # lines under -n, but only to print their commands too.
@@ -83,6 +84,24 @@ test_deployment_targets_agree_with_package_swift() {
     assert_eq "<string>14.0</string>" \
         "$(grep -A1 '<key>LSMinimumSystemVersion</key>' "$REPO_ROOT/Scripts/version-macos-framework.sh" | tail -1 | tr -d '[:space:]')" \
         "the macOS framework's Info.plist names macOS 14 as its minimum"
+}
+
+# The settings of Cargo.toml's [$1] table, one per line, without comments or
+# blank lines.
+_cargo_table() {
+    awk -v h="[$1]" '
+        /^\[/ { in_t = ($0 == h); next }
+        in_t && !/^[[:space:]]*(#|$)/ { print }
+    ' "$REPO_ROOT/Cargo.toml"
+}
+
+# A release build's build scripts and proc macros would otherwise be stripped
+# by rustc's bundled rust-objcopy, whose output macOS 27's dyld can refuse to
+# load, so the FFI build stops at the first proc macro (see Cargo.toml).
+test_release_builds_leave_host_artifacts_unstripped() {
+    assert_eq "strip = false" \
+        "$(_cargo_table profile.release.build-override | grep -E '^strip[[:space:]]*=')" \
+        "Cargo.toml's [profile.release.build-override] sets strip = false"
 }
 
 _swift_workflow() { printf '%s\n' "$REPO_ROOT/.github/workflows/swift.yml"; }
