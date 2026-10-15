@@ -920,6 +920,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returns null with `zcashlc_take_last_error_report` reporting `ErrorKind::Unclassified` (`0`), and
   `zcashlc_create_pczt_from_proposal` returns null with the address expiry conflict in the last error
   message.
+- `zcashlc_slipstream_snapshot`'s `tip_fresh` survives a `zcashlc_slipstream_stop` → `zcashlc_slipstream_start`
+  gap shorter than 1.6 target block intervals of the block after the handle's last known chain tip: 120 s
+  before NU7, as before, and 40 s once that block is a 25-second NU7 block. With no known tip, 120 s.
 
 ## 2.8.0-rc.2 - 2026-07-28
 

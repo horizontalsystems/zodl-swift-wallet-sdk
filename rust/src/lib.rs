@@ -6924,7 +6924,8 @@ pub struct SlipstreamHandle {
     tip_refreshes_at_run_start: std::sync::atomic::AtomicU64,
     tip_fresh: std::sync::atomic::AtomicBool,
     /// [API v2.1 E-2] `stop()` timestamp: freshness survives a stop→start hop shorter than
-    /// 120 s (the SDK's `SDKFlags.sdkStarted` quick-background parity).
+    /// [`tip_fresh_stop_window`] (quick-background parity with the SDK's `SDKFlags.sdkStarted()`
+    /// before NU7, which keeps a flat 120 s window).
     last_stop_at: std::sync::Mutex<Option<std::time::Instant>>,
     /// [v0.7 P1b] Alternate lightwalletd servers for probe-then-commit + wire
     /// failover. Set via [`zcashlc_slipstream_set_alternate_servers`]; each
@@ -6958,8 +6959,27 @@ struct SummaryCacheEntry {
 
 /// [API v2.1 E-1] Idle refresh TTL — matches the SDK's historical idle/error refetch cadence.
 const SUMMARY_IDLE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
-/// [API v2.1 E-2] Freshness survives stop→start hops shorter than this (SDKFlags parity).
-const TIP_FRESH_STOP_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
+/// [API v2.1 E-2] The stop→start hop tip freshness survives while the handle knows no tip yet:
+/// 1.6 blocks at the 75-second spacing that holds from Blossom until NU7, which is also the flat
+/// window the legacy synchronizer's `SDKFlags.sdkStarted()` keeps.
+const TIP_FRESH_STOP_WINDOW_WITHOUT_TIP: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The stop→start hop tip freshness survives: 1.6 target block intervals of the block after
+/// `known_tip`, the last tip this handle knows (`Progress::chain_tip`, seeded from the wallet
+/// database at open). That is 120 s at 75-second blocks and 40 s at NU7's 25 seconds. A
+/// `known_tip` of `0` (no tip is known) or above `u32::MAX` (not a block height) takes
+/// [`TIP_FRESH_STOP_WINDOW_WITHOUT_TIP`] instead.
+fn tip_fresh_stop_window<P: Parameters>(network: &P, known_tip: u64) -> std::time::Duration {
+    match u32::try_from(known_tip) {
+        Ok(tip) if tip > 0 => {
+            let spacing =
+                block_spacing::pow_target_spacing(network, BlockHeight::from_u32(tip) + 1);
+            std::time::Duration::from_millis(u64::from(spacing) * 1_600)
+        }
+        _ => TIP_FRESH_STOP_WINDOW_WITHOUT_TIP,
+    }
+}
+
 /// [MOB-1850] The budget the engine gives each of the two bounded waits a stop or start makes:
 /// one for the aborted passes, one for its wallet commit. Far above the worst observed device
 /// commit (a few seconds, A10).
@@ -7012,8 +7032,9 @@ pub struct FfiSlipstreamSnapshot {
     /// past its `start()` baseline (bumped only after `update_chain_tip` succeeds) proves the
     /// tip moved; the completed range proves the wallet database can vouch for the spendable
     /// value at that tip — between the two it reports every non-stabilized note as unspendable.
-    /// Survives stop→start hops shorter than 120 s. While 0, hosts must mask spendable balances
-    /// (the mask transform stays host-side because the C `AccountBalance` cannot express the
+    /// Survives stop→start hops shorter than 1.6 target block intervals at the last known tip
+    /// (120 s before NU7, 40 s from it). While 0, hosts must mask spendable balances (the mask
+    /// transform stays host-side because the C `AccountBalance` cannot express the
     /// awaiting-resolution shift).
     pub tip_fresh: u8,
     /// [E-4] Monotonic version of the wallet's stored transaction set: bumps exactly when
@@ -7376,17 +7397,20 @@ pub unsafe extern "C" fn zcashlc_slipstream_start(
         // [API v2.1 E-2] Tip-freshness bookkeeping (shouldMarkChainTipUpdated parity):
         // capture the refresh-counter baseline BEFORE the pass starts — a later advance
         // proves THIS run persisted a freshly-fetched tip (even when the fetched height
-        // equals the E-3 DB-seeded one). Freshness survives a stop→start hop < 120 s
-        // (quick background hop); a longer gap re-masks until the new pass proves the tip.
+        // equals the E-3 DB-seeded one). Freshness survives a stop→start hop shorter than
+        // `tip_fresh_stop_window` (quick background hop); a longer gap re-masks until the new
+        // pass proves the tip.
         let refreshes_now = handle.inner.progress.tip_refreshes();
         handle
             .tip_refreshes_at_run_start
             .store(refreshes_now, std::sync::atomic::Ordering::Relaxed);
+        let stop_window =
+            tip_fresh_stop_window(&handle.inner.network, handle.inner.progress.chain_tip());
         let stale_stop = handle
             .last_stop_at
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .map(|t| t.elapsed() >= TIP_FRESH_STOP_WINDOW)
+            .map(|t| t.elapsed() >= stop_window)
             .unwrap_or(false);
         if stale_stop {
             handle
@@ -7658,8 +7682,9 @@ unsafe fn stop_slipstream(
     let handle = AssertUnwindSafe(handle);
     let res = catch_panic(|| {
         let handle = unsafe { handle.as_mut() }.ok_or_else(|| anyhow!("null handle"))?;
-        // [API v2.1 E-2] Stamp the stop: a start() within 120 s keeps tip freshness
-        // (quick background hop, SDKFlags parity); a longer gap re-masks.
+        // [API v2.1 E-2] Stamp the stop: a start() within `tip_fresh_stop_window` keeps tip
+        // freshness (quick background hop; parity with `SDKFlags.sdkStarted()` before NU7, which
+        // keeps a flat 120 s window); a longer gap re-masks.
         *handle
             .last_stop_at
             .lock()
@@ -7744,7 +7769,8 @@ impl SlipstreamHandle {
     /// [API v2.1 E-2] Lazily evaluates + latches tip freshness — the `shouldMarkChainTipUpdated`
     /// semantics the SDK derived host-side, tightened by [MOB-1852]; the rule itself is
     /// `fresh_tip_decision`:
-    /// - already fresh → stays fresh (until a >120 s stop→start gap re-masks in `start()`);
+    /// - already fresh → stays fresh (until a stop→start gap of `tip_fresh_stop_window` or more
+    ///   re-masks in `start()`);
     /// - the refresh counter advanced past its `start()` baseline AND this pass has completed a
     ///   ChainTip-priority range (`spendable_hint == 1`) → fresh. The engine bumps the counter
     ///   only AFTER `session.update_chain_tip` succeeds, so an advance proves THIS run refreshed
@@ -9352,6 +9378,58 @@ mod explicit_expiry_height_tests {
         assert_eq!(
             explicit_expiry_height(&Network::MainNetwork, h(3_000_000), true),
             None
+        );
+    }
+}
+
+#[cfg(test)]
+mod tip_fresh_stop_window_tests {
+    use super::{TIP_FRESH_STOP_WINDOW_WITHOUT_TIP, tip_fresh_stop_window};
+    use std::time::Duration;
+    use zcash_protocol::consensus::Network;
+
+    const TESTNET_NU7: u64 = 4_465_026;
+
+    #[test]
+    fn the_window_follows_the_spacing_of_the_next_block() {
+        assert_eq!(
+            tip_fresh_stop_window(&Network::MainNetwork, 3_000_000),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            tip_fresh_stop_window(&Network::TestNetwork, TESTNET_NU7 - 2),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            tip_fresh_stop_window(&Network::TestNetwork, TESTNET_NU7 - 1),
+            Duration::from_secs(40)
+        );
+        assert_eq!(
+            tip_fresh_stop_window(&Network::TestNetwork, TESTNET_NU7 + 10_000),
+            Duration::from_secs(40)
+        );
+    }
+
+    #[test]
+    fn a_handle_that_knows_no_tip_keeps_120_seconds() {
+        assert_eq!(TIP_FRESH_STOP_WINDOW_WITHOUT_TIP, Duration::from_secs(120));
+        assert_eq!(
+            tip_fresh_stop_window(&Network::TestNetwork, 0),
+            TIP_FRESH_STOP_WINDOW_WITHOUT_TIP
+        );
+        assert_eq!(
+            tip_fresh_stop_window(&Network::TestNetwork, u64::from(u32::MAX) + 1),
+            TIP_FRESH_STOP_WINDOW_WITHOUT_TIP
+        );
+    }
+
+    /// `BlockHeight` addition saturates, so the highest tip a `u32` holds still resolves to the
+    /// spacing of its saturated successor instead of overflowing.
+    #[test]
+    fn the_highest_representable_tip_does_not_overflow() {
+        assert_eq!(
+            tip_fresh_stop_window(&Network::TestNetwork, u64::from(u32::MAX)),
+            Duration::from_secs(40)
         );
     }
 }

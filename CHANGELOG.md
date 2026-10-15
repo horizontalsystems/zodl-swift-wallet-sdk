@@ -43,6 +43,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `evaluateServerSwitch(current:candidates:fetchThresholdSeconds:nBlocksToFetch:network:)` rule out servers
   trailing their estimated tip by more than six hours of target time. The fixed 288 blocks were two hours
   at NU7's 25-second blocks, too strict for a check that must stay loose. Nothing changes before NU7.
+- A `SlipstreamSynchronizer` stopped and restarted within 120 seconds kept spendable balances unmasked
+  (`SynchronizerState.isSpendableMasked`) even where NU7's 25-second blocks let almost five blocks arrive.
+  The window is now 1.6 target blocks at the last known tip: 120 s before NU7, 40 s from NU7.
 
 # 6.0.0 - 2026-10-15
 

@@ -582,9 +582,10 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         passGeneration += 1
         let birthday = BlockHeight(initializer.walletBirthday)
         // [v2.1 Phase 2] Tip freshness ([#1591]) is ENGINE-OWNED (snapshot.tipFresh, E-2):
-        // the FFI start() captures the refresh baseline and keeps freshness across a <120 s
-        // stop→start hop — the SDKFlags.sdkStarted()/chainTipAtRunStart parity machinery
-        // this block used to carry is deleted.
+        // the FFI start() captures the refresh baseline and keeps freshness across a stop→start
+        // hop shorter than 1.6 target block intervals (120 s before NU7, 40 s from it) — the
+        // SDKFlags.sdkStarted()/chainTipAtRunStart parity machinery this block used to carry is
+        // deleted.
         // B4: a new run starts with a fresh stall-watchdog window. [MOB-1850] The recovery
         // BUDGET only resets when the app is starting a run of its own: the stall recovery
         // restarts the pass by calling this very method, and letting that call clear the
@@ -690,7 +691,8 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
             ))
         }
         // [v2.1 Phase 2] Re-masking after a stop is ENGINE-OWNED: the FFI stop() stamps the
-        // moment, and a start() more than 120 s later re-masks via snapshot.tipFresh (E-2).
+        // moment, and a start() more than 1.6 target block intervals later (120 s before NU7,
+        // 40 s from it) re-masks via snapshot.tipFresh (E-2).
         // [MOB-1850] Nothing is stacked on this stop — no wallet write, no second handle — so a
         // non-quiescent one changes nothing here beyond what a reader of the logs should know:
         // the pass is stopped either way, and an engine writer that outlives it has only the
