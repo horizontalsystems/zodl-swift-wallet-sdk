@@ -67,6 +67,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has its rate reported at NU7's spacing, since its next block is an NU7 block. A window spanning Blossom, seen
   only early in a restore from a pre-Blossom birthday, now also measures speed against target time, and a latest
   scanned block below Blossom gets the 150-second era's bounds and fallback.
+- `MigrationSchedule.estimatedDurationHours` counts blocks at their target spacing (25 s from NU7); after NU7
+  it read up to three times too long. Nothing changes before NU7.
 
 # 6.0.0 - 2026-10-15
 

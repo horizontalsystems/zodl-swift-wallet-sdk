@@ -86,9 +86,7 @@ use zcash_client_backend::wallet::{LockOwner, OutputRef};
 use zcash_client_sqlite::AccountUuid;
 use zcash_client_sqlite::error::SqliteClientError;
 use zcash_client_sqlite::pool_migration::orchard_ironwood::Error as PoolMigrationStoreError;
-use zcash_protocol::consensus::{
-    BLOCKS_PER_HOUR, BlockHeight, Network, NetworkUpgrade, Parameters,
-};
+use zcash_protocol::consensus::{BlockHeight, Network, NetworkUpgrade, Parameters};
 use zcash_protocol::value::Zatoshis;
 use zcash_protocol::{PoolType, ShieldedPool, TxId};
 
@@ -669,17 +667,27 @@ fn schedule_rows(
 /// The schedule's duration in hours, measured from `now` — the same reference height the
 /// encoder stamps into each row's `anchor_height` (`now_reference`) — to the LAST scheduled
 /// broadcast (#1806: was the first-to-last broadcast span, which structurally excluded the wait
-/// until the first transfer fires). Empty schedule, or every height at/behind `now`, is `0`
-/// (saturating, never underflows).
-fn estimated_duration_hours(
+/// until the first transfer fires), in the target time of the blocks between them. Empty
+/// schedule, or every height at/behind `now`, is `0` (saturating, never underflows).
+fn estimated_duration_hours<P: Parameters>(
+    params: &P,
     broadcast_heights: impl Iterator<Item = BlockHeight>,
     now: BlockHeight,
 ) -> u32 {
-    let now = u32::from(now);
-    broadcast_heights
-        .map(u32::from)
-        .max()
-        .map_or(0, |max| max.saturating_sub(now) / BLOCKS_PER_HOUR)
+    target_hours_until(params, broadcast_heights.max(), now)
+}
+
+/// The whole hours of target time from `now` to `last`, `0` when absent or not after `now`. At
+/// 75-second blocks this is exactly the old 48 blocks to the hour.
+fn target_hours_until<P: Parameters>(
+    params: &P,
+    last: Option<BlockHeight>,
+    now: BlockHeight,
+) -> u32 {
+    last.map_or(0, |last| {
+        let seconds = crate::block_spacing::target_seconds_between(params, now, last).max(0);
+        u32::try_from(seconds / 3_600).unwrap_or(u32::MAX)
+    })
 }
 
 /// The number of preparation transactions a plan commits (across all layers). Delegates to the
@@ -787,7 +795,8 @@ fn preparation_steps_from_state(state: &MigrationState) -> Vec<FfiMigrationPrepa
 /// the DTO's `anchor_height` field: with ZIP 374 the real anchor is drawn per transfer and
 /// installed at proving time, so the field now carries the "now" height the platform's duration
 /// math measures waits from — it is NOT a commitment-tree anchor.
-fn encode_schedule_from_plan(
+fn encode_schedule_from_plan<P: Parameters>(
+    params: &P,
     plan: &MigrationPlan,
     now_reference: BlockHeight,
     plan_handle: migration_plan_cache::PlanHandle,
@@ -810,6 +819,7 @@ fn encode_schedule_from_plan(
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     let estimated = estimated_duration_hours(
+        params,
         plan.schedule().iter().map(|e| e.broadcast_height()),
         now_reference,
     );
@@ -860,17 +870,20 @@ fn stored_transfers(state: &MigrationState) -> Vec<&MigrationTransaction> {
 }
 
 /// The schedule-duration estimate derived from STORED transfer rows, in hours, measured from
-/// `now` to the LATEST stored `scheduled_height` — the state-side counterpart of
-/// [`estimated_duration_hours`], used by the state-encoded schedule DTO
-/// ([`encode_schedule_from_state`]) to compute the value the platform displays. Empty, or every
-/// height at/behind `now`, is `0` (saturating, never underflows).
-fn stored_duration_hours(transfers: &[&MigrationTransaction], now: BlockHeight) -> u32 {
-    let now = u32::from(now);
-    transfers
-        .iter()
-        .map(|t| u32::from(t.scheduled_height()))
-        .max()
-        .map_or(0, |max| max.saturating_sub(now) / BLOCKS_PER_HOUR)
+/// `now` to the LATEST stored `scheduled_height`, in the target time of the blocks between them —
+/// the state-side counterpart of [`estimated_duration_hours`], used by the state-encoded schedule
+/// DTO ([`encode_schedule_from_state`]) to compute the value the platform displays. Empty, or
+/// every height at/behind `now`, is `0` (saturating, never underflows).
+fn stored_duration_hours<P: Parameters>(
+    params: &P,
+    transfers: &[&MigrationTransaction],
+    now: BlockHeight,
+) -> u32 {
+    target_hours_until(
+        params,
+        transfers.iter().map(|t| t.scheduled_height()).max(),
+        now,
+    )
 }
 
 /// Marshal the STORED run's full transfer subset into the platform's schedule DTO — the
@@ -883,12 +896,13 @@ fn stored_duration_hours(transfers: &[&MigrationTransaction], now: BlockHeight) 
 /// [`stored_duration_hours`]'s doc). The DTO carries the `0` "no plan" handle: this schedule is
 /// backed by durable, already-committed state, not by a cached proposal, and the commit-shaped
 /// calls resume that stored state without consulting a handle.
-fn encode_schedule_from_state(
+fn encode_schedule_from_state<P: Parameters>(
+    params: &P,
     state: &MigrationState,
     now_reference: BlockHeight,
 ) -> anyhow::Result<*mut FfiMigrationSchedule> {
     let mut transfers = stored_transfers(state);
-    let estimated = stored_duration_hours(&transfers, now_reference);
+    let estimated = stored_duration_hours(params, &transfers, now_reference);
     transfers.sort_by_key(|t| t.scheduled_height());
     let rows = transfers
         .into_iter()
@@ -3562,7 +3576,7 @@ pub unsafe extern "C" fn zcashlc_migration_propose_transfers(
         };
         match plan_and_cache(&mut system_rng(), &mut ctx, false)? {
             Some((plan, reference_height, handle)) => {
-                encode_schedule_from_plan(&plan, reference_height, handle)
+                encode_schedule_from_plan(&ctx.network, &plan, reference_height, handle)
             }
             None => Ok(encode_empty_schedule()),
         }
@@ -4057,7 +4071,7 @@ pub unsafe extern "C" fn zcashlc_migration_restart_step(
         }
         match plan_and_cache(&mut system_rng(), &mut ctx, false)? {
             Some((plan, reference_height, handle)) => {
-                encode_schedule_from_plan(&plan, reference_height, handle)
+                encode_schedule_from_plan(&ctx.network, &plan, reference_height, handle)
             }
             None => Ok(encode_empty_schedule()),
         }
@@ -4146,7 +4160,7 @@ pub unsafe extern "C" fn zcashlc_migration_refresh_stale_transfers(
         let expired = state.expired_transactions(DuenessTargets::at(target));
         if expired.is_empty() {
             // Nothing to rebuild: the stored schedule IS current — serve it for re-display.
-            return encode_schedule_from_state(&state, tip);
+            return encode_schedule_from_state(&ctx.network, &state, tip);
         }
 
         let mut rng = system_rng();
@@ -4179,7 +4193,7 @@ pub unsafe extern "C" fn zcashlc_migration_refresh_stale_transfers(
         backend
             .replace_migration(&state)
             .map_err(|e| anyhow!("migration store write failed: {e}"))?;
-        encode_schedule_from_state(&state, tip)
+        encode_schedule_from_state(&ctx.network, &state, tip)
     });
     unwrap_exc_or_null(res)
 }
@@ -5452,7 +5466,7 @@ mod tests {
     fn estimated_duration_hours_is_measured_from_now_to_the_last_broadcast() {
         let heights = [h(1_000_336), h(1_000_432)];
         assert_eq!(
-            estimated_duration_hours(heights.into_iter(), h(1_000_000)),
+            estimated_duration_hours(&Network::MainNetwork, heights.into_iter(), h(1_000_000)),
             9
         );
     }
@@ -5460,7 +5474,7 @@ mod tests {
     #[test]
     fn estimated_duration_hours_empty_schedule_is_zero() {
         assert_eq!(
-            estimated_duration_hours(std::iter::empty(), h(1_000_000)),
+            estimated_duration_hours(&Network::MainNetwork, std::iter::empty(), h(1_000_000)),
             0
         );
     }
@@ -5471,7 +5485,7 @@ mod tests {
         // `0` rather than underflowing.
         let heights = [h(900_000), h(950_000), h(1_000_000)];
         assert_eq!(
-            estimated_duration_hours(heights.into_iter(), h(1_000_000)),
+            estimated_duration_hours(&Network::MainNetwork, heights.into_iter(), h(1_000_000)),
             0
         );
     }
@@ -5497,23 +5511,36 @@ mod tests {
     fn stored_duration_hours_is_measured_from_now_to_the_last_scheduled_height() {
         let a = transfer_at(0, 1_000_336);
         let b = transfer_at(1, 1_000_432);
-        assert_eq!(stored_duration_hours(&[&a, &b], h(1_000_000)), 9);
+        assert_eq!(
+            stored_duration_hours(&Network::MainNetwork, &[&a, &b], h(1_000_000)),
+            9
+        );
     }
 
     #[test]
     fn stored_duration_hours_empty_is_zero() {
-        assert_eq!(stored_duration_hours(&[], h(1_000_000)), 0);
+        assert_eq!(
+            stored_duration_hours(&Network::MainNetwork, &[], h(1_000_000)),
+            0
+        );
     }
 
     #[test]
     fn stored_duration_hours_all_overdue_is_zero() {
         let a = transfer_at(0, 900_000);
         let b = transfer_at(1, 950_000);
-        assert_eq!(stored_duration_hours(&[&a, &b], h(1_000_000)), 0);
+        assert_eq!(
+            stored_duration_hours(&Network::MainNetwork, &[&a, &b], h(1_000_000)),
+            0
+        );
     }
 
     fn mainnet_duration_hours(broadcast_heights: &[u32], now: u32) -> u32 {
-        estimated_duration_hours(broadcast_heights.iter().copied().map(h), h(now))
+        estimated_duration_hours(
+            &Network::MainNetwork,
+            broadcast_heights.iter().copied().map(h),
+            h(now),
+        )
     }
 
     fn mainnet_stored_duration_hours(scheduled_heights: &[u32], now: u32) -> u32 {
@@ -5523,7 +5550,7 @@ mod tests {
             .map(|(id, &height)| transfer_at(u32::try_from(id).unwrap(), height))
             .collect();
         let refs: Vec<&MigrationTransaction> = owned.iter().collect();
-        stored_duration_hours(&refs, h(now))
+        stored_duration_hours(&Network::MainNetwork, &refs, h(now))
     }
 
     #[test]
@@ -5535,6 +5562,35 @@ mod tests {
             assert_eq!(hours(&[3_034_560], 3_000_000), 720);
             assert_eq!(hours(&[2_999_000], 3_000_000), 0);
         }
+    }
+
+    const TESTNET_NU7: u32 = 4_465_026;
+
+    #[test]
+    fn duration_hours_count_each_block_at_its_own_spacing() {
+        // From NU7 an hour is 144 blocks, not 48.
+        assert_eq!(
+            estimated_duration_hours(
+                &Network::TestNetwork,
+                [h(TESTNET_NU7 + 144)].into_iter(),
+                h(TESTNET_NU7)
+            ),
+            1
+        );
+        let transfer = transfer_at(0, TESTNET_NU7 + 287);
+        assert_eq!(
+            stored_duration_hours(&Network::TestNetwork, &[&transfer], h(TESTNET_NU7)),
+            1
+        );
+        // 48 blocks of 75 s plus 144 of 25 s are two hours (the old math said four).
+        assert_eq!(
+            estimated_duration_hours(
+                &Network::TestNetwork,
+                [h(TESTNET_NU7 + 143)].into_iter(),
+                h(TESTNET_NU7 - 49)
+            ),
+            2
+        );
     }
 
     /// The DTO-constructing encode path end to end: `encode_schedule_from_state` must thread its
@@ -5582,8 +5638,8 @@ mod tests {
             AnchorBucketInterval::ZIP_318,
         );
 
-        let schedule_ptr =
-            encode_schedule_from_state(&state, h(1_000_000)).expect("encoding must succeed");
+        let schedule_ptr = encode_schedule_from_state(&Network::MainNetwork, &state, h(1_000_000))
+            .expect("encoding must succeed");
         let schedule = unsafe { &*schedule_ptr };
         assert_eq!(schedule.estimated_duration_hours, 9);
         assert_eq!(
