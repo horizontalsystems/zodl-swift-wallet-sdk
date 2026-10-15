@@ -27,6 +27,8 @@ actor OrchardMigrationHost {
     private let generalStorageURL: URL
     private let now: @Sendable () -> Date
     private let logger: Logger
+    /// The network's target spacing schedule, which the wallet-scope estimates project on.
+    private let spacing: TargetBlockSpacing
 
     /// Builds a per-account ``OrchardMigration`` bound to `accountUUID`, wired to the given shared
     /// broadcaster. Injected so tests can substitute mock-welded actors; production builds each from
@@ -89,13 +91,15 @@ actor OrchardMigrationHost {
             tickInterval: 15,
             now: { Date() },
             logger: logger,
+            spacing: TargetBlockSpacing(network: network),
             actorFactory: factory
         )
     }
 
     /// Injecting initializer for tests: supply the welding, the shared broadcaster, the storage
-    /// directory the gate files live in, the ticker interval and clock, the logger, and the
-    /// per-account actor factory directly — mirroring ``OrchardMigration``'s own injecting init.
+    /// directory the gate files live in, the ticker interval and clock, the logger, the network's
+    /// target spacing schedule, and the per-account actor factory directly — mirroring
+    /// ``OrchardMigration``'s own injecting init.
     init(
         welding: ZcashRustBackendWelding,
         sharedBroadcaster: any MigrationBroadcasting,
@@ -103,6 +107,7 @@ actor OrchardMigrationHost {
         tickInterval: TimeInterval,
         now: @escaping @Sendable () -> Date,
         logger: Logger,
+        spacing: TargetBlockSpacing,
         actorFactory: @escaping (AccountUUID, any MigrationBroadcasting) -> OrchardMigration
     ) {
         self.welding = welding
@@ -110,6 +115,7 @@ actor OrchardMigrationHost {
         self.generalStorageURL = generalStorageURL
         self.now = now
         self.logger = logger
+        self.spacing = spacing
         self.actorFactory = actorFactory
 
         let liveGateRegistry = MigrationLiveGateRegistry()
@@ -178,7 +184,7 @@ actor OrchardMigrationHost {
     /// ``ZcashError/migrationChainTipUnavailable`` when even that is unknown because the wallet
     /// has never scanned.
     func estimatedChainTip() async throws -> BlockHeight {
-        let projection = try await MigrationTipEstimation.project(welding: welding, now: now())
+        let projection = try await MigrationTipEstimation.project(welding: welding, spacing: spacing, now: now())
         if let estimated = projection.estimatedTip {
             return estimated
         }
@@ -188,13 +194,15 @@ actor OrchardMigrationHost {
         return scannedTip
     }
 
-    /// The measured seconds-per-block over the most recently scanned blocks (see
-    /// ``ChainTipEstimator/secondsPerBlock()``): the mean of the last up-to-100 consecutive
-    /// header-time deltas, clamped to [5, 150] s, falling back to 75 s (the target spacing) when
-    /// fewer than two samples exist. WALLET-scoped like ``estimatedChainTip()``. A host uses it
-    /// to convert wake-up heights into wall-clock OS timers.
+    /// The measured seconds-per-block (see ``ChainTipEstimator/secondsPerBlock(atEstimatedTip:)``):
+    /// the chain's speed relative to the target time of up to the last 1000 scanned blocks,
+    /// expressed in the target spacing of the block after the ``estimatedChainTip()`` projection
+    /// and clamped to [5, 150] s scaled by that spacing over 75 s ([5/3, 50] s at NU7's 25 s).
+    /// That block's target spacing when no rate can be measured, and 75 s for a wallet that has
+    /// never scanned. WALLET-scoped like ``estimatedChainTip()``. A host uses it to convert
+    /// wake-up heights into wall-clock OS timers.
     func estimatedSecondsPerBlock() async throws -> Double {
-        try await MigrationTipEstimation.project(welding: welding, now: now()).secondsPerBlock
+        try await MigrationTipEstimation.project(welding: welding, spacing: spacing, now: now()).secondsPerBlock
     }
 
     /// A stream of ``isSyncBlocked()`` at wallet scope: emits the current value on subscribe,

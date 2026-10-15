@@ -835,6 +835,7 @@ final class SlipstreamSynchronizerMigrationTests: ZcashTestCase {
             tickInterval: tickInterval,
             now: { Date() },
             logger: logger,
+            spacing: TargetBlockSpacing(networkType: .testnet),
             actorFactory: { accountUUID, broadcaster in
                 factoryRecorder?.recordCall()
                 return OrchardMigration(
@@ -848,7 +849,8 @@ final class SlipstreamSynchronizerMigrationTests: ZcashTestCase {
                         now: { Date() },
                         logger: logger
                     ),
-                    logger: logger
+                    logger: logger,
+                    spacing: TargetBlockSpacing(networkType: .testnet)
                 )
             }
         )

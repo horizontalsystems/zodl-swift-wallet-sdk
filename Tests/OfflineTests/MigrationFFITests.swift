@@ -1070,7 +1070,8 @@ final class MigrationFFITests: XCTestCase {
                 tickInterval: 3600,
                 logger: logger
             ),
-            logger: logger
+            logger: logger,
+            spacing: TargetBlockSpacing(networkType: .testnet)
         )
 
         do {

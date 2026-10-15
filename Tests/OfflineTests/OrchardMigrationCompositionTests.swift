@@ -1034,6 +1034,7 @@ final class OrchardMigrationCompositionTests: ZcashTestCase {
             broadcaster: broadcaster,
             syncGate: gate,
             logger: logger,
+            spacing: TargetBlockSpacing(networkType: .testnet),
             // The actor's estimate-consulting paths read the injected clock (U7), so the
             // fake-clock projection tests are deterministic.
             now: { clockValue.now }

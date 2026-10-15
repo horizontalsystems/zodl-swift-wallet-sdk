@@ -141,6 +141,8 @@ actor OrchardMigration {
     private let broadcaster: any MigrationBroadcasting
     private let syncGate: MigrationSyncGate
     private let logger: Logger
+    /// The network's target spacing schedule, which the estimate-consulting paths project on.
+    private let spacing: TargetBlockSpacing
 
     /// The clock every estimate-consulting path on this actor reads (mirroring
     /// ``OrchardMigrationHost``'s injected `now`), so tests can drive the wall-clock tip
@@ -222,6 +224,7 @@ actor OrchardMigration {
         self.welding = welding
         self.accountUUID = accountUUID
         self.logger = logger
+        self.spacing = TargetBlockSpacing(network: config.network)
         self.broadcaster = sharedBroadcaster
         self.now = now
         self.syncGate = MigrationSyncGate(
@@ -232,15 +235,16 @@ actor OrchardMigration {
     }
 
     /// Injecting initializer for tests: supply the welding, broadcaster, sync gate (with its test
-    /// clock/ticker), logger, and — for the actor's own estimate-consulting paths — a clock,
-    /// directly. `now` defaults to the real clock so call sites that do not exercise the
-    /// estimate stay unchanged.
+    /// clock/ticker), logger, and — for the actor's own estimate-consulting paths — the network's
+    /// target spacing schedule and a clock, directly. `now` defaults to the real clock so call
+    /// sites that do not exercise the estimate stay unchanged.
     init(
         welding: ZcashRustBackendWelding,
         accountUUID: AccountUUID,
         broadcaster: any MigrationBroadcasting,
         syncGate: MigrationSyncGate,
         logger: Logger,
+        spacing: TargetBlockSpacing,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.welding = welding
@@ -248,6 +252,7 @@ actor OrchardMigration {
         self.broadcaster = broadcaster
         self.syncGate = syncGate
         self.logger = logger
+        self.spacing = spacing
         self.now = now
     }
 
@@ -266,7 +271,7 @@ actor OrchardMigration {
     /// estimate may only ever ACCELERATE schedule due-ness — expiry stays scanned-tip — and an
     /// estimator failure degrades to scanned-tip behavior rather than blocking the advance.
     func advanceStep() async throws -> MigrationAdvance? {
-        let estimatedTip = await MigrationTipEstimation.gatingEstimatedTip(welding: welding, now: now())
+        let estimatedTip = await MigrationTipEstimation.gatingEstimatedTip(welding: welding, spacing: spacing, now: now())
         let advance = try await welding.migrationAdvanceStep(for: accountUUID, estimatedTip: estimatedTip)
         // Every crank -- regardless of which caller drove it -- replaces the retained outlook,
         // including with `nil`: a stale outlook must not outlive the crank that superseded it (see
@@ -723,7 +728,7 @@ actor OrchardMigration {
     /// only ACCELERATE due-ness (expiry stays scanned-tip), and an estimator failure degrades to
     /// the scanned-tip behavior — the same plumbing ``advanceStep()`` always applies.
     func hasOverdueTransfers(useEstimatedTip: Bool) async throws -> Bool {
-        let estimatedTip = useEstimatedTip ? await MigrationTipEstimation.gatingEstimatedTip(welding: welding, now: now()) : nil
+        let estimatedTip = useEstimatedTip ? await MigrationTipEstimation.gatingEstimatedTip(welding: welding, spacing: spacing, now: now()) : nil
         return try await welding.migrationHasOverdueTransfers(for: accountUUID, estimatedTip: estimatedTip)
     }
 

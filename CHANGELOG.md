@@ -56,6 +56,17 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `checkSingleUseTransparentAddresses(accountUUID:)` checks addresses exposed within the past day of target
   time and spaces rechecks by the target spacing at the tip; after NU7 it looked back eight hours and
   rescheduled three times too far out. Nothing changes before NU7.
+- `estimatedMigrationChainTip()` and `estimatedMigrationSecondsPerBlock()` account for NU7's 25-second blocks.
+  The rate is measured over up to 1,000 scanned blocks as the chain's speed relative to their target time, so the
+  first blocks after NU7 activation do not swing it, and it is reported in the target spacing of the block after
+  the projected tip. Its 5–150 s bounds scale with that spacing (5/3–50 s at 25 s), and when it cannot be measured it
+  is that spacing. A projection that reaches NU7 activation counts the later blocks at their own spacing, at the
+  measured speed. To convert wake-up heights across activation, pass the rate to
+  `TargetBlockSpacing.estimatedSeconds(from:to:secondsPerBlock:)` with `estimatedMigrationChainTip()` as `from`.
+  Nothing changes for a window and tip within the 75-second era, except that a tip right before NU7 activation
+  has its rate reported at NU7's spacing, since its next block is an NU7 block. A window spanning Blossom, seen
+  only early in a restore from a pre-Blossom birthday, now also measures speed against target time, and a latest
+  scanned block below Blossom gets the 150-second era's bounds and fallback.
 
 # 6.0.0 - 2026-10-15
 
