@@ -323,7 +323,10 @@ extension ZcashTransaction.Overview {
 
         guard let expiryHeight = self.expiryHeight else { return nil }
         if expiryHeight != -1 {
-            return max(expiryHeight - ZcashSDK.expiryOffset - ZcashSDK.defaultStaleTolerance, network.saplingActivationHeight)
+            // Only the expiry height of an unmined transaction is known, set from its target height with a
+            // delta NU7 changes from 40 to 120 blocks; inverting it recovers the target its notes were anchored behind.
+            let targetHeight = TargetBlockSpacing(network: network).defaultTxTargetHeight(forExpiryHeight: expiryHeight)
+            return max(targetHeight - ZcashSDK.defaultStaleTolerance, network.saplingActivationHeight)
         }
 
         return nil

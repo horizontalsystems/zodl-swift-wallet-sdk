@@ -158,8 +158,13 @@ public enum ZcashSDK {
     /// The theoretical maximum number of blocks in a reorg, due to other bottlenecks in the protocol design.
     public static let maxReorgSize = 100
 
-    /// The amount of blocks ahead of the current height where new transactions are set to expire. This value is controlled
-    /// by the rust backend but it is helpful to know what it is set to and should be kept in sync.
+    /// A fixed offset that does not match the expiry of SDK-built transactions (40 blocks after the target height
+    /// before NU7, 120 from NU7).
+    @available(
+        *,
+        deprecated,
+        message: "Not the expiry delta of SDK-built transactions (40 blocks before NU7, 120 from NU7); read a transaction's expiryHeight instead."
+    )
     public static let expiryOffset = 20
 
     // MARK: Defaults

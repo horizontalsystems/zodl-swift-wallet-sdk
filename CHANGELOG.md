@@ -19,6 +19,12 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registered it fails an assertion in debug builds and follows the 75-second schedule in release builds.
 - `ZcashSDK.nu7ConsensusBranchID` (`0x77190ad9`) is the consensus branch ID of NU7, next to `nu63ConsensusBranchID`.
 
+## Deprecated
+
+- `ZcashSDK.expiryOffset` is deprecated. It is not the expiry delta of SDK-built transactions (40 blocks
+  after the target height before NU7, 120 from NU7); read a transaction's own `expiryHeight`. The SDK no
+  longer uses it.
+
 ## Fixed
 
 - Transactions created by `createProposedTransactions(proposal:spendingKey:)`,
