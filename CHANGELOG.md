@@ -24,6 +24,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ZcashSDK.expiryOffset` is deprecated. It is not the expiry delta of SDK-built transactions (40 blocks
   after the target height before NU7, 120 from NU7); read a transaction's own `expiryHeight`. The SDK no
   longer uses it.
+- `ZcashSDK.syncedThresholdBlocks` is deprecated: the server-lag limit is six hours of target time, 288 blocks only at
+  75-second blocks. Use `TargetBlockSpacing.seconds(from:to:)`. The SDK no longer uses it.
 
 ## Fixed
 
@@ -37,6 +39,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which used to succeed, is still proposed but fails at creation: `createProposedTransactions` throws
   `ZcashError.rustCreateToAddress` (`ZRUST0002`) with `RustErrorKind.unclassified`, and
   `createPCZTFromProposal` throws `ZcashError.rustCreatePCZTFromProposal` (`ZRUST0069`).
+- `evaluateBestOf(endpoints:fetchThresholdSeconds:nBlocksToFetch:kServers:network:)` and
+  `evaluateServerSwitch(current:candidates:fetchThresholdSeconds:nBlocksToFetch:network:)` rule out servers
+  trailing their estimated tip by more than six hours of target time. The fixed 288 blocks were two hours
+  at NU7's 25-second blocks, too strict for a check that must stay loose. Nothing changes before NU7.
 
 # 6.0.0 - 2026-10-15
 

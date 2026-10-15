@@ -230,7 +230,12 @@ public enum ZcashSDK {
     // swiftlint:disable:next force_unwrapping
     public static let outputParamFileURL = URL(string: cloudParameterURL)!.appendingPathComponent(outputParamFilename)
 
-    /// A constant that helps determine if a server’s chain tip is so far away from the estimated height that we consider the server out of sync
+    /// The most blocks a server's tip could trail its estimate before the SDK ruled it out; the SDK now allows six hours of target block time.
+    @available(
+        *,
+        deprecated,
+        message: "Measure a server's lag with TargetBlockSpacing.seconds(from:to:); 288 blocks are six hours only at 75-second blocks."
+    )
     public static let syncedThresholdBlocks = UInt64(288)
 }
 

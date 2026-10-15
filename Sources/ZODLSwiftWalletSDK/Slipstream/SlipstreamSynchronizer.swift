@@ -2797,8 +2797,11 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
 
     /// Ranks `endpoints` by `getInfo` round-trip time, ascending (best first), applying the
     /// same health checks as `SDKSynchronizer`'s benchmark: chain name, consensus branch id,
-    /// and the loose synced-height check — all skipped for custom networks, mirroring
-    /// `ValidateServerAction`. Delegates to ephemeral gRPC connections.
+    /// and the loose synced-height check. A custom-parameter network may reach servers that
+    /// identify with a different base chain and report a nonstandard consensus branch id, so
+    /// only the chain-name and branch-id checks are skipped for it, mirroring
+    /// `ValidateServerAction`; the synced-height check runs for every network. Delegates to
+    /// ephemeral gRPC connections.
     // TODO: [#1755] Hook into Tor when torEnabled; for now direct mode is used.
     private func measureEndpoints(
         endpoints: [LightWalletEndpoint],
@@ -2818,6 +2821,7 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
             }
 
             let isCustomNetwork = initializer.network.customActivationHeights != nil
+            let spacing = TargetBlockSpacing(network: initializer.network)
 
             for await result in group {
                 guard let (endpoint, elapsed, info) = result, elapsed > 0 else { continue }
@@ -2841,8 +2845,8 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
                 }
 
                 // Rule out servers that are syncing, stuck, or probably on the wrong fork.
-                // Deliberately loose — `info.estimatedHeight` may be quite inaccurate.
-                guard info.blockHeight + ZcashSDK.syncedThresholdBlocks >= info.estimatedHeight else {
+                // Deliberately loose — `info.estimatedHeight` may be quite inaccurate; see `ServerSyncCheck`.
+                guard ServerSyncCheck.isSynced(blockHeight: info.blockHeight, estimatedHeight: info.estimatedHeight, spacing: spacing) else {
                     continue
                 }
 
