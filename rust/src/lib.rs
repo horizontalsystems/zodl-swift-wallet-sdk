@@ -1073,7 +1073,7 @@ pub unsafe extern "C" fn zcashlc_delete_account(
 /// account's keys and all other state are left unchanged.
 ///
 /// Returns `true` on success, or `false` if an error is raised, including when no account with
-/// the given UUID exists in the wallet and when `name` is not valid UTF-8.
+/// the given UUID exists in the wallet and when `name` is null or not valid UTF-8.
 ///
 /// # Safety
 ///
@@ -1087,7 +1087,7 @@ pub unsafe extern "C" fn zcashlc_delete_account(
 ///   alignment of `1`.
 /// - The memory referenced by `account_uuid_bytes` must not be mutated for the duration of the
 ///   function call.
-/// - `name` must be non-null and must point to a null-terminated string.
+/// - `name` must be null or must point to a null-terminated string.
 /// - The memory referenced by `name` must not be mutated for the duration of the function call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zcashlc_set_account_name(
@@ -1098,6 +1098,9 @@ pub unsafe extern "C" fn zcashlc_set_account_name(
     name: *const c_char,
 ) -> bool {
     let res = catch_panic(|| {
+        if name.is_null() {
+            return Err(anyhow!("no account name was supplied"));
+        }
         let network = parse_network(network_id)?;
         let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
         let account_uuid = account_uuid_from_bytes(account_uuid_bytes)?;
@@ -6480,9 +6483,10 @@ mod tests {
         (dir, db_path, account_uuid)
     }
 
-    /// Calls [`zcashlc_set_account_name`] on the testnet wallet database at `db_path`. The last
-    /// error is cleared first, so an error it leaves was set by this call.
-    fn set_account_name(db_path: &str, account_uuid: &[u8; 16], name: &CStr) -> bool {
+    /// Calls [`zcashlc_set_account_name`] on the testnet wallet database at `db_path`, passing a
+    /// null pointer for a `None` name. The last error is cleared first, so an error it leaves was
+    /// set by this call.
+    fn set_account_name(db_path: &str, account_uuid: &[u8; 16], name: Option<&CStr>) -> bool {
         zcashlc_clear_last_error();
         unsafe {
             zcashlc_set_account_name(
@@ -6490,7 +6494,7 @@ mod tests {
                 db_path.len(),
                 NETWORK_ID_TESTNET,
                 account_uuid.as_ptr(),
-                name.as_ptr(),
+                name.map_or(std::ptr::null(), CStr::as_ptr),
             )
         }
     }
@@ -6521,7 +6525,7 @@ mod tests {
         );
 
         let name = CString::new(RENAMED_ACCOUNT_NAME).expect("the name has no interior NUL");
-        assert!(set_account_name(&db_path, &account_uuid, &name));
+        assert!(set_account_name(&db_path, &account_uuid, Some(&name)));
 
         assert_eq!(
             stored_account_name(&db_path, &account_uuid).as_deref(),
@@ -6538,7 +6542,7 @@ mod tests {
         assert_ne!(unknown, account_uuid);
 
         let name = CString::new(RENAMED_ACCOUNT_NAME).expect("the name has no interior NUL");
-        assert!(!set_account_name(&db_path, &unknown, &name));
+        assert!(!set_account_name(&db_path, &unknown, Some(&name)));
 
         let message = last_error_message();
         assert!(
@@ -6557,10 +6561,25 @@ mod tests {
         let (_dir, db_path, account_uuid) = wallet_with_account();
         let name = c"Renamed \xff";
 
-        assert!(!set_account_name(&db_path, &account_uuid, name));
+        assert!(!set_account_name(&db_path, &account_uuid, Some(name)));
 
         let message = last_error_message();
         assert!(message.contains("utf-8"), "{message}");
+        assert_eq!(
+            stored_account_name(&db_path, &account_uuid).as_deref(),
+            Some(FIXTURE_ACCOUNT_NAME)
+        );
+    }
+
+    /// A null name is refused with a last error instead of being read, and the account keeps its
+    /// name.
+    #[test]
+    fn set_account_name_refuses_a_null_name() {
+        let (_dir, db_path, account_uuid) = wallet_with_account();
+
+        assert!(!set_account_name(&db_path, &account_uuid, None));
+
+        assert_eq!(last_error_message(), "no account name was supplied");
         assert_eq!(
             stored_account_name(&db_path, &account_uuid).as_deref(),
             Some(FIXTURE_ACCOUNT_NAME)

@@ -451,8 +451,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `zcashlc_set_account_name(db_data, db_data_len, network_id, account_uuid_bytes, name)` sets the
   name of an account, replacing any name it had; the account's keys and all other state are
   unchanged. `name` is a null-terminated UTF-8 string. It returns `true` on success, and `false`
-  with the last error set when no account has `account_uuid_bytes`, when `name` is not UTF-8, or
-  when the wallet database cannot be written.
+  with the last error set when no account has `account_uuid_bytes`, when `name` is null or not
+  UTF-8, or when the wallet database cannot be written.
 
 ### Changed
 
