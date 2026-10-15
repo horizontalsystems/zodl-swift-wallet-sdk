@@ -3367,10 +3367,12 @@ pub unsafe extern "C" fn zcashlc_propose_shielding(
     unwrap_exc_or_null(res)
 }
 
-/// The expiry height the transaction-building FFIs ask librustzcash for. `None` leaves it to the
-/// builder, as every proposal got before NU7: 40 blocks past the target, or the ZIP 318 rolling
-/// expiry for a canonical crossing, which refuses an explicit expiry. Once NU7 is active at the
-/// target height, 40 blocks are under 17 minutes, so the transaction gets the 120-block default.
+/// The expiry height the transaction-building FFIs ask librustzcash for, as a rule over plain
+/// inputs so it tests without a wallet; `requested_expiry_height` derives the inputs from a
+/// proposal. `None` leaves it to the builder, as every proposal got before NU7: 40 blocks past the
+/// target, or the ZIP 318 rolling expiry for a canonical crossing, which refuses an explicit
+/// expiry. Once NU7 is active at the target height, 40 blocks are under 17 minutes, so the
+/// transaction gets the 120-block default.
 fn explicit_expiry_height<P: Parameters>(
     params: &P,
     target_height: BlockHeight,
@@ -3386,6 +3388,17 @@ fn explicit_expiry_height<P: Parameters>(
 /// Whether any step of `proposal` will be built as a ZIP 318 canonical crossing, asked as
 /// librustzcash's builder asks it: of the wallet's pool-migration parameters, at the canonical fee
 /// for the proposal's target height.
+///
+/// This mirrors, applied to every step, librustzcash's private
+/// `zcash_client_backend::data_api::wallet::step_is_canonical_crossing`, so nothing but this note
+/// ties the two together. Re-check it against that function on every librustzcash bump. If they
+/// disagree, a send either fails with `ExpiryHeightConflictsWithCanonicalCrossing` (an explicit
+/// expiry given to a crossing) or keeps the builder's 40-block expiry (an explicit expiry withheld
+/// from a transaction that could have had 120).
+///
+/// The check, and the explicit expiry it guards (see `explicit_expiry_height`), exist only because
+/// the pinned builder's default expiry is a fixed 40 blocks. Once that default is NU7-aware
+/// upstream, the explicit expiry is redundant and both can go.
 fn proposal_has_canonical_crossing<P, DbT, FeeRuleT, NoteRef>(
     params: &P,
     wallet_db: &DbT,
@@ -3403,6 +3416,26 @@ where
                 .iter()
                 .any(|step| step.is_canonical_crossing(&pool_migration_params, fee))
         },
+    )
+}
+
+/// The expiry height the transaction-building FFIs, `zcashlc_create_proposed_transactions` and
+/// `zcashlc_create_pczt_from_proposal`, ask librustzcash for when they build `proposal`:
+/// [`explicit_expiry_height`] at the proposal's target height, told whether any step is a
+/// canonical crossing. Both go through here so the two builds cannot decide differently.
+fn requested_expiry_height<P, DbT, FeeRuleT, NoteRef>(
+    params: &P,
+    wallet_db: &DbT,
+    proposal: &zcash_client_backend::proposal::Proposal<FeeRuleT, NoteRef>,
+) -> Option<BlockHeight>
+where
+    P: Parameters,
+    DbT: WalletRead,
+{
+    explicit_expiry_height(
+        params,
+        BlockHeight::from(proposal.min_target_height()),
+        proposal_has_canonical_crossing(params, wallet_db, proposal),
     )
 }
 
@@ -3510,11 +3543,7 @@ pub unsafe extern "C" fn zcashlc_create_proposed_transactions(
         }?;
         let proposal = proposal_proto.try_into_standard_proposal(&network, &db_data)?;
         let usk = unsafe { decode_usk(usk_ptr, usk_len) }?;
-        let expiry_height = explicit_expiry_height(
-            &network,
-            BlockHeight::from(proposal.min_target_height()),
-            proposal_has_canonical_crossing(&network, &db_data, &proposal),
-        );
+        let expiry_height = requested_expiry_height(&network, &db_data, &proposal);
 
         let txids = create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
             &mut db_data,
@@ -3648,11 +3677,7 @@ pub unsafe extern "C" fn zcashlc_create_pczt_from_proposal(
         let account_uuid = account_uuid_from_bytes(account_uuid_bytes)?;
 
         if proposal.steps().len() == 1 {
-            let target_expiry_height = explicit_expiry_height(
-                &network,
-                BlockHeight::from(proposal.min_target_height()),
-                proposal_has_canonical_crossing(&network, &db_data, &proposal),
-            );
+            let target_expiry_height = requested_expiry_height(&network, &db_data, &proposal);
             let orchard_pool_padding = BundlePadding::DEFAULT;
             let pczt = create_pczt_from_proposal::<_, _, Infallible, _, Infallible, _>(
                 &mut db_data,
