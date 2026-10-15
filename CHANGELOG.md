@@ -41,7 +41,7 @@ Changes are relative to `5.2.1`.
   `hasOrchard`, `hasUnknownItems` and `hasTransparent` (a P2PKH or a P2SH item). A wallet can use it
   to require an item, such as Orchard, before it imports a key. It returns `nil` when the key is not
   a unified full viewing key for the tool's network, for instance a key created for the other
-  network, and throws `ZcashError.rustDescribeUnifiedFullViewingKey` (`ZRUST0161`) when the check
+  network, and throws `ZcashError.rustDescribeUnifiedFullViewingKey` (`ZRUST0172`) when the check
   itself fails. It reads no database, makes no network request, and puts no part of the key in an
   error.
 - `Synchronizer.findAccountSharingKeyComponents(_:)` tells a wallet what importing a
@@ -50,9 +50,9 @@ Changes are relative to `5.2.1`.
   Sapling or transparent P2PKH viewing key component with the key, and the `kind` of the overlap. An
   `alreadyImported` or `conflicting` import fails, while a `wouldUpgrade` import adds no account and
   replaces that account's viewing key with the key; `importWouldFail` says which. It throws
-  `ZcashError.accountKeyOverlapMultipleAccounts` (`ZRUST0160`) when several accounts share a
+  `ZcashError.accountKeyOverlapMultipleAccounts` (`ZRUST0171`) when several accounts share a
   component, which makes the import fail too, and `ZcashError.rustFindAccountKeyOverlap`
-  (`ZRUST0159`) when the lookup itself fails. The answer is a snapshot, because the lookup and an
+  (`ZRUST0170`) when the lookup itself fails. The answer is a snapshot, because the lookup and an
   import run in separate transactions. It reads the wallet database without changing it, does not
   stop synchronization, and puts no part of the key in an error. A protocol-extension default keeps
   other `Synchronizer` conformers compiling; it throws, so a conformer that offers the lookup must
@@ -92,9 +92,9 @@ Changes are relative to `5.2.1`.
 - `migrationProgress(accountUUID:)` and `recordImmediateMigration(accountUUID:txid:)` use a record
   that `prepare()` now creates, so on a wallet upgraded from an earlier SDK version they throw until
   the synchronizer has been prepared with this version.
-- `ZcashError` and `ZcashErrorCode` gain `rustDescribeUnifiedFullViewingKey` (`ZRUST0161`), which
+- `ZcashError` and `ZcashErrorCode` gain `rustDescribeUnifiedFullViewingKey` (`ZRUST0172`), which
   only `DerivationTool.describeUnifiedFullViewingKey(_:)` throws, and `rustFindAccountKeyOverlap`
-  (`ZRUST0159`) and `accountKeyOverlapMultipleAccounts` (`ZRUST0160`), which only
+  (`ZRUST0170`) and `accountKeyOverlapMultipleAccounts` (`ZRUST0171`), which only
   `Synchronizer.findAccountSharingKeyComponents(_:)` throws. An exhaustive `switch` over either
   stops compiling until they are handled; see `MIGRATING.md`.
 - `Synchronizer.listAccounts()`, and every other API that returns an `Account`, now sets `ufvk` and

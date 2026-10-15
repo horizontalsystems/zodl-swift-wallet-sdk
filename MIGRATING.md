@@ -47,11 +47,11 @@ stores or sends carries the account's viewing key, so keep it only where that ke
 `ZcashError` and `ZcashErrorCode` have three new cases, which only the viewing key checks throw. An
 exhaustive `switch` over either type stops compiling until they are handled.
 
-- `rustDescribeUnifiedFullViewingKey` (`ZRUST0161`): `DerivationTool.describeUnifiedFullViewingKey(_:)`
+- `rustDescribeUnifiedFullViewingKey` (`ZRUST0172`): `DerivationTool.describeUnifiedFullViewingKey(_:)`
   could not check the key.
-- `rustFindAccountKeyOverlap` (`ZRUST0159`): `Synchronizer.findAccountSharingKeyComponents(_:)` could
+- `rustFindAccountKeyOverlap` (`ZRUST0170`): `Synchronizer.findAccountSharingKeyComponents(_:)` could
   not look the key up, for instance because the wallet database could not be read.
-- `accountKeyOverlapMultipleAccounts` (`ZRUST0160`): `Synchronizer.findAccountSharingKeyComponents(_:)`
+- `accountKeyOverlapMultipleAccounts` (`ZRUST0171`): `Synchronizer.findAccountSharingKeyComponents(_:)`
   found more than one account that shares a viewing key component with the key, so importing the key
   would fail.
 

@@ -292,11 +292,11 @@ public enum ZcashErrorCode: String {
     /// Error from rust layer when calling ZcashRustBackend.setTransactionTrust
     case rustSetTransactionTrust = "ZRUST0158"
     /// Error from rust layer when calling ZcashRustBackend.findAccountKeyOverlap
-    case rustFindAccountKeyOverlap = "ZRUST0159"
+    case rustFindAccountKeyOverlap = "ZRUST0170"
     /// More than one account in the wallet shares a viewing key component with the given key.
-    case accountKeyOverlapMultipleAccounts = "ZRUST0160"
+    case accountKeyOverlapMultipleAccounts = "ZRUST0171"
     /// Error from rust layer when calling ZcashKeyDerivationBackend.describeUnifiedFullViewingKey
-    case rustDescribeUnifiedFullViewingKey = "ZRUST0161"
+    case rustDescribeUnifiedFullViewingKey = "ZRUST0172"
     /// Error from rust layer when calling ZcashRustBackend.migrationProgress
     case rustMigrationProgress = "ZRUST0099"
     /// Error from rust layer when calling ZcashRustBackend.migrationIsNoteSplitNeeded
