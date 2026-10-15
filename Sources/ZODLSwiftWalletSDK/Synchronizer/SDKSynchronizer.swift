@@ -9,7 +9,7 @@
 import Foundation
 import Combine
 
-/// Synchronizer implementation for UIKit and iOS 13+
+/// Synchronizer implementation for UIKit and iOS 16+
 // swiftlint:disable type_body_length file_length
 public class SDKSynchronizer: AwaitableStopSynchronizer {
     public var alias: ZcashSynchronizerAlias { initializer.alias }

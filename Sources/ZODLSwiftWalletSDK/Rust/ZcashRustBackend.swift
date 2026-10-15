@@ -103,13 +103,11 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
     /// `Migration/OrchardMigration.swift`'s `init(config:)`, both of which construct a
     /// `ZcashRustBackend`) both observe "not yet initialized" and both call in.
     ///
-    /// `OSAllocatedUnfairLock` (the user's stated global preference for new locking code) requires
-    /// iOS 16 / macOS 13; this package's `Package.swift` declares `.iOS(.v13)` / `.macOS(.v12)`, and
-    /// `OSAllocatedUnfairLock` does not typecheck against that deployment target (verified directly:
-    /// `swiftc -target arm64-apple-macos12.0 -typecheck` on a minimal use fails with "'OSAllocatedUnfairLock'
-    /// is only available in macOS 13.0 or newer"). Per that same preference's own stated fallback --
-    /// "below iOS 16, use NSLock" -- this uses `NSLock`, matching the plain-`NSLock` convention already
-    /// used elsewhere in this codebase (`Utils/DIContainer.swift`, `Utils/UsedAliasesChecker.swift`).
+    /// `NSLock` rather than `OSAllocatedUnfairLock`: this was written while the package still supported
+    /// iOS 13 / macOS 12, below that lock's iOS 16 / macOS 13 floor, and it matches the plain-`NSLock`
+    /// convention used elsewhere in this codebase (`Utils/DIContainer.swift`,
+    /// `Utils/UsedAliasesChecker.swift`). The package's iOS 16 / macOS 14 floor now allows
+    /// `OSAllocatedUnfairLock`.
     private static let rustInitLock = NSLock()
     private static var rustInitialized = false
 

@@ -323,8 +323,7 @@ private final class HostSyncBlockedPublisher: @unchecked Sendable {
     private let blockedSubject: CurrentValueSubject<Bool, Never>
 
     /// Guards the send-generation counters and serializes `blockedSubject.send(_:)`. See
-    /// ``MigrationSyncGate``'s `emissionLock` for why `NSLock` here rather than `OSAllocatedUnfairLock`
-    /// (the package deployment target predates the latter's availability floor).
+    /// ``MigrationSyncGate``'s `emissionLock` for why `NSLock` here rather than `OSAllocatedUnfairLock`.
     private let emissionLock = NSLock()
     private var nextGeneration: UInt64 = 0
     private var lastPublishedGeneration: UInt64 = 0

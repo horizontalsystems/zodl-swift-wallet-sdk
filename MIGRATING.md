@@ -50,6 +50,27 @@ bridged to `NSError` has the domain `ZODLSwiftWalletSDK.ZcashError`, and the SPM
 is `zodl-swift-wallet-sdk_ZODLSwiftWalletSDK.bundle`. Match on `ZcashError`'s code or cases
 rather than on either string.
 
+## Minimum platforms raised — iOS 16 and macOS 14
+
+`Package.swift` now declares `.iOS(.v16)` and `.macOS(.v14)`, and the `libzcashlc` XCFramework is built
+for the same minimums. SwiftPM refuses a dependency whose platforms are newer than the depending target's,
+so raise yours to at least these:
+
+```swift
+// Before
+platforms: [.iOS(.v13), .macOS(.v12)]
+
+// After
+platforms: [.iOS(.v16), .macOS(.v14)]
+```
+
+`.macOS(.v14)` exists from `PackageDescription` 5.9, and `.iOS(.v16)` from 5.7. If your own manifest
+declares an older `swift-tools-version`, spell the platforms as strings instead:
+`platforms: [.iOS("16.0"), .macOS("14.0")]`.
+
+In an Xcode project, set the iOS Deployment Target to 16.0 and the macOS Deployment Target to 14.0
+(`IPHONEOS_DEPLOYMENT_TARGET`, `MACOSX_DEPLOYMENT_TARGET`).
+
 ## `RustErrorKind` gained a case — `anchorNotFound`
 
 `RustErrorKind`, the type of `RedactedRustError.kind`, has a new case, `anchorNotFound`: creating
