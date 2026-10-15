@@ -91,6 +91,9 @@ use zcash_protocol::{
 use zcash_script::script;
 use zip32::fingerprint::SeedFingerprint;
 
+// Only the tests call these helpers until the FFI functions that expose them exist.
+#[cfg_attr(not(test), allow(dead_code))]
+mod block_spacing;
 /// cbindgen:ignore
 #[cfg(target_vendor = "apple")]
 mod darwin_qos;
