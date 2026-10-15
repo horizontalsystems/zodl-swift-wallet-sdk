@@ -24,6 +24,12 @@ final class ChainTipEstimatorTests: XCTestCase {
         MigrationBlockRateSample(height: height, unixTime: unixTime)
     }
 
+    /// Every estimator is built here, at mainnet heights where blocks have been 75 s since Blossom
+    /// and there is no NU7, so the suite pins single-spacing behavior however construction changes.
+    private func makeEstimator(_ samples: [MigrationBlockRateSample]) -> ChainTipEstimator {
+        ChainTipEstimator(samples: samples)
+    }
+
     // MARK: - Constants
 
     /// Pins the constants -- a regression here is a silent behavior change, not a cosmetic one.
@@ -40,12 +46,12 @@ final class ChainTipEstimatorTests: XCTestCase {
     // MARK: - secondsPerBlock(): fallback
 
     func testSecondsPerBlockFallsBackWithNoSamples() {
-        let estimator = ChainTipEstimator(samples: [])
+        let estimator = makeEstimator([])
         XCTAssertEqual(estimator.secondsPerBlock(), 75)
     }
 
     func testSecondsPerBlockFallsBackWithExactlyOneSample() {
-        let estimator = ChainTipEstimator(samples: [s(1_000_000, 1_700_000_000)])
+        let estimator = makeEstimator([s(1_000_000, 1_700_000_000)])
         XCTAssertEqual(estimator.secondsPerBlock(), 75)
     }
 
@@ -53,8 +59,8 @@ final class ChainTipEstimatorTests: XCTestCase {
     /// is a broken measurement, not an infinitely fast chain -- it must fall back, never clamp to
     /// the floor (the floor would be the maximum-overshoot answer).
     func testSecondsPerBlockFallsBackWhenTheTimeSpanDoesNotAdvance() {
-        let stalled = ChainTipEstimator(samples: [s(1_000_000, 1_700_000_000), s(1_000_001, 1_700_000_000)])
-        let backward = ChainTipEstimator(samples: [s(1_000_000, 1_700_000_000), s(1_000_001, 1_699_999_000)])
+        let stalled = makeEstimator([s(1_000_000, 1_700_000_000), s(1_000_001, 1_700_000_000)])
+        let backward = makeEstimator([s(1_000_000, 1_700_000_000), s(1_000_001, 1_699_999_000)])
 
         XCTAssertEqual(stalled.secondsPerBlock(), 75)
         XCTAssertEqual(backward.secondsPerBlock(), 75)
@@ -63,7 +69,7 @@ final class ChainTipEstimatorTests: XCTestCase {
     /// A hand-built window spanning no height (the DB cannot produce one -- height is the primary
     /// key) still answers the fallback rather than dividing by zero.
     func testSecondsPerBlockFallsBackWhenTheHeightSpanIsZero() {
-        let estimator = ChainTipEstimator(samples: [s(1_000_000, 1_700_000_000), s(1_000_000, 1_700_000_060)])
+        let estimator = makeEstimator([s(1_000_000, 1_700_000_000), s(1_000_000, 1_700_000_060)])
         XCTAssertEqual(estimator.secondsPerBlock(), 75)
     }
 
@@ -71,7 +77,7 @@ final class ChainTipEstimatorTests: XCTestCase {
 
     /// The boundary: exactly two samples is enough to stop falling back and measure a real span.
     func testSecondsPerBlockComputesASpanWithExactlyTwoSamples() {
-        let estimator = ChainTipEstimator(samples: [s(1_000_000, 1_700_000_000), s(1_000_001, 1_700_000_060)])
+        let estimator = makeEstimator([s(1_000_000, 1_700_000_000), s(1_000_001, 1_700_000_060)])
         XCTAssertEqual(estimator.secondsPerBlock(), 60)
     }
 
@@ -79,7 +85,7 @@ final class ChainTipEstimatorTests: XCTestCase {
     /// with no clamps engaged the old delta mean agreed -- the statistics only diverge on bimodal
     /// spacing or non-adjacent heights, pinned below.)
     func testSecondsPerBlockIsTheSpanOfTheWindow() {
-        let estimator = ChainTipEstimator(samples: [
+        let estimator = makeEstimator([
             s(1_000_000, 1_700_000_000),
             s(1_000_001, 1_700_000_060),
             s(1_000_002, 1_700_000_130),
@@ -101,7 +107,7 @@ final class ChainTipEstimatorTests: XCTestCase {
             time += index == 9 ? 300 : 2
         }
 
-        let estimator = ChainTipEstimator(samples: samples)
+        let estimator = makeEstimator(samples)
 
         XCTAssertEqual(estimator.secondsPerBlock(), 31.8, accuracy: 0.0001)
     }
@@ -110,7 +116,7 @@ final class ChainTipEstimatorTests: XCTestCase {
     /// spanning twenty blocks and 1500 s is 75 s/block. The old statistic read the same fixture
     /// as two 750 s "spacings", clamped both to 150, and answered exactly double.
     func testSecondsPerBlockDividesByHeightSpanNotRowCount() {
-        let estimator = ChainTipEstimator(samples: [
+        let estimator = makeEstimator([
             s(1_000_000, 0),
             s(1_000_010, 750),
             s(1_000_020, 1_500)
@@ -122,15 +128,15 @@ final class ChainTipEstimatorTests: XCTestCase {
     /// single OLDEST sample sits a wild 100 000 s before the rest must measure the same span as
     /// the same fixture with that oldest sample removed.
     func testSecondsPerBlockOnlyConsidersTheLastSampleWindowSamples() {
-        var samples: [MigrationBlockRateSample] = [s(0, 0)]
+        var samples: [MigrationBlockRateSample] = [s(3_000_000, 0)]
         var time: Int64 = 100_000
         for index in 1...1_000 {
-            samples.append(s(BlockHeight(index), time))
+            samples.append(s(BlockHeight(3_000_000 + index), time))
             time += 60
         }
 
-        let estimator = ChainTipEstimator(samples: samples)
-        let estimatorWithoutOutlier = ChainTipEstimator(samples: Array(samples.dropFirst()))
+        let estimator = makeEstimator(samples)
+        let estimatorWithoutOutlier = makeEstimator(Array(samples.dropFirst()))
 
         XCTAssertEqual(estimator.secondsPerBlock(), 60, "the outlier at index 0 must fall outside the last-1000-sample window")
         XCTAssertEqual(estimator.secondsPerBlock(), estimatorWithoutOutlier.secondsPerBlock())
@@ -148,7 +154,7 @@ final class ChainTipEstimatorTests: XCTestCase {
             time += index < 1_000 ? 31 : 20
         }
 
-        let estimator = ChainTipEstimator(samples: samples)
+        let estimator = makeEstimator(samples)
 
         // suffix(1000) spans 999 heights: 900 deltas at 31 s + 99 at 20 s.
         XCTAssertEqual(estimator.secondsPerBlock(), (900.0 * 31.0 + 99.0 * 20.0) / 999.0, accuracy: 0.0001)
@@ -161,7 +167,7 @@ final class ChainTipEstimatorTests: XCTestCase {
     /// retired statistic clamped each delta first and answered 77.5 -- a plausible-looking number
     /// manufactured from two implausible ones, which is exactly how it hid.)
     func testSecondsPerBlockClampsTheFinalRateNotEachDelta() {
-        let estimator = ChainTipEstimator(samples: [
+        let estimator = makeEstimator([
             s(1_000_000, 0),
             s(1_000_001, 2),
             s(1_000_002, 502)
@@ -170,7 +176,7 @@ final class ChainTipEstimatorTests: XCTestCase {
     }
 
     func testSecondsPerBlockResultNeverGoesBelowTheFloor() {
-        let estimator = ChainTipEstimator(samples: [
+        let estimator = makeEstimator([
             s(1_000_000, 0),
             s(1_000_001, 1),
             s(1_000_002, 2)
@@ -179,7 +185,7 @@ final class ChainTipEstimatorTests: XCTestCase {
     }
 
     func testSecondsPerBlockResultNeverGoesAboveTheCeiling() {
-        let estimator = ChainTipEstimator(samples: [
+        let estimator = makeEstimator([
             s(1_000_000, 0),
             s(1_000_001, 150),
             s(1_000_002, 300)
@@ -223,7 +229,7 @@ final class ChainTipEstimatorTests: XCTestCase {
             s(4244934, 1786138100), s(4244935, 1786138116), s(4244936, 1786138124), s(4244937, 1786138142), s(4244938, 1786138183)
         ]
 
-        let estimator = ChainTipEstimator(samples: samples)
+        let estimator = makeEstimator(samples)
 
         XCTAssertEqual(estimator.secondsPerBlock(), 1_996.0 / 99.0, accuracy: 0.0001, "20.16 s/block -- the window's true span")
     }
@@ -231,7 +237,7 @@ final class ChainTipEstimatorTests: XCTestCase {
     // MARK: - estimatedTip(now:): nil with no samples
 
     func testEstimatedTipIsNilWithNoSamples() {
-        let estimator = ChainTipEstimator(samples: [])
+        let estimator = makeEstimator([])
         XCTAssertNil(estimator.estimatedTip(now: referenceDate))
     }
 
@@ -241,7 +247,7 @@ final class ChainTipEstimatorTests: XCTestCase {
     /// (fallback, one sample) is 2.66\u{2026} blocks -- floor gives 2, whereas rounding would give 3.
     func testEstimatedTipFloorsThePartialBlockRatherThanRounding() {
         let latest = s(2_000_000, Int64(referenceDate.timeIntervalSince1970))
-        let estimator = ChainTipEstimator(samples: [latest])
+        let estimator = makeEstimator([latest])
 
         let tip = estimator.estimatedTip(now: referenceDate.addingTimeInterval(200))
 
@@ -252,7 +258,7 @@ final class ChainTipEstimatorTests: XCTestCase {
     /// off-by-one from floating-point wobble at an exact boundary).
     func testEstimatedTipAtAnExactBlockBoundary() {
         let latest = s(2_000_000, Int64(referenceDate.timeIntervalSince1970))
-        let estimator = ChainTipEstimator(samples: [latest])
+        let estimator = makeEstimator([latest])
 
         let tip = estimator.estimatedTip(now: referenceDate.addingTimeInterval(150))
 
@@ -265,7 +271,7 @@ final class ChainTipEstimatorTests: XCTestCase {
     /// against a stale `now`) must never project BACKWARD past the latest known height.
     func testEstimatedTipClampsNegativeElapsedToTheLatestSampleHeight() {
         let latest = s(2_000_000, Int64(referenceDate.timeIntervalSince1970))
-        let estimator = ChainTipEstimator(samples: [latest])
+        let estimator = makeEstimator([latest])
 
         let tipBeforeLatest = estimator.estimatedTip(now: referenceDate.addingTimeInterval(-1_000))
         let tipExactlyAtLatest = estimator.estimatedTip(now: referenceDate)
@@ -277,7 +283,7 @@ final class ChainTipEstimatorTests: XCTestCase {
     /// The latest (last) sample's height is always the projection's floor, regardless of how many
     /// earlier samples exist.
     func testEstimatedTipProjectsFromTheLatestSampleNotTheFirst() {
-        let estimator = ChainTipEstimator(samples: [
+        let estimator = makeEstimator([
             s(1_000_000, 0),
             s(1_000_010, 600)
         ])
@@ -299,10 +305,15 @@ final class ChainTipEstimatorTests: XCTestCase {
             time += 31
         }
         let latestTime = samples[samples.count - 1].unixTime
-        let estimator = ChainTipEstimator(samples: samples)
+        let estimator = makeEstimator(samples)
 
         let tip = estimator.estimatedTip(now: Date(timeIntervalSince1970: TimeInterval(latestTime + 27_900)))
 
         XCTAssertEqual(tip, 3_000_999 + 900, "floor(27900 / 31) == 900 blocks across the absence")
+    }
+
+    func testEstimatedTipProjectsAMonthAtOneRateOnMainnet() {
+        let estimator = makeEstimator([s(3_000_000, Int64(referenceDate.timeIntervalSince1970))])
+        XCTAssertEqual(estimator.estimatedTip(now: referenceDate.addingTimeInterval(30 * 24 * 60 * 60)), 3_034_560)
     }
 }

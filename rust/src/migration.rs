@@ -5249,6 +5249,19 @@ mod tests {
         assert!(!immediate_run_pending(&run, h(141)));
     }
 
+    // ----- characterization at mainnet heights (75 s blocks since Blossom, no NU7): pinned before the
+    // duration and immediate-run window learn the target spacing; each goes through one helper. -----
+
+    fn mainnet_immediate_run_pending(recorded_at: u32, tip: u32) -> bool {
+        immediate_run_pending(&immediate_lookup(recorded_at, None, None), h(tip))
+    }
+
+    #[test]
+    fn mainnet_immediate_run_without_a_known_expiry_is_pending_for_40_blocks() {
+        assert!(mainnet_immediate_run_pending(3_000_000, 3_000_040));
+        assert!(!mainnet_immediate_run_pending(3_000_000, 3_000_041));
+    }
+
     #[test]
     fn transfer_amount_is_net_of_fee_buffer() {
         let state = test_state(
@@ -5497,6 +5510,31 @@ mod tests {
         let a = transfer_at(0, 900_000);
         let b = transfer_at(1, 950_000);
         assert_eq!(stored_duration_hours(&[&a, &b], h(1_000_000)), 0);
+    }
+
+    fn mainnet_duration_hours(broadcast_heights: &[u32], now: u32) -> u32 {
+        estimated_duration_hours(broadcast_heights.iter().copied().map(h), h(now))
+    }
+
+    fn mainnet_stored_duration_hours(scheduled_heights: &[u32], now: u32) -> u32 {
+        let owned: Vec<MigrationTransaction> = scheduled_heights
+            .iter()
+            .enumerate()
+            .map(|(id, &height)| transfer_at(u32::try_from(id).unwrap(), height))
+            .collect();
+        let refs: Vec<&MigrationTransaction> = owned.iter().collect();
+        stored_duration_hours(&refs, h(now))
+    }
+
+    #[test]
+    fn mainnet_duration_hours_count_48_blocks_an_hour() {
+        for hours in [mainnet_duration_hours, mainnet_stored_duration_hours] {
+            assert_eq!(hours(&[3_000_047], 3_000_000), 0);
+            assert_eq!(hours(&[3_000_048], 3_000_000), 1);
+            assert_eq!(hours(&[3_000_100, 3_001_000], 3_000_000), 20);
+            assert_eq!(hours(&[3_034_560], 3_000_000), 720);
+            assert_eq!(hours(&[2_999_000], 3_000_000), 0);
+        }
     }
 
     /// The DTO-constructing encode path end to end: `encode_schedule_from_state` must thread its
