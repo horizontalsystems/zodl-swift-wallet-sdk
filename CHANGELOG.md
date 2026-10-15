@@ -53,6 +53,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or Sapling activation, for some dates: those just after a checkpoint's time, those equal to one, and early
   dates near the start of either chain. Restores from such a date scanned more blocks than needed. No caller
   changes are required.
+- `checkSingleUseTransparentAddresses(accountUUID:)` checks addresses exposed within the past day of target
+  time and spaces rechecks by the target spacing at the tip; after NU7 it looked back eight hours and
+  rescheduled three times too far out. Nothing changes before NU7.
 
 # 6.0.0 - 2026-10-15
 

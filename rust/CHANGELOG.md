@@ -923,6 +923,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `zcashlc_slipstream_snapshot`'s `tip_fresh` survives a `zcashlc_slipstream_stop` → `zcashlc_slipstream_start`
   gap shorter than 1.6 target block intervals of the block after the handle's last known chain tip: 120 s
   before NU7, as before, and 40 s once that block is a 25-second NU7 block. With no known tip, 120 s.
+- `zcashlc_tor_lwd_conn_check_single_use_taddr` looks back over addresses exposed within one day of target
+  time before the chain tip, and delays rechecks by the target spacing of the next block. Both assumed 75 s,
+  so after NU7 the look-back covered eight hours and rechecks were three times too far out. Unchanged before NU7.
 
 ## 2.8.0-rc.2 - 2026-07-28
 

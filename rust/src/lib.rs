@@ -5213,6 +5213,23 @@ pub unsafe extern "C" fn zcashlc_tor_lwd_conn_fetch_utxos_by_address(
     unwrap_exc_or_null(res)
 }
 
+/// How many blocks back the single-use transparent address check looks: the blocks within one day
+/// of target time before `tip` (1,152 at 75 s, 3,456 at 25 s).
+fn single_use_taddr_exposure_depth<P: Parameters>(params: &P, tip: BlockHeight) -> u32 {
+    const ONE_DAY_SECONDS: i64 = 24 * 60 * 60;
+    tip - block_spacing::height_after_target_seconds(params, tip, -ONE_DAY_SECONDS)
+}
+
+/// The delay before an address that received nothing is checked again: `offset_blocks` blocks at
+/// the target spacing of the block after `tip`. It always fits a `u32`.
+fn single_use_taddr_check_offset_seconds<P: Parameters>(
+    params: &P,
+    tip: BlockHeight,
+    offset_blocks: f64,
+) -> u32 {
+    (offset_blocks * f64::from(block_spacing::pow_target_spacing(params, tip + 1))).round() as u32
+}
+
 /// Checks to find any single-use ephemeral addresses exposed in the past day that have not yet
 /// received funds, excluding any whose next check time is in the future. This will then choose the
 /// address that is most overdue for checking, retrieve any UTXOs for that address over Tor, and
@@ -5257,8 +5274,11 @@ pub unsafe extern "C" fn zcashlc_tor_lwd_conn_check_single_use_taddr(
         let lwd_conn = unsafe { lwd_conn.as_mut() }
             .ok_or_else(|| anyhow!("A Tor lightwalletd connection is required"))?;
 
-        // one day's worth of blocks.
-        let max_exposure_depth = (24 * 60 * 60) / 75;
+        // The look-back is measured back from the chain tip, so the tip is read first.
+        let cur_height = db_data
+            .chain_height()?
+            .ok_or(SqliteClientError::ChainHeightUnknown)?;
+        let max_exposure_depth = single_use_taddr_exposure_depth(&network, cur_height);
         let addrs =
             db_data.get_ephemeral_transparent_receivers(account_uuid, max_exposure_depth, true)?;
 
@@ -5272,10 +5292,6 @@ pub unsafe extern "C" fn zcashlc_tor_lwd_conn_check_single_use_taddr(
                     && matches!(meta.exposure(), Exposure::Exposed { .. })
             })
             .min_by_key(|(_, meta)| meta.next_check_time());
-
-        let cur_height = db_data
-            .chain_height()?
-            .ok_or(SqliteClientError::ChainHeightUnknown)?;
 
         let mut found = None;
         if let Some((addr, meta)) = selected_addr_meta {
@@ -5313,9 +5329,8 @@ pub unsafe extern "C" fn zcashlc_tor_lwd_conn_check_single_use_taddr(
                 // We will schedule the next check to occur after approximately
                 // log2(blocks_since_exposure) additional blocks.
                 let offset_blocks = blocks_since_exposure.log2();
-                // Convert the offset in blocks to an offset in seconds; this will always fit in a
-                // u32.
-                let offset_seconds = (offset_blocks * 75.0).round() as u32;
+                let offset_seconds =
+                    single_use_taddr_check_offset_seconds(&network, cur_height, offset_blocks);
                 db_data.schedule_next_check(&addr, offset_seconds)?;
             }
         }
@@ -9430,6 +9445,73 @@ mod tip_fresh_stop_window_tests {
         assert_eq!(
             tip_fresh_stop_window(&Network::TestNetwork, u64::from(u32::MAX)),
             Duration::from_secs(40)
+        );
+    }
+}
+
+#[cfg(test)]
+mod single_use_taddr_timing_tests {
+    use super::{single_use_taddr_check_offset_seconds, single_use_taddr_exposure_depth};
+    use zcash_protocol::consensus::{BlockHeight, Network};
+
+    const TESTNET_NU7: u32 = 4_465_026;
+
+    fn h(height: u32) -> BlockHeight {
+        BlockHeight::from_u32(height)
+    }
+
+    #[test]
+    fn the_look_back_is_one_day_of_target_time() {
+        assert_eq!(
+            single_use_taddr_exposure_depth(&Network::MainNetwork, h(3_000_000)),
+            1_152
+        );
+        assert_eq!(
+            single_use_taddr_exposure_depth(&Network::TestNetwork, h(TESTNET_NU7 - 1)),
+            1_152
+        );
+        assert_eq!(
+            single_use_taddr_exposure_depth(&Network::TestNetwork, h(TESTNET_NU7 + 5_000)),
+            3_456
+        );
+        // 1,001 blocks of 25 s and 818 of 75 s fill 86,375 of the 86,400 s.
+        assert_eq!(
+            single_use_taddr_exposure_depth(&Network::TestNetwork, h(TESTNET_NU7 + 1_000)),
+            1_819
+        );
+        assert_eq!(
+            single_use_taddr_exposure_depth(&Network::MainNetwork, h(100)),
+            100
+        );
+    }
+
+    /// log2(10) blocks: 249 s at 75-second blocks, 83 s at 25-second ones.
+    #[test]
+    fn the_recheck_delay_uses_the_spacing_of_the_next_block() {
+        let offset_blocks = 10f64.log2();
+        assert_eq!(
+            single_use_taddr_check_offset_seconds(
+                &Network::MainNetwork,
+                h(3_000_000),
+                offset_blocks
+            ),
+            249
+        );
+        assert_eq!(
+            single_use_taddr_check_offset_seconds(
+                &Network::TestNetwork,
+                h(TESTNET_NU7 - 2),
+                offset_blocks
+            ),
+            249
+        );
+        assert_eq!(
+            single_use_taddr_check_offset_seconds(
+                &Network::TestNetwork,
+                h(TESTNET_NU7 - 1),
+                offset_blocks
+            ),
+            83
         );
     }
 }
