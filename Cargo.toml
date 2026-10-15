@@ -185,6 +185,18 @@ crate-type = ["staticlib"]
 [profile.release]
 lto = true
 
+# Build scripts and proc macros, which run on the build machine, stay unstripped. A release build
+# strips them by default, and on macOS rustc does that with its bundled rust-objcopy, which writes
+# the Mach-O string table straight after the indirect symbol table without padding it to 8 bytes,
+# so the string table is misaligned whenever the indirect symbol table has an odd number of
+# entries. macOS 27's dyld refuses to load such a proc macro, and the build fails with "mis-aligned
+# LINKEDIT string pool" or "can't find crate". BuildSupport/Makefile's MACOSX_DEPLOYMENT_TARGET
+# reaches them too, and linked for macOS 14 every one of them came out misaligned. The linker's own
+# output is aligned. The static libraries the SDK ships were never stripped, so this setting does
+# not apply to them.
+[profile.release.build-override]
+strip = false
+
 [patch.crates-io]
 # To build against an unreleased slipstream revision, patch it in here by COMMIT HASH rather than a
 # branch: a branch pin silently follows a force-push, so a build can pick up code nobody reviewed,

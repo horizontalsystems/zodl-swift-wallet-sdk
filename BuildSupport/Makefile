@@ -17,7 +17,9 @@ ALL_ARCHS = $(IOS_DEVICE_ARCHS) $(IOS_SIM_ARCHS) $(MACOS_ARCHS)
 # Without them, C that a dependency's build script compiles (lzma-sys, zstd-sys,
 # ring) took the Xcode SDK's own version as its minimum, so an Xcode 27 build
 # claimed macOS and iOS 27. IPHONEOS_DEPLOYMENT_TARGET also covers the
-# simulator slices.
+# simulator slices. rustc applies MACOSX_DEPLOYMENT_TARGET to the build scripts
+# and proc macros it builds for this Mac as well; ../Cargo.toml's
+# [profile.release.build-override] explains why those stay unstripped.
 MACOSX_DEPLOYMENT_TARGET = 14.0
 IPHONEOS_DEPLOYMENT_TARGET = 16.0
 
