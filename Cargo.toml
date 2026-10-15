@@ -235,17 +235,21 @@ zakura-wallet-lib = { git = "https://github.com/zodl-inc/zakura-wallet-libraries
 # author and reviewer should have certainty that the revision *will end up
 # merged to `main`* so that commits in our history can always be successfully
 # built.
-#pczt = { git = "https://github.com/zcash/librustzcash", rev = "13ce6c4ef57a6c7e8837d797d85112ae16ac7455" }
-#zcash_address = { git = "https://github.com/zcash/librustzcash", rev = "13ce6c4ef57a6c7e8837d797d85112ae16ac7455" }
-#zcash_client_backend = { git = "https://github.com/zcash/librustzcash", rev = "13ce6c4ef57a6c7e8837d797d85112ae16ac7455" }
-#zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash", rev = "13ce6c4ef57a6c7e8837d797d85112ae16ac7455" }
-#zcash_keys = { git = "https://github.com/zcash/librustzcash", rev = "13ce6c4ef57a6c7e8837d797d85112ae16ac7455" }
-#zcash_pool_migration = { git = "https://github.com/zcash/librustzcash", rev = "13ce6c4ef57a6c7e8837d797d85112ae16ac7455" }
-#zcash_primitives = { git = "https://github.com/zcash/librustzcash", rev = "13ce6c4ef57a6c7e8837d797d85112ae16ac7455" }
-#zcash_proofs = { git = "https://github.com/zcash/librustzcash", rev = "13ce6c4ef57a6c7e8837d797d85112ae16ac7455" }
-#zcash_protocol = { git = "https://github.com/zcash/librustzcash", rev = "13ce6c4ef57a6c7e8837d797d85112ae16ac7455" }
-#zcash_transparent = { git = "https://github.com/zcash/librustzcash", rev = "13ce6c4ef57a6c7e8837d797d85112ae16ac7455" }
-#zip321 = { git = "https://github.com/zcash/librustzcash", rev = "13ce6c4ef57a6c7e8837d797d85112ae16ac7455" }
+# Carries `WalletDb::set_account_name` until the next librustzcash pre-release round publishes it.
+equihash = { git = "https://github.com/zcash/librustzcash", rev = "cbf8984db61e2f7fbf95fc62a4dbd41231dfe822" }
+f4jumble = { git = "https://github.com/zcash/librustzcash", rev = "cbf8984db61e2f7fbf95fc62a4dbd41231dfe822" }
+pczt = { git = "https://github.com/zcash/librustzcash", rev = "cbf8984db61e2f7fbf95fc62a4dbd41231dfe822" }
+zcash_address = { git = "https://github.com/zcash/librustzcash", rev = "cbf8984db61e2f7fbf95fc62a4dbd41231dfe822" }
+zcash_client_backend = { git = "https://github.com/zcash/librustzcash", rev = "cbf8984db61e2f7fbf95fc62a4dbd41231dfe822" }
+zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash", rev = "cbf8984db61e2f7fbf95fc62a4dbd41231dfe822" }
+zcash_encoding = { git = "https://github.com/zcash/librustzcash", rev = "cbf8984db61e2f7fbf95fc62a4dbd41231dfe822" }
+zcash_keys = { git = "https://github.com/zcash/librustzcash", rev = "cbf8984db61e2f7fbf95fc62a4dbd41231dfe822" }
+zcash_pool_migration = { git = "https://github.com/zcash/librustzcash", rev = "cbf8984db61e2f7fbf95fc62a4dbd41231dfe822" }
+zcash_primitives = { git = "https://github.com/zcash/librustzcash", rev = "cbf8984db61e2f7fbf95fc62a4dbd41231dfe822" }
+zcash_proofs = { git = "https://github.com/zcash/librustzcash", rev = "cbf8984db61e2f7fbf95fc62a4dbd41231dfe822" }
+zcash_protocol = { git = "https://github.com/zcash/librustzcash", rev = "cbf8984db61e2f7fbf95fc62a4dbd41231dfe822" }
+zcash_transparent = { git = "https://github.com/zcash/librustzcash", rev = "cbf8984db61e2f7fbf95fc62a4dbd41231dfe822" }
+zip321 = { git = "https://github.com/zcash/librustzcash", rev = "cbf8984db61e2f7fbf95fc62a4dbd41231dfe822" }
 
 # The Ledger tests build the Orchard proving key once, to extract and verify a proof-bearing
 # transaction a device signed. Key generation synthesizes the Orchard circuit, which takes minutes
