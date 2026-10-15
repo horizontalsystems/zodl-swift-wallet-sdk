@@ -910,6 +910,16 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error instead (a stray table used to make an empty file look like a wallet).
 - Decode errors from `zcashlc_import_account_ufvk`, `zcashlc_derive_address_from_ufvk`,
   `zcashlc_derive_address_from_uivk` and `zcashlc_slipstream_start` no longer contain the key.
+- `zcashlc_create_proposed_transactions` and `zcashlc_create_pczt_from_proposal` give a proposal whose
+  target height has NU7 active an expiry 120 blocks after that height, where librustzcash's builder
+  would give 40: the 50 minutes 40 blocks took at 75 seconds. A proposal with any ZIP 318 canonical
+  crossing step keeps the ZIP 318 expiry; nothing changes before NU7.
+  From NU7 activation, a payment to a ZIP 316 revision 2 unified address whose expiry height falls
+  before the new default expiry (target height + 120) but not before the old one (target height + 40),
+  which used to succeed, is still proposed but fails here: `zcashlc_create_proposed_transactions`
+  returns null with `zcashlc_take_last_error_report` reporting `ErrorKind::Unclassified` (`0`), and
+  `zcashlc_create_pczt_from_proposal` returns null with the address expiry conflict in the last error
+  message.
 
 ## 2.8.0-rc.2 - 2026-07-28
 

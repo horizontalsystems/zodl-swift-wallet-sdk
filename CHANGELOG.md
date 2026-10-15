@@ -19,6 +19,19 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registered it fails an assertion in debug builds and follows the 75-second schedule in release builds.
 - `ZcashSDK.nu7ConsensusBranchID` (`0x77190ad9`) is the consensus branch ID of NU7, next to `nu63ConsensusBranchID`.
 
+## Fixed
+
+- Transactions created by `createProposedTransactions(proposal:spendingKey:)`,
+  `createProposedTransactions(proposal:spendingKey:ovkPolicy:)` or `createPCZTFromProposal(accountUUID:proposal:)`
+  at a target height with NU7 active (testnet from 4,465,026) expired after 40 blocks, about 17 minutes
+  of 25-second blocks; they now expire after 120, the 50 minutes they have before NU7. ZIP 318
+  canonical crossings keep their ZIP 318 expiry, and nothing changes before NU7.
+  From NU7 activation, a payment to a ZIP 316 revision 2 unified address whose expiry height falls
+  before the new default expiry (target height + 120) but not before the old one (target height + 40),
+  which used to succeed, is still proposed but fails at creation: `createProposedTransactions` throws
+  `ZcashError.rustCreateToAddress` (`ZRUST0002`) with `RustErrorKind.unclassified`, and
+  `createPCZTFromProposal` throws `ZcashError.rustCreatePCZTFromProposal` (`ZRUST0069`).
+
 # 6.0.0 - 2026-10-15
 
 Changes are relative to `5.2.2`.
