@@ -64,7 +64,7 @@ Changes are relative to `5.2.1`.
 - `Synchronizer.renameAccount(_:name:)` stores a new name for an account in the wallet database,
   replacing any name it had. The account's keys and all other state are unchanged, and
   `listAccounts()` returns the new name afterwards. It throws the new `ZcashError.rustSetAccountName`
-  (`ZRUST0162`) when the name cannot be stored, for example when no account has the given UUID or
+  (`ZRUST0173`) when the name cannot be stored, for example when no account has the given UUID or
   the name contains a null character. It does not stop synchronization. A protocol-extension default
   keeps other `Synchronizer` conformers compiling; it throws, so a conformer that offers renaming
   must implement it.
@@ -102,7 +102,7 @@ Changes are relative to `5.2.1`.
 - `ZcashError` and `ZcashErrorCode` gain `rustDescribeUnifiedFullViewingKey` (`ZRUST0172`), which
   only `DerivationTool.describeUnifiedFullViewingKey(_:)` throws, `rustFindAccountKeyOverlap`
   (`ZRUST0170`) and `accountKeyOverlapMultipleAccounts` (`ZRUST0171`), which only
-  `Synchronizer.findAccountSharingKeyComponents(_:)` throws, and `rustSetAccountName` (`ZRUST0162`),
+  `Synchronizer.findAccountSharingKeyComponents(_:)` throws, and `rustSetAccountName` (`ZRUST0173`),
   which only `Synchronizer.renameAccount(_:name:)` throws. An exhaustive `switch` over either stops
   compiling until they are handled; see `MIGRATING.md`.
 - `Synchronizer.listAccounts()`, and every other API that returns an `Account`, now sets `ufvk` and

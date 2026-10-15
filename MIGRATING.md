@@ -70,7 +70,7 @@ case .accountKeyOverlapMultipleAccounts:
 
 ## `ZcashError` gained a case — `rustSetAccountName`
 
-`ZcashError` and `ZcashErrorCode` have a new case, `rustSetAccountName` (`ZRUST0162`), which only
+`ZcashError` and `ZcashErrorCode` have a new case, `rustSetAccountName` (`ZRUST0173`), which only
 `Synchronizer.renameAccount(_:name:)` throws: the name could not be stored, for instance because no
 account has the given UUID or the name contains a null character. The account keeps the name it had.
 An exhaustive `switch` over either type stops compiling until the new case is handled.
