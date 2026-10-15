@@ -6,7 +6,7 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 # Unreleased
 
-Changes are relative to `5.2.0`.
+Changes are relative to `5.2.1`.
 
 ## Added
 
@@ -87,6 +87,34 @@ Changes are relative to `5.2.0`.
 - The `libzcashlc` XCFramework's C objects claimed the Xcode SDK version they were built with as their
   minimum OS, above the package's platforms, so linking it could warn that objects were "built for
   newer version". They now claim iOS 16 / macOS 14. No caller changes are required.
+
+# 5.2.1 - 2026-10-14
+
+## Changed
+
+- The Rust core enables `pasta_curves`' `asm` feature, so the Pallas and Vesta field arithmetic
+  behind Orchard sends, sync and coinholder voting runs on assembly on arm64: iOS devices, the
+  arm64 iOS simulator and Apple silicon Macs. The x86_64 iOS simulator and Intel Macs keep the
+  portable arithmetic, because `pasta_curves` has no assembly backend for Apple's x86-64 targets.
+  Every result is the same as before; only the speed changes. No call site needs editing.
+
+## Checkpoints
+
+Mainnet
+
+````
+Sources/ZcashLightClientKit/Resources/checkpoints/mainnet/3512500.json
+...
+Sources/ZcashLightClientKit/Resources/checkpoints/mainnet/3515000.json
+````
+
+Testnet
+
+````
+Sources/ZcashLightClientKit/Resources/checkpoints/testnet/4490000.json
+...
+Sources/ZcashLightClientKit/Resources/checkpoints/testnet/4500000.json
+````
 
 # 5.2.0 - 2026-10-09
 
