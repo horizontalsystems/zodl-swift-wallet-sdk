@@ -320,11 +320,13 @@ final class MigrationFFITests: XCTestCase {
     /// at all, which this offline suite's setup always provides). This exercises the real FFI
     /// marshaling end-to-end (db/account bytes, the fixed 32-byte txid buffer, the boolean success
     /// mapping) and `migrationProgress`'s read reading it straight back: an unmined, unrecognized
-    /// txid falls into the documented fallback-pending bucket (`recorded_at_height + 40`, not yet
-    /// elapsed), so progress reports `0 of 1`, flagged `isImmediate`, not `nil`. The immediate lane
-    /// is entirely outside the migration engine (see `MigrationProgress.isImmediate`'s doc), so
-    /// `migrationAdvanceStep` -- which answers for the STORED (engine-tracked) run only -- must stay
-    /// `nil` throughout: the two surfaces are orthogonal.
+    /// txid falls into the documented fallback-pending bucket (the default expiry delta after
+    /// `recorded_at_height`, 120 blocks here because this fixture is testnet at its 4,500,000
+    /// checkpoint, past NU7; not yet elapsed), so progress reports `0 of 1`, flagged `isImmediate`,
+    /// not `nil`. The immediate lane is entirely outside the migration engine (see
+    /// `MigrationProgress.isImmediate`'s doc), so `migrationAdvanceStep` -- which answers for the
+    /// STORED (engine-tracked) run only -- must stay `nil` throughout: the two surfaces are
+    /// orthogonal.
     func testMigrationRecordImmediateRunThenMigrationProgressReportsInProgress() async throws {
         let txid = Data(repeating: 0xAB, count: 32)
 

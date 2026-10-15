@@ -46,7 +46,7 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at NU7's 25-second blocks, too strict for a check that must stay loose. Nothing changes before NU7.
 - A `SlipstreamSynchronizer` stopped and restarted within 120 seconds kept spendable balances unmasked
   (`SynchronizerState.isSpendableMasked`) even where NU7's 25-second blocks let almost five blocks arrive.
-  The window is now 1.6 target blocks at the last known tip: 120 s before NU7, 40 s from NU7.
+  The window is now 1.6 target block intervals of the block after the last known tip: 120 s before NU7, 40 s from NU7.
 - `estimateBirthdayHeight(for:)` returns the height of the newest bundled checkpoint whose time is strictly
   before the date. For a date at or after the newest checkpoint's time it returns that checkpoint, and when no
   checkpoint is before the date it returns Sapling activation, the floor. The answer does not depend on how
@@ -55,8 +55,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dates near the start of either chain. Restores from such a date scanned more blocks than needed. No caller
   changes are required.
 - `checkSingleUseTransparentAddresses(accountUUID:)` checks addresses exposed within the past day of target
-  time and spaces rechecks by the target spacing at the tip; after NU7 it looked back eight hours and
-  rescheduled three times too far out. Nothing changes before NU7.
+  time and spaces rechecks by the target spacing of the block after the tip; after NU7 it looked back eight
+  hours and rescheduled three times too far out. Nothing changes before NU7.
 - `estimatedMigrationChainTip()` and `estimatedMigrationSecondsPerBlock()` account for NU7's 25-second blocks.
   The rate is measured over up to 1,000 scanned blocks as the chain's speed relative to their target time, so the
   first blocks after NU7 activation do not swing it, and it is reported in the target spacing of the block after
@@ -69,7 +69,7 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only early in a restore from a pre-Blossom birthday, now also measures speed against target time, and a latest
   scanned block below Blossom gets the 150-second era's bounds and fallback.
 - `MigrationSchedule.estimatedDurationHours` counts blocks at their target spacing (25 s from NU7); after NU7
-  it read up to three times too long. Nothing changes before NU7.
+  it read up to three times too long. Nothing changes before NU7 on mainnet and testnet.
 - `migrationProgress(accountUUID:)` reports an unconfirmed immediate migration with no known expiry as pending
   for 120 blocks after it was recorded once NU7 is active, not 40, which ended the report while it could still
   mine. Nothing changes before NU7.

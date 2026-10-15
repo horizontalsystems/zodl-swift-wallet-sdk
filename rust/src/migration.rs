@@ -1477,9 +1477,9 @@ struct ImmediateRunLookup {
 }
 
 impl ImmediateRunLookup {
-    /// The wallet's recorded expiry when known, otherwise the default expiry delta of a transaction
-    /// targeting the block after the record height (40, or 120 once NU7 is active there), so an
-    /// uncorroborated run does not linger forever before the banner re-offers.
+    /// The wallet's recorded expiry when known, otherwise the record height plus the default expiry
+    /// delta of a transaction targeting the block after it (40, or 120 once NU7 is active there),
+    /// so an uncorroborated run does not linger forever before the banner re-offers.
     fn expiry_bound<P: Parameters>(&self, params: &P) -> BlockHeight {
         self.expiry_height.unwrap_or_else(|| {
             self.recorded_at_height
@@ -5687,6 +5687,27 @@ mod tests {
             schedule.preparations_len, 0,
             "no preparation-kind transaction is stored in this fixture"
         );
+        unsafe { zcashlc_free_migration_schedule(schedule_ptr) };
+    }
+
+    /// The testnet twin of the test above, at a post-NU7 height: `encode_schedule_from_state` must
+    /// pass its `params` through to the duration math. A transfer 287 blocks after `now` is 7,175 s
+    /// of 25-second blocks, one hour; at 48 blocks to the hour it would be five.
+    #[test]
+    fn encode_schedule_from_state_counts_post_nu7_blocks_at_their_own_spacing() {
+        let state = test_state(
+            MigrationStatus::InProgress,
+            &[],
+            &[MigrationTxState::Signed],
+            TESTNET_NU7 + 287,
+            TESTNET_NU7 + 10_000,
+        );
+
+        let schedule_ptr =
+            encode_schedule_from_state(&Network::TestNetwork, &state, h(TESTNET_NU7))
+                .expect("encoding must succeed");
+        let schedule = unsafe { &*schedule_ptr };
+        assert_eq!(schedule.estimated_duration_hours, 1);
         unsafe { zcashlc_free_migration_schedule(schedule_ptr) };
     }
 
