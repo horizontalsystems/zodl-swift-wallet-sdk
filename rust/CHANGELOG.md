@@ -459,6 +459,18 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged. `name` is a null-terminated UTF-8 string. It returns `true` on success, and `false`
   with the last error set when no account has `account_uuid_bytes`, when `name` is null or not
   UTF-8, or when the wallet database cannot be written.
+- `zcashlc_pow_target_spacing_era(network_id, height, start_ret, end_ret, spacing_ret)`,
+  `zcashlc_target_seconds_between(network_id, from_height, to_height, seconds_ret)`,
+  `zcashlc_height_after_target_seconds(network_id, from_height, seconds, height_ret)` and
+  `zcashlc_default_tx_target_height_for_expiry(network_id, expiry_height, target_height_ret)` convert
+  between heights and target time: 150 s a block before Blossom, 75 from Blossom, 25 from NU7, at the
+  network's activation heights, a registered custom network's included. They write, respectively, the
+  run of equal spacing containing a height (`end_ret` `-1` when it never changes again); the summed
+  spacing of the blocks after `from_height` through `to_height` (negative when lower); the height whole
+  blocks reach in `seconds` (walking back when negative, stopping at 0); and the target height whose
+  default expiry (40 blocks before NU7, 120 from NU7) is `expiry_height`, the earlier candidate for an
+  expiry neither produces. Each returns `false` with the last error set, writing nothing, for an
+  unknown or unregistered network or a null output pointer.
 
 ### Changed
 

@@ -91,8 +91,6 @@ use zcash_protocol::{
 use zcash_script::script;
 use zip32::fingerprint::SeedFingerprint;
 
-// Only the tests call these helpers until the FFI functions that expose them exist.
-#[cfg_attr(not(test), allow(dead_code))]
 mod block_spacing;
 /// cbindgen:ignore
 #[cfg(target_vendor = "apple")]
@@ -3031,6 +3029,134 @@ pub extern "C" fn zcashlc_branch_id_for_height(height: i32, network_id: u32) -> 
         Ok(branch_id as i32)
     });
     unwrap_exc_or(res, -1)
+}
+
+/// Reports the proof-of-work target spacing era containing `height` on the network `network_id`
+/// names: the longest run of heights around it whose blocks share one target spacing. Writes its
+/// first height to `start_ret`, the first height after it to `end_ret` (`-1` when no later network
+/// upgrade changes the spacing), and the spacing in seconds to `spacing_ret`. Spacing is 150 s
+/// before Blossom, 75 s from Blossom and 25 s from NU7, at the network's activation heights,
+/// including those registered with [`zcashlc_set_custom_network`].
+///
+/// Returns `false`, with the last error set and nothing written, for an unknown or unregistered
+/// network or a null output pointer.
+///
+/// # Safety
+///
+/// - `start_ret` and `spacing_ret` must be null or valid for writing a `u32`; `end_ret` must be
+///   null or valid for writing an `i64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zcashlc_pow_target_spacing_era(
+    network_id: u32,
+    height: u32,
+    start_ret: *mut u32,
+    end_ret: *mut i64,
+    spacing_ret: *mut u32,
+) -> bool {
+    let res = catch_panic(|| {
+        let network = parse_network(network_id)?;
+        let start_ret =
+            unsafe { start_ret.as_mut() }.ok_or_else(|| anyhow!("start_ret must not be null"))?;
+        let end_ret =
+            unsafe { end_ret.as_mut() }.ok_or_else(|| anyhow!("end_ret must not be null"))?;
+        let spacing_ret = unsafe { spacing_ret.as_mut() }
+            .ok_or_else(|| anyhow!("spacing_ret must not be null"))?;
+        let era = block_spacing::spacing_era(&network, BlockHeight::from_u32(height));
+        *start_ret = u32::from(era.start);
+        *end_ret = era.end.map_or(-1, |end| i64::from(u32::from(end)));
+        *spacing_ret = era.spacing;
+        Ok(true)
+    });
+    unwrap_exc_or(res, false)
+}
+
+/// Writes to `seconds_ret` the target time, in seconds, of the blocks after `from_height` up to
+/// and including `to_height`: the sum of their target spacings, negative when `to_height` is
+/// below `from_height`. Returns `false`, with the last error set and nothing written, for an
+/// unknown or unregistered network or a null `seconds_ret`.
+///
+/// # Safety
+///
+/// - `seconds_ret` must be null or valid for writing an `i64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zcashlc_target_seconds_between(
+    network_id: u32,
+    from_height: u32,
+    to_height: u32,
+    seconds_ret: *mut i64,
+) -> bool {
+    let res = catch_panic(|| {
+        let network = parse_network(network_id)?;
+        let seconds_ret = unsafe { seconds_ret.as_mut() }
+            .ok_or_else(|| anyhow!("seconds_ret must not be null"))?;
+        *seconds_ret = block_spacing::target_seconds_between(
+            &network,
+            BlockHeight::from_u32(from_height),
+            BlockHeight::from_u32(to_height),
+        );
+        Ok(true)
+    });
+    unwrap_exc_or(res, false)
+}
+
+/// Writes to `height_ret` the height `seconds` of target time reach from `from_height`, counting
+/// whole blocks only. For a non-negative `seconds`, the highest height whose blocks after
+/// `from_height` take no more than `seconds`. For a negative `seconds`, the lowest height whose
+/// blocks up to `from_height` take no more than its magnitude, never below 0. Returns `false`,
+/// with the last error set and nothing written, for an unknown or unregistered network or a null
+/// `height_ret`.
+///
+/// # Safety
+///
+/// - `height_ret` must be null or valid for writing a `u32`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zcashlc_height_after_target_seconds(
+    network_id: u32,
+    from_height: u32,
+    seconds: i64,
+    height_ret: *mut u32,
+) -> bool {
+    let res = catch_panic(|| {
+        let network = parse_network(network_id)?;
+        let height_ret =
+            unsafe { height_ret.as_mut() }.ok_or_else(|| anyhow!("height_ret must not be null"))?;
+        *height_ret = u32::from(block_spacing::height_after_target_seconds(
+            &network,
+            BlockHeight::from_u32(from_height),
+            seconds,
+        ));
+        Ok(true)
+    });
+    unwrap_exc_or(res, false)
+}
+
+/// Writes to `target_height_ret` the target height of a transaction with the default expiry delta
+/// that expires at `expiry_height`: 40 blocks before it when NU7 is not active at that target, 120
+/// when it is. For an expiry no target produces (the 80 heights from 40 blocks after NU7
+/// activation) it writes the earlier candidate, so a derived height is never later than the real
+/// target height. Returns `false`, with the last error set and nothing written, for an unknown or
+/// unregistered network or a null `target_height_ret`.
+///
+/// # Safety
+///
+/// - `target_height_ret` must be null or valid for writing a `u32`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zcashlc_default_tx_target_height_for_expiry(
+    network_id: u32,
+    expiry_height: u32,
+    target_height_ret: *mut u32,
+) -> bool {
+    let res = catch_panic(|| {
+        let network = parse_network(network_id)?;
+        let target_height_ret = unsafe { target_height_ret.as_mut() }
+            .ok_or_else(|| anyhow!("target_height_ret must not be null"))?;
+        *target_height_ret = u32::from(block_spacing::default_tx_target_height_for_expiry(
+            &network,
+            BlockHeight::from_u32(expiry_height),
+        ));
+        Ok(true)
+    });
+    unwrap_exc_or(res, false)
 }
 
 /// Frees strings returned by other zcashlc functions.
@@ -8988,5 +9114,144 @@ mod legacy_wallet_migration_tests {
         base64::engine::general_purpose::STANDARD
             .decode("9VDVOZZZOWWHpZtq1Ebridp3Qeux5C+HwiRR0g7Oi7HgnMs8Gfln83+/Q1NnvClcaSwM4ADFL1uZHxypEWlWXg==")
             .unwrap()
+    }
+}
+
+#[cfg(test)]
+mod block_spacing_ffi_tests {
+    use super::*;
+
+    const TESTNET_NU7: u32 = 4_465_026;
+
+    #[test]
+    fn the_ffi_reports_the_testnet_nu7_boundary() {
+        let (mut start, mut end, mut spacing) = (0u32, 0i64, 0u32);
+        assert!(unsafe {
+            zcashlc_pow_target_spacing_era(
+                NETWORK_ID_TESTNET,
+                TESTNET_NU7 - 1,
+                &mut start,
+                &mut end,
+                &mut spacing,
+            )
+        });
+        assert_eq!((start, end, spacing), (584_000, i64::from(TESTNET_NU7), 75));
+        assert!(unsafe {
+            zcashlc_pow_target_spacing_era(
+                NETWORK_ID_TESTNET,
+                TESTNET_NU7,
+                &mut start,
+                &mut end,
+                &mut spacing,
+            )
+        });
+        assert_eq!((start, end, spacing), (TESTNET_NU7, -1, 25));
+        let mut seconds = 0i64;
+        assert!(unsafe {
+            zcashlc_target_seconds_between(
+                NETWORK_ID_TESTNET,
+                TESTNET_NU7 - 1,
+                TESTNET_NU7,
+                &mut seconds,
+            )
+        });
+        assert_eq!(seconds, 25);
+        assert!(unsafe {
+            zcashlc_target_seconds_between(
+                NETWORK_ID_TESTNET,
+                TESTNET_NU7,
+                TESTNET_NU7 - 2,
+                &mut seconds,
+            )
+        });
+        assert_eq!(seconds, -100);
+        let mut height = 0u32;
+        assert!(unsafe {
+            zcashlc_height_after_target_seconds(
+                NETWORK_ID_TESTNET,
+                TESTNET_NU7 - 2,
+                100,
+                &mut height,
+            )
+        });
+        assert_eq!(height, TESTNET_NU7);
+        assert!(unsafe {
+            zcashlc_height_after_target_seconds(
+                NETWORK_ID_TESTNET,
+                TESTNET_NU7 + 1,
+                -50,
+                &mut height,
+            )
+        });
+        assert_eq!(height, TESTNET_NU7 - 1);
+        let mut target = 0u32;
+        assert!(unsafe {
+            zcashlc_default_tx_target_height_for_expiry(
+                NETWORK_ID_TESTNET,
+                TESTNET_NU7 + 119,
+                &mut target,
+            )
+        });
+        assert_eq!(target, TESTNET_NU7 - 1);
+        assert!(unsafe {
+            zcashlc_default_tx_target_height_for_expiry(NETWORK_ID_MAINNET, 3_000_040, &mut target)
+        });
+        assert_eq!(target, 3_000_000);
+    }
+
+    #[test]
+    fn a_registered_custom_network_answers_with_its_own_heights() {
+        let _custom_network = lock_custom_network();
+        zcashlc_set_custom_network(NETWORK_ID_REGTEST, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 300);
+        let (mut start, mut end, mut spacing) = (0u32, 0i64, 0u32);
+        assert!(unsafe {
+            zcashlc_pow_target_spacing_era(
+                NETWORK_ID_REGTEST,
+                299,
+                &mut start,
+                &mut end,
+                &mut spacing,
+            )
+        });
+        assert_eq!((start, end, spacing), (1, 300, 75));
+        assert!(unsafe {
+            zcashlc_pow_target_spacing_era(
+                NETWORK_ID_REGTEST,
+                300,
+                &mut start,
+                &mut end,
+                &mut spacing,
+            )
+        });
+        assert_eq!((start, end, spacing), (300, -1, 25));
+    }
+
+    #[test]
+    fn an_unregistered_custom_network_is_an_error_and_writes_nothing() {
+        let _custom_network = lock_custom_network();
+        *CUSTOM_PARAMS.write().unwrap_or_else(|e| e.into_inner()) = None;
+        let mut seconds = 7i64;
+        assert!(!unsafe { zcashlc_target_seconds_between(NETWORK_ID_REGTEST, 1, 2, &mut seconds) });
+        assert_eq!(seconds, 7);
+    }
+
+    #[test]
+    fn a_null_output_pointer_or_unknown_network_is_an_error_not_a_crash() {
+        assert!(!unsafe {
+            zcashlc_height_after_target_seconds(NETWORK_ID_TESTNET, 1, 75, std::ptr::null_mut())
+        });
+        let (mut start, mut spacing) = (0u32, 0u32);
+        assert!(!unsafe {
+            zcashlc_pow_target_spacing_era(
+                NETWORK_ID_TESTNET,
+                1,
+                &mut start,
+                std::ptr::null_mut(),
+                &mut spacing,
+            )
+        });
+        assert_eq!((start, spacing), (0, 0));
+        let mut target = 0u32;
+        assert!(!unsafe { zcashlc_default_tx_target_height_for_expiry(7, 1_000, &mut target) });
     }
 }

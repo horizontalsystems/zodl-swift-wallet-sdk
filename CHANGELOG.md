@@ -6,6 +6,18 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 # Unreleased
 
+## Added
+
+- `TargetBlockSpacing(network:)` describes a network's proof-of-work target spacing: 150 seconds a block
+  before Blossom, 75 from Blossom and 25 from NU7, at the network's activation heights. `spacing(at:)`
+  is a block's spacing, `seconds(from:to:)` the summed target time of the blocks after `from` through
+  `to` (negative when `to` is lower), and `estimatedSeconds(from:to:secondsPerBlock:)` the wall-clock
+  time they take at a rate measured at `from`: exactly `Double(to - from) * secondsPerBlock` unless a
+  spacing change lies between, past which blocks take their own spacing scaled by the rate's speed
+  relative to the target. Use it instead of multiplying block counts by 75 seconds. It is `Sendable`
+  and `Equatable` (equal for equal network types). A custom network used before its `Initializer`
+  registered it fails an assertion in debug builds and follows the 75-second schedule in release builds.
+
 # 6.0.0 - 2026-10-15
 
 Changes are relative to `5.2.2`.
