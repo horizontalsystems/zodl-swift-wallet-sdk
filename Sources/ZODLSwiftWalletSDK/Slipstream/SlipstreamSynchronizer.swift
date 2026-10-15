@@ -1615,9 +1615,10 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         // re-scan as a genuine 0→100% climb (the `forceCounterProgressUntilDone` host bypass
         // is deleted). One host job remains: RESTART the pass — the follow loop only
         // re-syncs when the server tip advances (`session.rs` `should_resync`), so without a
-        // restart the re-scan would wait for the next block (≤ ~75 s). A restart hiccup must
-        // never fail an otherwise-successful import, so it is not rethrown here — but it must
-        // not go unreported either, so `publishStoppedWithError` puts it on the state stream.
+        // restart the re-scan would wait for the next block (about 75 s before NU7, 25 s from it).
+        // A restart hiccup must never fail an otherwise-successful import, so it is not rethrown
+        // here — but it must not go unreported either, so `publishStoppedWithError` puts it on the
+        // state stream.
         initializer.logger.debug(
             "[#1755] importAccount: wasRunning=\(wasRunning) "
             + (wasRunning ? "→ restarting sync pass now to surface the re-scan" : "→ next start() will re-scan")
