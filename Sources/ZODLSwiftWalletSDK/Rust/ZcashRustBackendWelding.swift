@@ -489,6 +489,12 @@ protocol ZcashRustBackendWelding {
     /// Attempts to delete an account defined by UUID
     func deleteAccount(_ accountUUID: AccountUUID) async throws
 
+    /// Sets the human-readable name of the account `accountUUID` to `name`, replacing any name it had. The account's keys
+    /// and all other state are unchanged.
+    /// - Throws: `rustSetAccountName` if the name cannot be stored, including when no account has `accountUUID` and when
+    ///   `name` contains a null character, which would cut it short at the FFI boundary.
+    func setAccountName(_ accountUUID: AccountUUID, name: String) async throws
+
     // MARK: - Ironwood migration
 
     /// The engine's next step to advance `account`'s stored migration run, wrapped with its

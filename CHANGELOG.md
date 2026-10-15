@@ -61,6 +61,13 @@ Changes are relative to `5.2.1`.
   `Synchronizer.importAccount(ufvk:seedFingerprint:zip32AccountIndex:purpose:name:keySource:birthday:)`
   when a wallet imports a unified full viewing key as a view-only account (`AccountPurpose.viewOnly`).
   It is a tag for the wallet to read back from `Account.keySource`; the SDK does not act on it.
+- `Synchronizer.renameAccount(_:name:)` stores a new name for an account in the wallet database,
+  replacing any name it had. The account's keys and all other state are unchanged, and
+  `listAccounts()` returns the new name afterwards. It throws the new `ZcashError.rustSetAccountName`
+  (`ZRUST0162`) when the name cannot be stored, for example when no account has the given UUID or
+  the name contains a null character. It does not stop synchronization. A protocol-extension default
+  keeps other `Synchronizer` conformers compiling; it throws, so a conformer that offers renaming
+  must implement it.
 
 ## Changed
 
@@ -93,10 +100,11 @@ Changes are relative to `5.2.1`.
   that `prepare()` now creates, so on a wallet upgraded from an earlier SDK version they throw until
   the synchronizer has been prepared with this version.
 - `ZcashError` and `ZcashErrorCode` gain `rustDescribeUnifiedFullViewingKey` (`ZRUST0172`), which
-  only `DerivationTool.describeUnifiedFullViewingKey(_:)` throws, and `rustFindAccountKeyOverlap`
+  only `DerivationTool.describeUnifiedFullViewingKey(_:)` throws, `rustFindAccountKeyOverlap`
   (`ZRUST0170`) and `accountKeyOverlapMultipleAccounts` (`ZRUST0171`), which only
-  `Synchronizer.findAccountSharingKeyComponents(_:)` throws. An exhaustive `switch` over either
-  stops compiling until they are handled; see `MIGRATING.md`.
+  `Synchronizer.findAccountSharingKeyComponents(_:)` throws, and `rustSetAccountName` (`ZRUST0162`),
+  which only `Synchronizer.renameAccount(_:name:)` throws. An exhaustive `switch` over either stops
+  compiling until they are handled; see `MIGRATING.md`.
 - `Synchronizer.listAccounts()`, and every other API that returns an `Account`, now sets `ufvk` and
   `uivk` for an account imported without derivation data, such as a hardware-wallet or view-only
   account; they were `nil`. Code that recognises such an account by `ufvk == nil` no longer finds
@@ -108,6 +116,9 @@ Changes are relative to `5.2.1`.
   `Account` no longer equals, or hashes like, the value an earlier version returned, so match
   accounts by `id`. Its `Codable` encoding now includes both keys, so an `Account` a wallet stores
   or sends carries the account's viewing key. See `MIGRATING.md`.
+- The librustzcash crates now come from a git revision of their current pre-release that adds the
+  account renaming `Synchronizer.renameAccount(_:name:)` relies on. Their versions are unchanged,
+  and the family rides that revision until a librustzcash release publishes the change.
 
 ## Removed
 

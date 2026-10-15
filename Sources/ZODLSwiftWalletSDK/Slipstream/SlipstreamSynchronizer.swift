@@ -1680,6 +1680,12 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         }
     }
 
+    /// Unlike `deleteAccount(_:)`, a rename neither stops nor restarts the sync pass, so it does not take the lifecycle
+    /// queue: it changes only the account's name, which the engine never reads.
+    public func renameAccount(_ accountUUID: AccountUUID, name: String) async throws {
+        try await initializer.rustBackend.setAccountName(accountUUID, name: name)
+    }
+
     // ── Addresses ─────────────────────────────────────────────────────────────
 
     public func getUnifiedAddress(accountUUID: AccountUUID) async throws -> UnifiedAddress {

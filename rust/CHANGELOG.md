@@ -448,6 +448,11 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   key that is not UTF-8 or not a unified full viewing key for `network_id`, an invalid
   `network_id`, a wallet database that cannot be read, or a panic. The last error never contains
   any part of the key.
+- `zcashlc_set_account_name(db_data, db_data_len, network_id, account_uuid_bytes, name)` sets the
+  name of an account, replacing any name it had; the account's keys and all other state are
+  unchanged. `name` is a null-terminated UTF-8 string. It returns `true` on success, and `false`
+  with the last error set when no account has `account_uuid_bytes`, when `name` is not UTF-8, or
+  when the wallet database cannot be written.
 
 ### Changed
 
@@ -699,6 +704,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (valargroup/vote-nullifier-pir#173), and `zakura-wallet-lib`
   (zakura-core/wallet-libraries#83). Each entry is replaced by the release that contains its
   pull request. The `zcashlc_voting_*` C surface is unchanged.
+- `[patch.crates-io]` takes the librustzcash crates from `zcash/librustzcash@cbf8984`: the
+  `zcash_client_sqlite` 0.23.0-pre.1 release plus `WalletDb::set_account_name`
+  (zcash/librustzcash#3139), which `zcashlc_set_account_name` calls. Their versions are unchanged,
+  and the patch is replaced by the release that contains that pull request.
 - `zcashlc_init_data_database` now creates the
   `ext_zcashlc_orchard_ironwood_migration_immediate_runs` extension table, moving into it any
   records held by the `sdk_immediate_runs` table that read-write `zcashlc_migration_*` calls used

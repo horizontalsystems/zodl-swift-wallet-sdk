@@ -1069,6 +1069,48 @@ pub unsafe extern "C" fn zcashlc_delete_account(
     unwrap_exc_or(res, false)
 }
 
+/// Sets the human-readable name of the specified account, replacing any name it had. The
+/// account's keys and all other state are left unchanged.
+///
+/// Returns `true` on success, or `false` if an error is raised, including when no account with
+/// the given UUID exists in the wallet and when `name` is not valid UTF-8.
+///
+/// # Safety
+///
+/// - `db_data` must be non-null and valid for reads for `db_data_len` bytes, and it must have an
+///   alignment of `1`. Its contents must be a string representing a valid system path in the
+///   operating system's preferred representation.
+/// - The memory referenced by `db_data` must not be mutated for the duration of the function call.
+/// - The total size `db_data_len` must be no larger than `isize::MAX`. See the safety
+///   documentation of pointer::offset.
+/// - `account_uuid_bytes` must be non-null and valid for reads for 16 bytes, and it must have an
+///   alignment of `1`.
+/// - The memory referenced by `account_uuid_bytes` must not be mutated for the duration of the
+///   function call.
+/// - `name` must be non-null and must point to a null-terminated string.
+/// - The memory referenced by `name` must not be mutated for the duration of the function call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zcashlc_set_account_name(
+    db_data: *const u8,
+    db_data_len: usize,
+    network_id: u32,
+    account_uuid_bytes: *const u8,
+    name: *const c_char,
+) -> bool {
+    let res = catch_panic(|| {
+        let network = parse_network(network_id)?;
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
+        let account_uuid = account_uuid_from_bytes(account_uuid_bytes)?;
+        let name = unsafe { CStr::from_ptr(name).to_str()? };
+
+        db_data.set_account_name(account_uuid, name)?;
+
+        Ok(true)
+    });
+
+    unwrap_exc_or(res, false)
+}
+
 /// A private utility function to reduce duplication across functions that take an USK
 /// across the FFI. `usk_ptr` should point to an array of `usk_len` bytes containing
 /// a unified spending key encoded as returned from the `zcashlc_create_account` or
@@ -6417,6 +6459,112 @@ mod tests {
         }
 
         unsafe { zcashlc_slipstream_free(handle) };
+    }
+
+    // ── Renaming an account ──────────────────────────────────────────────────────────────────
+
+    /// The name the rename tests give an account. Its emoji lies outside the Basic Multilingual
+    /// Plane, so the name crosses the FFI as multi-byte UTF-8 in both directions.
+    const RENAMED_ACCOUNT_NAME: &str = "Renamed account 🔐";
+
+    /// The name `temp_wallet_db_with_account` imports its account with.
+    const FIXTURE_ACCOUNT_NAME: &str = "voting";
+
+    /// A testnet wallet database holding one view-only account, with the uuid of that account.
+    fn wallet_with_account() -> (tempfile::TempDir, String, [u8; 16]) {
+        let (dir, db_path, account_uuid) =
+            crate::voting::test_support::temp_wallet_db_with_account(NETWORK_ID_TESTNET);
+        let account_uuid = Uuid::parse_str(&account_uuid)
+            .expect("the fixture reports a uuid")
+            .into_bytes();
+        (dir, db_path, account_uuid)
+    }
+
+    /// Calls [`zcashlc_set_account_name`] on the testnet wallet database at `db_path`. The last
+    /// error is cleared first, so an error it leaves was set by this call.
+    fn set_account_name(db_path: &str, account_uuid: &[u8; 16], name: &CStr) -> bool {
+        zcashlc_clear_last_error();
+        unsafe {
+            zcashlc_set_account_name(
+                db_path.as_ptr(),
+                db_path.len(),
+                NETWORK_ID_TESTNET,
+                account_uuid.as_ptr(),
+                name.as_ptr(),
+            )
+        }
+    }
+
+    /// The name of the account `account_uuid`, read through [`zcashlc_get_account`], which is
+    /// how the Swift SDK reads each account it lists.
+    fn stored_account_name(db_path: &str, account_uuid: &[u8; 16]) -> Option<String> {
+        let account = unsafe {
+            zcashlc_get_account(
+                db_path.as_ptr(),
+                db_path.len(),
+                NETWORK_ID_TESTNET,
+                account_uuid.as_ptr(),
+            )
+        };
+        assert!(!account.is_null(), "the account is read");
+        let name = unsafe { (*account).account_name() };
+        unsafe { ffi::zcashlc_free_account(account) };
+        name
+    }
+
+    #[test]
+    fn set_account_name_replaces_the_name_of_the_account() {
+        let (_dir, db_path, account_uuid) = wallet_with_account();
+        assert_eq!(
+            stored_account_name(&db_path, &account_uuid).as_deref(),
+            Some(FIXTURE_ACCOUNT_NAME)
+        );
+
+        let name = CString::new(RENAMED_ACCOUNT_NAME).expect("the name has no interior NUL");
+        assert!(set_account_name(&db_path, &account_uuid, &name));
+
+        assert_eq!(
+            stored_account_name(&db_path, &account_uuid).as_deref(),
+            Some(RENAMED_ACCOUNT_NAME)
+        );
+    }
+
+    /// An account the wallet does not hold is refused with a last error, and the account the
+    /// wallet does hold keeps its name.
+    #[test]
+    fn set_account_name_refuses_an_unknown_account() {
+        let (_dir, db_path, account_uuid) = wallet_with_account();
+        let unknown = [0x07; 16];
+        assert_ne!(unknown, account_uuid);
+
+        let name = CString::new(RENAMED_ACCOUNT_NAME).expect("the name has no interior NUL");
+        assert!(!set_account_name(&db_path, &unknown, &name));
+
+        let message = last_error_message();
+        assert!(
+            message.contains("does not belong to this wallet"),
+            "{message}"
+        );
+        assert_eq!(
+            stored_account_name(&db_path, &account_uuid).as_deref(),
+            Some(FIXTURE_ACCOUNT_NAME)
+        );
+    }
+
+    /// A name that is not UTF-8 is refused with a last error, and the account keeps its name.
+    #[test]
+    fn set_account_name_refuses_a_name_that_is_not_utf8() {
+        let (_dir, db_path, account_uuid) = wallet_with_account();
+        let name = c"Renamed \xff";
+
+        assert!(!set_account_name(&db_path, &account_uuid, name));
+
+        let message = last_error_message();
+        assert!(message.contains("utf-8"), "{message}");
+        assert_eq!(
+            stored_account_name(&db_path, &account_uuid).as_deref(),
+            Some(FIXTURE_ACCOUNT_NAME)
+        );
     }
 }
 

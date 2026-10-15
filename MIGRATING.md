@@ -68,6 +68,19 @@ case .accountKeyOverlapMultipleAccounts:
     break
 ```
 
+## `ZcashError` gained a case — `rustSetAccountName`
+
+`ZcashError` and `ZcashErrorCode` have a new case, `rustSetAccountName` (`ZRUST0162`), which only
+`Synchronizer.renameAccount(_:name:)` throws: the name could not be stored, for instance because no
+account has the given UUID or the name contains a null character. The account keeps the name it had.
+An exhaustive `switch` over either type stops compiling until the new case is handled.
+
+```swift
+case .rustSetAccountName:
+    // The account kept its old name: say that the rename failed, and keep showing the old name.
+    break
+```
+
 ## The package is `zodl-swift-wallet-sdk` and the module is `ZODLSwiftWalletSDK`
 
 The package, its library product, and its module are renamed, and the repository has moved to

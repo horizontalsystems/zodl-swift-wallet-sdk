@@ -859,6 +859,16 @@ public protocol Synchronizer: AnyObject {
     /// - Throws rustDeleteAccount as a common indicator of the operation failure
     func deleteAccount(_ accountUUID: AccountUUID) async throws -> Void
 
+    /// Sets the human-readable name of an account, replacing any name it had. The account's keys and all other state are
+    /// unchanged, and ``listAccounts()`` returns the new name afterwards. The rename does not stop synchronization.
+    ///
+    /// - Parameters:
+    ///   - accountUUID: the account to rename.
+    ///   - name: the new name, stored as given.
+    /// - Throws: `ZcashError.rustSetAccountName` when the name cannot be stored, for example when no account has
+    ///   `accountUUID`, or when `name` contains a null character.
+    func renameAccount(_ accountUUID: AccountUUID, name: String) async throws
+
     /// Provides access to transaction creation and submission operations
     /// that are decoupled from the synchronizer's built-in submission flow.
     ///
@@ -1638,6 +1648,16 @@ private struct AccountSharingKeyComponentsUnimplemented: LocalizedError {
     }
 }
 
+/// Error thrown by the default `Synchronizer.renameAccount(_:name:)` implementation.
+private struct RenameAccountUnimplemented: LocalizedError {
+    var errorDescription: String? {
+        """
+        Synchronizer.renameAccount(_:name:) has no default implementation. \
+        Override this method in your Synchronizer conformer to store a new name for an account.
+        """
+    }
+}
+
 /// Error thrown by the default `Synchronizer.signPCZTWithLedger` implementation.
 private struct LedgerSigningUnimplemented: LocalizedError {
     var errorDescription: String? {
@@ -1828,6 +1848,13 @@ public extension Synchronizer {
     /// rest report the capability as unavailable.
     func findAccountSharingKeyComponents(_ ufvk: UnifiedFullViewingKey) async throws -> AccountKeyOverlap? {
         throw AccountSharingKeyComponentsUnimplemented()
+    }
+
+    /// Default implementation so adding `renameAccount(_:name:)` to the protocol is not a
+    /// source-breaking change for downstream conformers. Both shipped synchronizers override it; the
+    /// rest report the capability as unavailable.
+    func renameAccount(_ accountUUID: AccountUUID, name: String) async throws {
+        throw RenameAccountUnimplemented()
     }
 
     /// Default implementation so adding `broadcaster` to the protocol is not a

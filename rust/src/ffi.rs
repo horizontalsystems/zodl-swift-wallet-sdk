@@ -103,6 +103,16 @@ impl Account {
     pub(crate) fn uuid_bytes(&self) -> [u8; 16] {
         self.uuid_bytes
     }
+
+    /// The account's name, or `None` when it has none.
+    pub(crate) fn account_name(&self) -> Option<String> {
+        (!self.account_name.is_null()).then(|| {
+            unsafe { std::ffi::CStr::from_ptr(self.account_name) }
+                .to_str()
+                .expect("the name is UTF-8")
+                .to_owned()
+        })
+    }
 }
 
 /// Frees an [`Account`] value

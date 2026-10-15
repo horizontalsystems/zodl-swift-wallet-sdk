@@ -1672,6 +1672,28 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
         }
     }
 
+    @DBActor
+    func setAccountName(_ accountUUID: AccountUUID, name: String) async throws {
+        // The rust layer reads the name up to its first null character, so it would store less than it was given.
+        guard !name.containsCStringNullBytesBeforeStringEnding() else {
+            throw ZcashError.rustSetAccountName("The name contains a null character.")
+        }
+
+        let success = zcashlc_set_account_name(
+            dbData.0,
+            dbData.1,
+            networkType.networkId,
+            accountUUID.id,
+            [CChar](name.utf8CString)
+        )
+
+        guard success else {
+            throw ZcashError.rustSetAccountName(
+                lastErrorMessage(fallback: "`setAccountName` failed with unknown error")
+            )
+        }
+    }
+
     // MARK: - Ironwood migration
 
     @DBActor
