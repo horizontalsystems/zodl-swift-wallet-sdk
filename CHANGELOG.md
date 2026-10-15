@@ -90,6 +90,14 @@ Changes are relative to `5.2.1`.
   minimum OS, above the package's platforms, so linking it could warn that objects were "built for
   newer version". They now claim iOS 16 / macOS 14. No caller changes are required.
 
+## Checkpoints
+
+Mainnet
+
+````
+Sources/ZODLSwiftWalletSDK/Resources/checkpoints/mainnet/3517500.json
+````
+
 # 5.2.1 - 2026-10-14
 
 ## Changed
