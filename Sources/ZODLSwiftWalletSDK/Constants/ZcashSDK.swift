@@ -148,6 +148,10 @@ public enum ZcashSDK {
     /// silently at the next network upgrade the way a copied literal does.
     public static let nu63ConsensusBranchID: ConsensusBranchID = 0x37a5_165b
 
+    /// The consensus branch ID of NU7, published for the same reason as ``nu63ConsensusBranchID``: a
+    /// host that names the active consensus era reads it from the SDK instead of copying a literal.
+    public static let nu7ConsensusBranchID: ConsensusBranchID = 0x7719_0ad9
+
     /// The number of zatoshi that equal 1 ZEC.
     public static let zatoshiPerZEC: BlockHeight = 100_000_000
 

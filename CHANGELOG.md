@@ -17,6 +17,7 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   relative to the target. Use it instead of multiplying block counts by 75 seconds. It is `Sendable`
   and `Equatable` (equal for equal network types). A custom network used before its `Initializer`
   registered it fails an assertion in debug builds and follows the 75-second schedule in release builds.
+- `ZcashSDK.nu7ConsensusBranchID` (`0x77190ad9`) is the consensus branch ID of NU7, next to `nu63ConsensusBranchID`.
 
 # 6.0.0 - 2026-10-15
 
