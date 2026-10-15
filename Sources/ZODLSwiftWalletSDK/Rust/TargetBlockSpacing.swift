@@ -65,11 +65,18 @@ public struct TargetBlockSpacing: Sendable, Equatable {
     }
 
     /// The wall-clock time the blocks after `from` up to and including `to` take at
-    /// `secondsPerBlock`, a rate measured at `from`; zero when `to` is not above `from`. Exactly
-    /// `Double(to - from) * secondsPerBlock` when no spacing change lies in between. Otherwise the
-    /// blocks before the change take `secondsPerBlock` each, and every later block takes its own
-    /// target spacing scaled by the rate's speed relative to the target spacing at `from + 1`.
+    /// `secondsPerBlock`, the measured pace of the era of block `from + 1`, the first block counted.
+    /// A caller switches its rate at the activation block, so a range that starts at an activation
+    /// takes the new era's pace, not the one measured before it. Zero when `to` is not above
+    /// `from`. Exactly `Double(to - from) * secondsPerBlock` when no spacing change lies in
+    /// between. Otherwise the blocks before the change take `secondsPerBlock` each, and every later
+    /// block takes its own target spacing scaled by the rate's speed relative to the target spacing
+    /// at `from + 1`. Heights outside `0...UInt32.max` count as the nearest height inside it, as in
+    /// ``seconds(from:to:)``.
     public func estimatedSeconds(from: BlockHeight, to: BlockHeight, secondsPerBlock: Double) -> TimeInterval {
+        // Clamp first, as `seconds(from:to:)` does, so none of the arithmetic below can overflow.
+        let from = BlockHeight(Self.ffiHeight(from))
+        let to = BlockHeight(Self.ffiHeight(to))
         guard to > from else {
             return 0
         }

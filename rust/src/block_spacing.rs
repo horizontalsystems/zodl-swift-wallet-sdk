@@ -186,6 +186,11 @@ mod tests {
     const TESTNET_BLOSSOM: u32 = 584_000;
     const TESTNET_NU7: u32 = 4_465_026;
     const MAINNET_BLOSSOM: u32 = 653_600;
+    /// A mainnet height long behind the chain tip. The pinned crate gives mainnet no NU7 height,
+    /// and a later one will put it well above this, so every assertion on `MAIN_NETWORK` stays at
+    /// or below this height. Where a test needs mainnet's schedule beyond it, with NU7 never
+    /// activating, it uses `mainnet_without_nu7`.
+    const MAINNET_SETTLED: u32 = 3_000_000;
 
     fn h(height: u32) -> BlockHeight {
         BlockHeight::from_u32(height)
@@ -209,6 +214,14 @@ mod tests {
         }
     }
 
+    /// Mainnet's schedule for as long as NU7 has no activation height there: Blossom at its mainnet
+    /// height, NU7 never. It stands in for `MAIN_NETWORK` in every assertion that no NU7 era ever
+    /// begins, which `MAIN_NETWORK` itself would stop satisfying once the crate gives it an NU7
+    /// height.
+    fn mainnet_without_nu7() -> LocalNetwork {
+        custom(Some(MAINNET_BLOSSOM), None)
+    }
+
     fn era(start: u32, end: Option<u32>, spacing: u32) -> SpacingEra {
         SpacingEra {
             start: h(start),
@@ -217,7 +230,10 @@ mod tests {
         }
     }
 
-    /// Both standard networks, NU7 above Blossom, both at one height, NU7 without Blossom, Blossom at genesis.
+    /// Both standard networks, NU7 above Blossom, both at one height, NU7 without Blossom, Blossom
+    /// at genesis, and mainnet's Blossom height with NU7 never activating. The checks run through
+    /// it are properties of any schedule, never fixed values, so listing `MAIN_NETWORK` pins
+    /// nothing about its NU7 height.
     macro_rules! for_every_network {
         ($check:ident) => {
             $check(&MAIN_NETWORK);
@@ -226,6 +242,7 @@ mod tests {
             $check(&custom(Some(1), Some(1)));
             $check(&custom(None, Some(10)));
             $check(&custom(Some(0), None));
+            $check(&mainnet_without_nu7());
         };
     }
 
@@ -335,6 +352,18 @@ mod tests {
         }
     }
 
+    /// The walk forward stops at the highest height, whatever the spacing there is.
+    fn assert_stops_at_the_top<P: Parameters>(params: &P) {
+        assert_eq!(
+            height_after_target_seconds(params, h(u32::MAX - 1), 1_000),
+            h(u32::MAX)
+        );
+        assert_eq!(
+            height_after_target_seconds(params, h(0), i64::MAX),
+            h(u32::MAX)
+        );
+    }
+
     /// The inverse exactly as the design states it.
     fn stated_inverse<P: Parameters>(params: &P, expiry: BlockHeight) -> BlockHeight {
         let post = expiry - 120;
@@ -370,7 +399,7 @@ mod tests {
             150
         );
         assert_eq!(pow_target_spacing(&MAIN_NETWORK, h(MAINNET_BLOSSOM)), 75);
-        assert_eq!(pow_target_spacing(&MAIN_NETWORK, h(u32::MAX)), 75);
+        assert_eq!(pow_target_spacing(&MAIN_NETWORK, h(MAINNET_SETTLED)), 75);
         assert_eq!(
             pow_target_spacing(&TEST_NETWORK, h(TESTNET_BLOSSOM - 1)),
             150
@@ -379,6 +408,16 @@ mod tests {
         assert_eq!(pow_target_spacing(&TEST_NETWORK, h(TESTNET_NU7 - 1)), 75);
         assert_eq!(pow_target_spacing(&TEST_NETWORK, h(TESTNET_NU7)), 25);
         assert_eq!(pow_target_spacing(&TEST_NETWORK, h(u32::MAX)), 25);
+    }
+
+    #[test]
+    fn spacing_stays_at_75_seconds_where_nu7_never_activates() {
+        let network = mainnet_without_nu7();
+        assert_eq!(pow_target_spacing(&network, h(MAINNET_BLOSSOM - 1)), 150);
+        assert_eq!(pow_target_spacing(&network, h(MAINNET_BLOSSOM)), 75);
+        assert_eq!(pow_target_spacing(&network, h(MAINNET_SETTLED)), 75);
+        assert_eq!(pow_target_spacing(&network, h(100_000_000)), 75);
+        assert_eq!(pow_target_spacing(&network, h(u32::MAX)), 75);
     }
 
     #[test]
@@ -403,8 +442,15 @@ mod tests {
             spacing_era(&MAIN_NETWORK, h(MAINNET_BLOSSOM - 1)),
             era(0, Some(MAINNET_BLOSSOM), 150)
         );
+        // Where mainnet's era ends depends on the NU7 height it is given, so only its start and
+        // spacing are pinned, and that it ends beyond the settled height. The unbounded era is
+        // asserted on the network without NU7.
+        let mainnet_era = spacing_era(&MAIN_NETWORK, h(MAINNET_SETTLED));
+        assert_eq!(mainnet_era.start, h(MAINNET_BLOSSOM));
+        assert_eq!(mainnet_era.spacing, 75);
+        assert!(mainnet_era.end.is_none_or(|end| end > h(MAINNET_SETTLED)));
         assert_eq!(
-            spacing_era(&MAIN_NETWORK, h(3_000_000)),
+            spacing_era(&mainnet_without_nu7(), h(MAINNET_SETTLED)),
             era(MAINNET_BLOSSOM, None, 75)
         );
     }
@@ -451,21 +497,31 @@ mod tests {
         );
     }
 
-    /// Mainnet: 653,599 blocks at 150 s and 4,294,313,696 at 75 s.
-    /// Testnet: 583,999 at 150 s, 3,881,026 at 75 s and 4,290,502,270 at 25 s.
+    /// Mainnet's heights with NU7 never activating: 653,599 blocks at 150 s and 4,294,313,696 at
+    /// 75 s. Testnet: 583,999 at 150 s, 3,881,026 at 75 s and 4,290,502,270 at 25 s.
     #[test]
     fn target_seconds_between_spans_every_height_without_overflow() {
+        let mainnet = mainnet_without_nu7();
         assert_eq!(
-            target_seconds_between(&MAIN_NETWORK, h(0), h(u32::MAX)),
+            target_seconds_between(&mainnet, h(0), h(u32::MAX)),
             322_171_567_050
         );
         assert_eq!(
-            target_seconds_between(&MAIN_NETWORK, h(u32::MAX), h(0)),
+            target_seconds_between(&mainnet, h(u32::MAX), h(0)),
             -322_171_567_050
         );
         assert_eq!(
             target_seconds_between(&TEST_NETWORK, h(0), h(u32::MAX)),
             107_641_233_550
+        );
+    }
+
+    /// Mainnet up to a settled height: 653,599 blocks at 150 s and 2,346,401 at 75 s.
+    #[test]
+    fn target_seconds_between_on_mainnet_up_to_a_settled_height() {
+        assert_eq!(
+            target_seconds_between(&MAIN_NETWORK, h(0), h(MAINNET_SETTLED)),
+            274_019_925
         );
     }
 
@@ -533,14 +589,7 @@ mod tests {
             height_after_target_seconds(&MAIN_NETWORK, h(10), i64::MIN),
             h(0)
         );
-        assert_eq!(
-            height_after_target_seconds(&MAIN_NETWORK, h(u32::MAX - 1), 1_000),
-            h(u32::MAX)
-        );
-        assert_eq!(
-            height_after_target_seconds(&MAIN_NETWORK, h(0), i64::MAX),
-            h(u32::MAX)
-        );
+        for_every_network!(assert_stops_at_the_top);
     }
 
     #[test]
@@ -561,7 +610,14 @@ mod tests {
             40
         );
         assert_eq!(default_tx_expiry_delta(&TEST_NETWORK, h(TESTNET_NU7)), 120);
-        assert_eq!(default_tx_expiry_delta(&MAIN_NETWORK, h(u32::MAX)), 40);
+        assert_eq!(
+            default_tx_expiry_delta(&MAIN_NETWORK, h(MAINNET_SETTLED)),
+            40
+        );
+        assert_eq!(
+            default_tx_expiry_delta(&mainnet_without_nu7(), h(u32::MAX)),
+            40
+        );
     }
 
     #[test]
@@ -574,7 +630,7 @@ mod tests {
                 "target {target}"
             );
         }
-        for target in (3_000_000..=3_000_100).map(h) {
+        for target in (MAINNET_SETTLED - 140..=MAINNET_SETTLED - 40).map(h) {
             assert_eq!(
                 default_tx_target_height_for_expiry(&MAIN_NETWORK, target + 40),
                 target

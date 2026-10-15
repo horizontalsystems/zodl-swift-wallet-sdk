@@ -3048,6 +3048,9 @@ pub extern "C" fn zcashlc_branch_id_for_height(height: i32, network_id: u32) -> 
 ///
 /// - `start_ret` and `spacing_ret` must be null or valid for writing a `u32`; `end_ret` must be
 ///   null or valid for writing an `i64`.
+/// - The three output pointers must not alias one another or overlap: each non-null one becomes
+///   a mutable reference for the whole call, so two that refer to the same memory (`start_ret`
+///   and `spacing_ret` share a type) are undefined behavior.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zcashlc_pow_target_spacing_era(
     network_id: u32,

@@ -12,7 +12,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before Blossom, 75 from Blossom and 25 from NU7, at the network's activation heights. `spacing(at:)`
   is a block's spacing, `seconds(from:to:)` the summed target time of the blocks after `from` through
   `to` (negative when `to` is lower), and `estimatedSeconds(from:to:secondsPerBlock:)` the wall-clock
-  time they take at a rate measured at `from`: exactly `Double(to - from) * secondsPerBlock` unless a
+  time they take at `secondsPerBlock`, the measured pace of the era of block `from + 1`, so a caller
+  switches its rate at the activation block: exactly `Double(to - from) * secondsPerBlock` unless a
   spacing change lies between, past which blocks take their own spacing scaled by the rate's speed
   relative to the target. Use it instead of multiplying block counts by 75 seconds. It is `Sendable`
   and `Equatable` (equal for equal network types). A custom network used before its `Initializer`
