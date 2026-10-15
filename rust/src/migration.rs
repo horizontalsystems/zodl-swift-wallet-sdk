@@ -1462,12 +1462,6 @@ fn ceremony_preparation_pick(
 
 // ----- progress derivation (pure; unit-tested) -----
 
-/// The fallback bound (blocks past `recorded_at_height`) an unmined immediate run is treated as
-/// pending until, when the wallet database does not know (or no longer knows) the transaction's
-/// real expiry height: the typical wallet transaction-expiry delta, so a run that the wallet's own
-/// history never corroborates does not linger forever before the banner re-offers.
-const IMMEDIATE_RUN_FALLBACK_EXPIRY_DELTA: u32 = 40;
-
 /// An immediate-run row resolved against the wallet database (see [`resolve_immediate_run`]),
 /// pre-computed by the caller so [`immediate_run_pending`] stays pure and unit-testable without a
 /// wallet database.
@@ -1483,13 +1477,13 @@ struct ImmediateRunLookup {
 }
 
 impl ImmediateRunLookup {
-    /// The height beyond which this run, if still unmined, is treated as expired: the wallet's own
-    /// recorded expiry when known, otherwise the fallback delta past the record height.
-    fn expiry_bound(&self) -> BlockHeight {
+    /// The wallet's recorded expiry when known, otherwise the default expiry delta of a transaction
+    /// targeting the block after the record height (40, or 120 once NU7 is active there), so an
+    /// uncorroborated run does not linger forever before the banner re-offers.
+    fn expiry_bound<P: Parameters>(&self, params: &P) -> BlockHeight {
         self.expiry_height.unwrap_or_else(|| {
-            BlockHeight::from(
-                u32::from(self.recorded_at_height) + IMMEDIATE_RUN_FALLBACK_EXPIRY_DELTA,
-            )
+            self.recorded_at_height
+                + crate::block_spacing::default_tx_expiry_delta(params, self.recorded_at_height + 1)
         })
     }
 }
@@ -1531,12 +1525,16 @@ fn active_run_progress(state: &MigrationState) -> (u32, u32, Option<BlockHeight>
 }
 
 /// Whether an immediate-run row still counts as PENDING at `tip`: unmined and not past its expiry
-/// bound (the wallet's own recorded expiry when known, otherwise the fallback delta past the
+/// bound (the wallet's own recorded expiry when known, otherwise the default expiry delta past the
 /// record height — see [`ImmediateRunLookup::expiry_bound`]). A mined run is CONSUMED (the sweep
 /// zeroed the balance; nothing to report) and an expired unmined one is ignored (the banner
 /// re-offers) — both report NO progress.
-fn immediate_run_pending(run: &ImmediateRunLookup, tip: BlockHeight) -> bool {
-    run.mined_height.is_none() && tip <= run.expiry_bound()
+fn immediate_run_pending<P: Parameters>(
+    params: &P,
+    run: &ImmediateRunLookup,
+    tip: BlockHeight,
+) -> bool {
+    run.mined_height.is_none() && tip <= run.expiry_bound(params)
 }
 
 /// The amount a stored transfer CROSSES into Ironwood, or `None` for a preparation transaction
@@ -2678,7 +2676,7 @@ pub unsafe extern "C" fn zcashlc_migration_progress(
         let tip = ctx.tip()?;
         let run = resolve_immediate_run(&ctx.wallet, row)
             .map_err(|e| anyhow!("wallet transaction lookup failed: {e}"))?;
-        let value = if immediate_run_pending(&run, tip) {
+        let value = if immediate_run_pending(&ctx.network, &run, tip) {
             FfiMigrationProgress {
                 is_present: true,
                 completed_transfers: 0,
@@ -5237,7 +5235,7 @@ mod tests {
     #[test]
     fn immediate_run_unmined_within_expiry_is_pending() {
         let run = immediate_lookup(100, None, Some(500));
-        assert!(immediate_run_pending(&run, h(300)));
+        assert!(immediate_run_pending(&Network::MainNetwork, &run, h(300)));
     }
 
     #[test]
@@ -5245,29 +5243,72 @@ mod tests {
         // A mined immediate sweep is CONSUMED — the swept balance is zero and there is nothing
         // for the app to acknowledge, so it reports no progress at all.
         let run = immediate_lookup(100, Some(250), Some(500));
-        assert!(!immediate_run_pending(&run, h(300)));
+        assert!(!immediate_run_pending(&Network::MainNetwork, &run, h(300)));
     }
 
     #[test]
     fn immediate_run_expired_unmined_is_not_pending() {
         let run = immediate_lookup(100, None, Some(200));
-        assert!(!immediate_run_pending(&run, h(300)));
+        assert!(!immediate_run_pending(&Network::MainNetwork, &run, h(300)));
     }
 
     #[test]
     fn immediate_run_unknown_expiry_uses_fallback_bound() {
         let run = immediate_lookup(100, None, None);
         // Still within the fallback bound (100 + 40 = 140).
-        assert!(immediate_run_pending(&run, h(140)));
+        assert!(immediate_run_pending(&Network::MainNetwork, &run, h(140)));
         // Past the fallback bound: expired.
-        assert!(!immediate_run_pending(&run, h(141)));
+        assert!(!immediate_run_pending(&Network::MainNetwork, &run, h(141)));
+    }
+
+    #[test]
+    fn immediate_run_fallback_bound_is_the_default_expiry_delta_after_the_record_height() {
+        let run = immediate_lookup(TESTNET_NU7 + 10, None, None);
+        assert!(immediate_run_pending(
+            &Network::TestNetwork,
+            &run,
+            h(TESTNET_NU7 + 130)
+        ));
+        assert!(!immediate_run_pending(
+            &Network::TestNetwork,
+            &run,
+            h(TESTNET_NU7 + 131)
+        ));
+        // Recorded one block before activation: its target is the activation block, so 120.
+        let at_activation = immediate_lookup(TESTNET_NU7 - 1, None, None);
+        assert!(immediate_run_pending(
+            &Network::TestNetwork,
+            &at_activation,
+            h(TESTNET_NU7 + 119)
+        ));
+        assert!(!immediate_run_pending(
+            &Network::TestNetwork,
+            &at_activation,
+            h(TESTNET_NU7 + 120)
+        ));
+        // Two blocks before: the target precedes activation, so 40.
+        let before = immediate_lookup(TESTNET_NU7 - 2, None, None);
+        assert!(immediate_run_pending(
+            &Network::TestNetwork,
+            &before,
+            h(TESTNET_NU7 + 38)
+        ));
+        assert!(!immediate_run_pending(
+            &Network::TestNetwork,
+            &before,
+            h(TESTNET_NU7 + 39)
+        ));
     }
 
     // ----- characterization at mainnet heights (75 s blocks since Blossom, no NU7): pinned before the
     // duration and immediate-run window learn the target spacing; each goes through one helper. -----
 
     fn mainnet_immediate_run_pending(recorded_at: u32, tip: u32) -> bool {
-        immediate_run_pending(&immediate_lookup(recorded_at, None, None), h(tip))
+        immediate_run_pending(
+            &Network::MainNetwork,
+            &immediate_lookup(recorded_at, None, None),
+            h(tip),
+        )
     }
 
     #[test]

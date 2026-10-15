@@ -929,6 +929,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `FfiMigrationSchedule.estimated_duration_hours` (from `zcashlc_migration_propose_transfers`,
   `zcashlc_migration_restart_step` and `zcashlc_migration_refresh_stale_transfers`) counts blocks at their
   target spacing instead of 48 to the hour, so after NU7 it no longer reads up to three times too long.
+- `zcashlc_migration_progress` keeps an unmined immediate migration with no known expiry pending for the
+  default expiry delta past its record height: 40 blocks as before, 120 when NU7 is active at the next height.
 
 ## 2.8.0-rc.2 - 2026-07-28
 

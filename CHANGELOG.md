@@ -69,6 +69,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scanned block below Blossom gets the 150-second era's bounds and fallback.
 - `MigrationSchedule.estimatedDurationHours` counts blocks at their target spacing (25 s from NU7); after NU7
   it read up to three times too long. Nothing changes before NU7.
+- `migrationProgress(accountUUID:)` reports an unconfirmed immediate migration with no known expiry as pending
+  for 120 blocks after it was recorded once NU7 is active, not 40, which ended the report while it could still
+  mine. Nothing changes before NU7.
 
 # 6.0.0 - 2026-10-15
 
