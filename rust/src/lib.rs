@@ -5527,6 +5527,16 @@ mod tests {
             "an uncapped engine target must follow the host's INFO level"
         );
     }
+
+    /// Most of `pasta_curves` 0.6.1's speedup is its assembly field arithmetic, which it selects
+    /// only when the `asm` feature is enabled; without the feature it silently falls back to the
+    /// portable arithmetic, so this is what notices the feature going missing. Apple's x86-64
+    /// targets have no assembly backend, so the test runs on arm64 only.
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn pasta_curves_runs_its_aarch64_assembly_backend() {
+        assert_eq!(pasta_curves::BACKEND, "aarch64");
+    }
 }
 
 // ── Slipstream FFI surface ────────────────────────────────────────────────────
