@@ -73,6 +73,11 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `migrationProgress(accountUUID:)` reports an unconfirmed immediate migration with no known expiry as pending
   for 120 blocks after it was recorded once NU7 is active, not 40, which ended the report while it could still
   mine. Nothing changes before NU7.
+- Server validation keeps checking for Ironwood tree state after NU7 activation (testnet from 4,465,026). It
+  stopped when the server's tip reached NU7, so a lightwalletd that serves no Ironwood data passed validation
+  there, and syncing against it detected nothing in the Ironwood pool. It now throws
+  `ZcashError.compactBlockProcessorServerMissingIronwoodSupport` (`ZCBPEO0024`) as it did from NU6.3 activation
+  until NU7. No caller changes are required.
 
 # 6.0.0 - 2026-10-15
 
