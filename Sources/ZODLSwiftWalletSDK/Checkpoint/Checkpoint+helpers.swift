@@ -57,7 +57,8 @@ extension Checkpoint {
         return checkPointURLs.map { $0.deletingPathExtension() }.map(\.lastPathComponent).compactMap(Int.init).sorted()
     }
 
-    private static func checkpoint(height: BlockHeight, directory checkpointDirectory: URL) -> Checkpoint? {
+    /// The checkpoint stored in the file for `height`, or `nil` when that file cannot be read or decoded.
+    static func checkpoint(height: BlockHeight, directory checkpointDirectory: URL) -> Checkpoint? {
         let url = checkpointDirectory
             .appendingPathComponent(String(height))
             .appendingPathExtension("json")
