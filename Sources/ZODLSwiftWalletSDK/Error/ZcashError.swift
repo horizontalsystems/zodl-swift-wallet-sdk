@@ -1001,6 +1001,9 @@ public enum ZcashError: Equatable, Error {
     /// The chain is past the Ironwood (NU6.3) activation but the connected server does not serve Ironwood data, which the wallet needs in order to detect its shielded transactions by scanning.
     /// ZCBPEO0024
     case compactBlockProcessorServerMissingIronwoodSupport
+    /// The connected server reported a block height that is too large for the SDK to use. Only a broken or malicious server does that.
+    /// ZCBPEO0025
+    case compactBlockProcessorServerBlockHeightOutOfRange
     /// The synchronizer is unprepared.
     /// ZSYNCO0001
     case synchronizerNotPrepared
@@ -1462,6 +1465,7 @@ public enum ZcashError: Equatable, Error {
         case .compactBlockProcessorPutOrchardSubtreeRoots: return "Put Orchard subtree roots to the DB failed."
         case .compactBlockProcessorPutIronwoodSubtreeRoots: return "Put Ironwood subtree roots to the DB failed."
         case .compactBlockProcessorServerMissingIronwoodSupport: return "The chain is past the Ironwood (NU6.3) activation but the connected server does not serve Ironwood data, which the wallet needs in order to detect its shielded transactions by scanning."
+        case .compactBlockProcessorServerBlockHeightOutOfRange: return "The connected server reported a block height that is too large for the SDK to use. Only a broken or malicious server does that."
         case .synchronizerNotPrepared: return "The synchronizer is unprepared."
         case .synchronizerSendMemoToTransparentAddress: return "Memos can't be sent to transparent addresses."
         case .synchronizerShieldFundsInsuficientTransparentFunds: return "There is not enough transparent funds to cover fee for the shielding."
@@ -1809,6 +1813,7 @@ public enum ZcashError: Equatable, Error {
         case .compactBlockProcessorPutOrchardSubtreeRoots: return .compactBlockProcessorPutOrchardSubtreeRoots
         case .compactBlockProcessorPutIronwoodSubtreeRoots: return .compactBlockProcessorPutIronwoodSubtreeRoots
         case .compactBlockProcessorServerMissingIronwoodSupport: return .compactBlockProcessorServerMissingIronwoodSupport
+        case .compactBlockProcessorServerBlockHeightOutOfRange: return .compactBlockProcessorServerBlockHeightOutOfRange
         case .synchronizerNotPrepared: return .synchronizerNotPrepared
         case .synchronizerSendMemoToTransparentAddress: return .synchronizerSendMemoToTransparentAddress
         case .synchronizerShieldFundsInsuficientTransparentFunds: return .synchronizerShieldFundsInsuficientTransparentFunds

@@ -2829,6 +2829,10 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
             for await result in group {
                 guard let (endpoint, elapsed, info) = result, elapsed > 0 else { continue }
 
+                // Rule out servers that report a tip the SDK can't use. This comes before anything converts or adds to the
+                // height, and it applies to custom networks too, which skip the branch id check below.
+                guard let tipHeight = BlockHeight(serverHeight: info.blockHeight) else { continue }
+
                 if !isCustomNetwork {
                     guard (info.chainName == "main" && network == .mainnet)
                         || (info.chainName == "test" && network == .testnet)
@@ -2838,7 +2842,7 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
 
                     guard
                         let localBranchID = try? initializer.rustBackend.consensusBranchIdFor(
-                            height: Int32(info.blockHeight)
+                            height: Int32(tipHeight)
                         ),
                         let remoteBranchID = ConsensusBranchID.fromString(info.consensusBranchID),
                         remoteBranchID == localBranchID

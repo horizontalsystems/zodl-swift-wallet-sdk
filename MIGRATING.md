@@ -264,6 +264,24 @@ catch ZcashError.rustCreateToAddress(let error) {
 }
 ```
 
+## `ZcashError` gained a case — out-of-range server block height
+
+`ZcashError` and `ZcashErrorCode` have a new case, `compactBlockProcessorServerBlockHeightOutOfRange`
+(`ZCBPEO0025`). `SDKSynchronizer`'s sync fails with it on mainnet and testnet when the connected
+lightwalletd reports a chain tip above `Int32.max`. No real chain reaches that height, so only a
+broken or malicious server causes it. `SDKSynchronizer.switchTo(endpoint:)` reports the case as
+`synchronizerServerSwitch`. A regtest or other custom network does not check that tip during sync, and
+`SlipstreamSynchronizer` never reports the case. The case carries no payload: the height the server
+reported is not part of the error. An exhaustive `switch` over either type stops compiling until it is
+handled. Handle it like the other server-validation failures, `compactBlockProcessorNetworkMismatch`
+and `compactBlockProcessorWrongConsensusBranchId`: the server is unusable, so offer another one.
+
+```swift
+case .compactBlockProcessorServerBlockHeightOutOfRange:
+    // The server's chain tip is not one a real chain reaches: offer another server.
+    break
+```
+
 ## `ZcashError` gained cases — Ledger hardware wallets
 
 `ZcashError` and `ZcashErrorCode` have twenty-four new cases, `ZLEDG0001` to `ZLEDG0024`, which

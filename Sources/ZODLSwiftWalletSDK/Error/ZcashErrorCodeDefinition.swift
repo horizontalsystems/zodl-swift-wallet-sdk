@@ -1100,6 +1100,9 @@ enum ZcashErrorDefinition {
     /// The chain is past the Ironwood (NU6.3) activation but the connected server does not serve Ironwood data, which the wallet needs in order to detect its shielded transactions by scanning.
     // sourcery: code="ZCBPEO0024"
     case compactBlockProcessorServerMissingIronwoodSupport
+    /// The connected server reported a block height that is too large for the SDK to use. Only a broken or malicious server does that.
+    // sourcery: code="ZCBPEO0025"
+    case compactBlockProcessorServerBlockHeightOutOfRange
 
     // MARK: - SDKSynchronizer
 

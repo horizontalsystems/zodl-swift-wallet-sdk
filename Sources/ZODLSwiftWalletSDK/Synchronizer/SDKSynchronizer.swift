@@ -437,11 +437,11 @@ public class SDKSynchronizer: AwaitableStopSynchronizer {
         }
 
         // called when a new account is imported
-        let chainTip = try? await UInt32(
-            initializer.lightWalletService.latestBlockHeight(
-                mode: await sdkFlags.ifTor(.uniqueTor)
-            )
+        let latestBlockHeight = try? await initializer.lightWalletService.latestBlockHeight(
+            mode: await sdkFlags.ifTor(.uniqueTor)
         )
+        // A tip that doesn't fit `UInt32` is treated like a tip that couldn't be fetched.
+        let chainTip = latestBlockHeight.flatMap { UInt32(exactly: $0) }
 
         let checkpointSource = initializer.container.resolve(CheckpointSource.self)
 
@@ -1054,6 +1054,12 @@ public class SDKSynchronizer: AwaitableStopSynchronizer {
                     continue
                 }
 
+                // Rule out servers that report a tip the SDK can't use. This comes before anything converts or adds to the
+                // height, and it applies to custom networks too, which skip the branch id check below.
+                guard let tipHeight = BlockHeight(serverHeight: info.blockHeight) else {
+                    continue
+                }
+
                 if !isCustomNetwork {
                     // rule out if mismatch of networks
                     guard (info.chainName == "main" && network == .mainnet)
@@ -1063,7 +1069,7 @@ public class SDKSynchronizer: AwaitableStopSynchronizer {
                     }
 
                     // rule out mismatch of consensus branch IDs
-                    guard let localBranchID = await blockProcessor.consensusBranchIdFor(Int32(info.blockHeight)) else {
+                    guard let localBranchID = await blockProcessor.consensusBranchIdFor(Int32(tipHeight)) else {
                         continue
                     }
 
@@ -1126,15 +1132,20 @@ public class SDKSynchronizer: AwaitableStopSynchronizer {
 
             let service = serviceDict.value.service
 
-            guard info.blockHeight >= nBlocksToFetch else {
+            // The early guard on the tip already ruled out a height the SDK can't use; the two bindings are defence in depth.
+            guard
+                info.blockHeight >= nBlocksToFetch,
+                let startHeight = BlockHeight(serverHeight: info.blockHeight - nBlocksToFetch),
+                let endHeight = BlockHeight(serverHeight: info.blockHeight)
+            else {
                 continue
             }
 
             do {
                 // Fetched the same way as in `BlockDownloader`.
                 let stream = try service.service.blockStream(
-                    startHeight: BlockHeight(info.blockHeight - nBlocksToFetch),
-                    endHeight: BlockHeight(info.blockHeight),
+                    startHeight: startHeight,
+                    endHeight: endHeight,
                     mode: .direct
                 )
 

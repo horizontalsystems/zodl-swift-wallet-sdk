@@ -52,12 +52,21 @@ extension ValidateServerAction: Action {
         }
 
         guard saplingActivation == info.saplingActivationHeight else {
-            throw ZcashError.compactBlockProcessorSaplingActivationMismatch(saplingActivation, BlockHeight(info.saplingActivationHeight))
+            // The server can report any `UInt64` here, so it is clamped for the error instead of converted.
+            throw ZcashError.compactBlockProcessorSaplingActivationMismatch(
+                saplingActivation,
+                BlockHeight(clamping: info.saplingActivationHeight)
+            )
         }
 
         // check branch id
         if !isCustomNetwork {
-            let localBranch = try rustBackend.consensusBranchIdFor(height: Int32(info.blockHeight))
+            // The branch id is looked up at the server's tip, and the rust backend takes the height as an `Int32`.
+            guard let tipHeight = BlockHeight(serverHeight: info.blockHeight) else {
+                throw ZcashError.compactBlockProcessorServerBlockHeightOutOfRange
+            }
+
+            let localBranch = try rustBackend.consensusBranchIdFor(height: Int32(tipHeight))
 
             guard let remoteBranchID = ConsensusBranchID.fromString(info.consensusBranchID) else {
                 throw ZcashError.compactBlockProcessorConsensusBranchID
@@ -83,7 +92,7 @@ extension ValidateServerAction: Action {
             // A custom network carries its own activation heights and reports a nonstandard branch id,
             // so it has no standard NU6.3 height to compare the tip with; the probe stays with the other
             // checks that the custom-network skip covers.
-            if let ironwoodActivation = localNetwork.ironwoodActivationHeight, BlockHeight(info.blockHeight) >= ironwoodActivation {
+            if let ironwoodActivation = localNetwork.ironwoodActivationHeight, tipHeight >= ironwoodActivation {
                 var tipBlock = BlockID()
                 tipBlock.height = info.blockHeight
                 let treeState = try await service.getTreeState(tipBlock, mode: await sdkFlags.ifTor(.defaultTor))

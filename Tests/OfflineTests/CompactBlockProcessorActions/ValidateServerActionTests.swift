@@ -14,6 +14,8 @@ final class ValidateServerActionTests: ZcashTestCase {
     var underlyingNetworkType = NetworkType.testnet
     var underlyingNetwork: ZcashNetwork?
     var underlyingSaplingActivationHeight: BlockHeight?
+    /// The Sapling activation height the server reports, when it has to be a value no `BlockHeight` can hold.
+    var underlyingReportedSaplingActivationHeight: UInt64?
     var underlyingConsensusBranchID = ""
     /// The tip height the server reports, which the action also hands to the local consensus rules.
     var underlyingBlockHeight: UInt64 = 2
@@ -29,6 +31,7 @@ final class ValidateServerActionTests: ZcashTestCase {
         underlyingNetworkType = .testnet
         underlyingNetwork = nil
         underlyingSaplingActivationHeight = nil
+        underlyingReportedSaplingActivationHeight = nil
         underlyingConsensusBranchID = "c2d6d0b4"
         underlyingBlockHeight = 2
         underlyingLocalConsensusBranchID = -1026109260
@@ -191,6 +194,86 @@ final class ValidateServerActionTests: ZcashTestCase {
         }
     }
 
+    /// Sync validation reads the server's tip only to look up the consensus branch id, which a custom network
+    /// skips. Every regtest network is a custom network, so on those a tip the SDK can't use does not fail
+    /// validation, unlike on mainnet and testnet. Server evaluation rules such a server out on every network.
+    func testValidateServerAction_CustomNetworkDoesNotLookAtTheServersTip() async throws {
+        let customNetworks = [
+            ZcashNetworkBuilder.network(for: .regtest),
+            ZcashNetworkBuilder.regtest(activationHeights: NetworkActivationHeights(sapling: 1, nu5: 1, nu6: 1, nu6_3: 5000))
+        ]
+
+        for network in customNetworks {
+            underlyingNetwork = network
+            underlyingChainName = "main"
+            underlyingConsensusBranchID = "ffffffff"
+            underlyingBlockHeight = UInt64.max
+
+            let validateServerAction = setupAction()
+
+            let nextContext = try await validateServerAction.run(with: ActionContextMock.default()) { _ in }
+
+            let acResult = nextContext.checkStateIs(.fetchUTXO)
+            XCTAssertTrue(acResult == .true, "A custom network is expected to pass server validation, got '\(acResult)'")
+        }
+    }
+
+    // A server can report any `UInt64`, and the branch id lookup takes an `Int32`: a tip it cannot
+    // take has to fail the action with an error instead of trapping.
+
+    func testValidateServerAction_BlockHeightAboveInt32Max_ThrowsServerBlockHeightOutOfRange() async throws {
+        underlyingBlockHeight = UInt64(Int32.max) + 1
+
+        let validateServerAction = setupAction()
+
+        do {
+            _ = try await validateServerAction.run(with: ActionContextMock()) { _ in }
+            XCTFail("A tip above Int32.max is expected to fail server validation.")
+        } catch ZcashError.compactBlockProcessorServerBlockHeightOutOfRange {
+        } catch {
+            XCTFail("""
+            testValidateServerAction_BlockHeightAboveInt32Max is expected to fail but error \(error) doesn't match \
+            ZcashError.compactBlockProcessorServerBlockHeightOutOfRange
+            """)
+        }
+    }
+
+    func testValidateServerAction_BlockHeightUInt64Max_ThrowsServerBlockHeightOutOfRange() async throws {
+        underlyingBlockHeight = UInt64.max
+
+        let validateServerAction = setupAction()
+
+        do {
+            _ = try await validateServerAction.run(with: ActionContextMock()) { _ in }
+            XCTFail("A tip of UInt64.max is expected to fail server validation.")
+        } catch ZcashError.compactBlockProcessorServerBlockHeightOutOfRange {
+        } catch {
+            XCTFail("""
+            testValidateServerAction_BlockHeightUInt64Max is expected to fail but error \(error) doesn't match \
+            ZcashError.compactBlockProcessorServerBlockHeightOutOfRange
+            """)
+        }
+    }
+
+    func testValidateServerAction_SaplingActivationUInt64Max_ReportsClampedHeightInMismatch() async throws {
+        underlyingReportedSaplingActivationHeight = UInt64.max
+
+        let validateServerAction = setupAction()
+
+        do {
+            _ = try await validateServerAction.run(with: ActionContextMock()) { _ in }
+            XCTFail("A Sapling activation that does not match is expected to fail server validation.")
+        } catch let ZcashError.compactBlockProcessorSaplingActivationMismatch(expected, found) {
+            XCTAssertEqual(expected, 280_000)
+            XCTAssertEqual(found, BlockHeight.max)
+        } catch {
+            XCTFail("""
+            testValidateServerAction_SaplingActivationUInt64Max is expected to fail but error \(error) doesn't match \
+            ZcashError.compactBlockProcessorSaplingActivationMismatch
+            """)
+        }
+    }
+
     // MARK: - Ironwood server probe
 
     // Scanning cannot notice a server that omits Ironwood tree data, and the Ironwood pool is where the Orchard migration
@@ -322,7 +405,8 @@ final class ValidateServerActionTests: ZcashTestCase {
 
         let lightWalletdInfoMock = LightWalletdInfoMock()
         lightWalletdInfoMock.underlyingConsensusBranchID = underlyingConsensusBranchID
-        lightWalletdInfoMock.underlyingSaplingActivationHeight = UInt64(underlyingSaplingActivationHeight ?? config.saplingActivation)
+        lightWalletdInfoMock.underlyingSaplingActivationHeight = underlyingReportedSaplingActivationHeight
+            ?? UInt64(underlyingSaplingActivationHeight ?? config.saplingActivation)
         lightWalletdInfoMock.underlyingBlockHeight = tipHeight
         lightWalletdInfoMock.underlyingChainName = underlyingChainName
 
