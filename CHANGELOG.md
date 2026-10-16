@@ -43,7 +43,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `evaluateBestOf(endpoints:fetchThresholdSeconds:nBlocksToFetch:kServers:network:)` and
   `evaluateServerSwitch(current:candidates:fetchThresholdSeconds:nBlocksToFetch:network:)` rule out servers
   trailing their estimated tip by more than six hours of target time. The fixed 288 blocks were two hours
-  at NU7's 25-second blocks, too strict for a check that must stay loose. Nothing changes before NU7.
+  at NU7's 25-second blocks, too strict for a check that must stay loose. Nothing changes before NU7 on mainnet
+  and testnet.
 - A `SlipstreamSynchronizer` stopped and restarted within 120 seconds kept spendable balances unmasked
   (`SynchronizerState.isSpendableMasked`) even where NU7's 25-second blocks let almost five blocks arrive.
   The window is now 1.6 target block intervals of the block after the last known tip: 120 s before NU7, 40 s from NU7.
@@ -56,7 +57,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changes are required.
 - `checkSingleUseTransparentAddresses(accountUUID:)` checks addresses exposed within the past day of target
   time and spaces rechecks by the target spacing of the block after the tip; after NU7 it looked back eight
-  hours and rescheduled three times too far out. Nothing changes before NU7.
+  hours and rescheduled three times too far out. In wall-clock terms, an address that has received nothing is
+  now rechecked roughly 2–3× as often after NU7 as before it, each recheck being one address over its own
+  Tor circuit. Nothing changes before NU7 on mainnet and testnet.
 - `estimatedMigrationChainTip()` and `estimatedMigrationSecondsPerBlock()` account for NU7's 25-second blocks.
   The rate is measured over up to 1,000 scanned blocks as the chain's speed relative to their target time, so the
   first blocks after NU7 activation do not swing it, and it is reported in the target spacing of the block after

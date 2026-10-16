@@ -20,7 +20,7 @@ const POST_NU7_POW_TARGET_SPACING: u32 = 25;
 
 /// The default expiry delta, in blocks, once NU7 is active at the target height: the 50 minutes
 /// librustzcash's 40-block default spans at 75 seconds, at NU7's 25.
-const POST_NU7_TX_EXPIRY_DELTA: u32 = 120;
+const POST_NU7_DEFAULT_TX_EXPIRY_DELTA: u32 = 120;
 
 /// The target spacing of the block at `height`, in seconds: the time the consensus rules aim to
 /// put between the blocks at `height - 1` and `height`.
@@ -155,7 +155,7 @@ pub(crate) fn default_tx_expiry_delta<P: Parameters>(
     target_height: BlockHeight,
 ) -> u32 {
     if params.is_nu_active(NetworkUpgrade::Nu7, target_height) {
-        POST_NU7_TX_EXPIRY_DELTA
+        POST_NU7_DEFAULT_TX_EXPIRY_DELTA
     } else {
         DEFAULT_TX_EXPIRY_DELTA
     }
@@ -169,7 +169,7 @@ pub(crate) fn default_tx_target_height_for_expiry<P: Parameters>(
     params: &P,
     expiry_height: BlockHeight,
 ) -> BlockHeight {
-    let post_nu7_target = expiry_height - POST_NU7_TX_EXPIRY_DELTA;
+    let post_nu7_target = expiry_height - POST_NU7_DEFAULT_TX_EXPIRY_DELTA;
     let pre_nu7_target = expiry_height - DEFAULT_TX_EXPIRY_DELTA;
     [post_nu7_target, pre_nu7_target]
         .into_iter()

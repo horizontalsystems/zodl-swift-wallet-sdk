@@ -3389,7 +3389,7 @@ fn explicit_expiry_height<P: Parameters>(
 /// librustzcash's builder asks it: of the wallet's pool-migration parameters, at the canonical fee
 /// for the proposal's target height.
 ///
-/// This mirrors, applied to every step, librustzcash's private
+/// This mirrors, applied to every step, librustzcash's non-public
 /// `zcash_client_backend::data_api::wallet::step_is_canonical_crossing`, so nothing but this note
 /// ties the two together. Re-check it against that function on every librustzcash bump. If they
 /// disagree, a send either fails with `ExpiryHeightConflictsWithCanonicalCrossing` (an explicit
@@ -7075,10 +7075,10 @@ pub struct FfiSlipstreamSnapshot {
     /// past its `start()` baseline (bumped only after `update_chain_tip` succeeds) proves the
     /// tip moved; the completed range proves the wallet database can vouch for the spendable
     /// value at that tip — between the two it reports every non-stabilized note as unspendable.
-    /// Survives stop→start hops shorter than 1.6 target block intervals at the last known tip
-    /// (120 s before NU7, 40 s from it). While 0, hosts must mask spendable balances (the mask
-    /// transform stays host-side because the C `AccountBalance` cannot express the
-    /// awaiting-resolution shift).
+    /// Survives stop→start hops shorter than 1.6 target block intervals of the block after the
+    /// last known tip (120 s before NU7, 40 s from it). While 0, hosts must mask spendable
+    /// balances (the mask transform stays host-side because the C `AccountBalance` cannot
+    /// express the awaiting-resolution shift).
     pub tip_fresh: u8,
     /// [E-4] Monotonic version of the wallet's stored transaction set: bumps exactly when
     /// enhancement stores/updates a tx, the mempool monitor stores a 0-conf hit, a range
