@@ -232,6 +232,32 @@ pub(crate) fn wallet_db_connection(
     Ok(conn)
 }
 
+/// Refuses a wallet-database path where no database exists, before any connection that could
+/// create it is opened.
+///
+/// Only `zcashlc_init_data_database` creates the wallet database, so no other call may let a
+/// read-write open make SQLite create an empty file at a path for a wallet that was never
+/// initialized, or whose database a wipe has just deleted. The path the platform passes may be a
+/// SQLite `file:` URI, which only SQLite resolves, so asking the filesystem whether it exists would
+/// refuse every real wallet. SQLite is asked instead, with a read-only open: that cannot create the
+/// file, and it fails with `SQLITE_CANTOPEN` when there is none. SQLite reports that code for a file
+/// that exists but cannot be opened too, for example on a permissions or data-protection failure, so
+/// the refusal says "does not exist or cannot be opened". Its own message for that failure carries
+/// the database path, so it is replaced by one that names no path, the same for both contexts.
+/// `before` names what the caller was about to do.
+pub(crate) fn require_wallet_db(db_path: &Path, before: &str) -> anyhow::Result<()> {
+    match wallet_db_connection(db_path, WalletDbAccess::ReadOnly) {
+        Ok(_) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::CannotOpen => {
+            Err(anyhow!(
+                "the wallet database does not exist or cannot be opened; initialize it with \
+                 zcashlc_init_data_database before {before}"
+            ))
+        }
+        Err(e) => Err(anyhow!("Error checking for the wallet database: {e}")),
+    }
+}
+
 /// Builds a WalletDb value from path data provided over the FFI, over a connection that
 /// [`wallet_db_connection`] opens with `access`. [`wallet_db`] and [`wallet_db_read_only`] differ
 /// only in the access they pass, so a handle is put together the same way for both.
@@ -1072,8 +1098,9 @@ pub unsafe extern "C" fn zcashlc_delete_account(
 /// Sets the human-readable name of the specified account, replacing any name it had. The
 /// account's keys and all other state are left unchanged.
 ///
-/// Returns `true` on success, or `false` if an error is raised, including when no account with
-/// the given UUID exists in the wallet and when `name` is null or not valid UTF-8.
+/// Returns `true` on success, or `false` if an error is raised, including when no wallet database
+/// exists at `db_data`, which this function never creates, when no account with the given UUID
+/// exists in the wallet, and when `name` is null or not valid UTF-8.
 ///
 /// # Safety
 ///
@@ -1102,6 +1129,12 @@ pub unsafe extern "C" fn zcashlc_set_account_name(
             return Err(anyhow!("no account name was supplied"));
         }
         let network = parse_network(network_id)?;
+        // `wallet_db` opens read-write, which creates a missing database file. A rename that was
+        // still waiting for the database when a wipe deleted it must not leave an empty one behind.
+        let db_path = Path::new(OsStr::from_bytes(unsafe {
+            slice::from_raw_parts(db_data, db_data_len)
+        }));
+        require_wallet_db(db_path, "renaming an account")?;
         let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
         let account_uuid = account_uuid_from_bytes(account_uuid_bytes)?;
         let name = unsafe { CStr::from_ptr(name).to_str()? };
@@ -6569,6 +6602,25 @@ mod tests {
             stored_account_name(&db_path, &account_uuid).as_deref(),
             Some(FIXTURE_ACCOUNT_NAME)
         );
+    }
+
+    /// A wallet database that does not exist is refused, and the rename does not create it, for
+    /// instance when a wipe deleted the database while the rename was waiting for it.
+    #[test]
+    fn set_account_name_does_not_create_a_missing_wallet_database() {
+        let (dir, _db_path, account_uuid) = wallet_with_account();
+        let missing = dir.path().join("missing.sqlite");
+        let missing_path = missing.to_str().expect("the temporary path is UTF-8");
+        let name = CString::new(RENAMED_ACCOUNT_NAME).expect("the name has no interior NUL");
+
+        assert!(!set_account_name(missing_path, &account_uuid, Some(&name)));
+
+        let message = last_error_message();
+        assert!(
+            message.contains("does not exist or cannot be opened"),
+            "{message}"
+        );
+        assert!(!missing.exists(), "the rename must not create the database");
     }
 
     /// A null name is refused with a last error instead of being read, and the account keeps its
