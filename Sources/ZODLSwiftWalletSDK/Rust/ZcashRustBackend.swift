@@ -3077,11 +3077,13 @@ extension FfiAccountKeyOverlap {
         case FfiAccountKeyOverlapKind_Conflicting:
             overlapKind = .conflicting
         default:
-            throw ZcashError.rustFindAccountKeyOverlap(lastErrorMessage(fallback: "`findAccountKeyOverlap` reported an unknown kind"))
+            // The rust layer returned a value, so it set no error. Reading the last error here would pick up one that an
+            // earlier, unread failure on this thread left behind.
+            throw ZcashError.rustFindAccountKeyOverlap("`findAccountKeyOverlap` reported an unknown kind")
         }
 
         guard let overlappingAccount = account.unsafeToAccount() else {
-            throw ZcashError.rustFindAccountKeyOverlap(lastErrorMessage(fallback: "`findAccountKeyOverlap` reported no account"))
+            throw ZcashError.rustFindAccountKeyOverlap("`findAccountKeyOverlap` reported no account")
         }
 
         return AccountKeyOverlap(account: overlappingAccount, kind: overlapKind)

@@ -334,12 +334,14 @@ struct ZcashKeyDerivationBackend: ZcashKeyDerivationBackendWelding {
 
 // This sits in an extension because the struct body is at SwiftLint's `type_body_length` limit.
 extension ZcashKeyDerivationBackend {
-    func describeUnifiedFullViewingKey(_ ufvk: String) throws -> UnifiedFullViewingKeyComponents? {
-        guard !ufvk.containsCStringNullBytesBeforeStringEnding() else {
+    func describeUnifiedFullViewingKey(_ ufvk: UnifiedFullViewingKey) throws -> UnifiedFullViewingKeyComponents? {
+        let encoding = ufvk.stringEncoded
+
+        guard !encoding.containsCStringNullBytesBeforeStringEnding() else {
             return nil
         }
 
-        let bitmask = zcashlc_describe_unified_full_viewing_key([CChar](ufvk.utf8CString), networkType.networkId)
+        let bitmask = zcashlc_describe_unified_full_viewing_key([CChar](encoding.utf8CString), networkType.networkId)
 
         // `-1` says that `ufvk` is not a viewing key for this network. That is an answer, not a failure, and the rust layer sets no error.
         guard bitmask != -1 else {

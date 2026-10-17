@@ -116,7 +116,7 @@ public class DerivationTool: KeyDeriving {
     /// - Throws: `ZcashError.rustDescribeUnifiedFullViewingKey` if the rust layer fails to check the key. The error does not contain
     ///   any part of the key.
     public func describeUnifiedFullViewingKey(_ ufvk: UnifiedFullViewingKey) throws -> UnifiedFullViewingKeyComponents? {
-        try backend.describeUnifiedFullViewingKey(ufvk.stringEncoded)
+        try backend.describeUnifiedFullViewingKey(ufvk)
     }
 
     /// Given a seed and a number of accounts, return the associated spending keys.
