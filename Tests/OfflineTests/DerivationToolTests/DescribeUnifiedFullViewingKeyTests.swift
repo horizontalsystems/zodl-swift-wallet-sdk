@@ -58,15 +58,18 @@ struct DescribeUnifiedFullViewingKeyTests {
         #expect(try DerivationTool(networkType: .mainnet).describeUnifiedFullViewingKey(ufvk) == nil)
     }
 
-    /// Without the guard, the rust layer would read only the valid key in front of the null byte and
-    /// describe it, so a key followed by a null byte and more text would pass for a key.
+    /// `UnifiedFullViewingKey`'s public initialiser refuses an encoding with a null byte, but a key built
+    /// inside the SDK skips that check. Without the guard, the rust layer would read only the valid key in
+    /// front of the null byte and describe it, so a key followed by a null byte and more text would pass
+    /// for a key.
     @Test
-    func stringWithAnEmbeddedNullByteIsNil() throws {
+    func keyWithAnEmbeddedNullByteIsNil() throws {
         let backend = ZcashKeyDerivationBackend(networkType: .testnet)
-        let encoding = try seedDerivedKey().stringEncoded
+        let ufvk = try seedDerivedKey()
+        let withNullByte = UnifiedFullViewingKey(validatedEncoding: "\(ufvk.stringEncoded)\u{0}trailing")
 
-        #expect(try backend.describeUnifiedFullViewingKey(encoding) != nil)
-        #expect(try backend.describeUnifiedFullViewingKey("\(encoding)\u{0}trailing") == nil)
+        #expect(try backend.describeUnifiedFullViewingKey(ufvk) != nil)
+        #expect(try backend.describeUnifiedFullViewingKey(withNullByte) == nil)
     }
 
     // MARK: - Mapping of the rust layer's bitmask

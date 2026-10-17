@@ -40,14 +40,14 @@ protocol ZcashKeyDerivationBackendWelding {
     /// - Returns: true when the encoded string is a valid UFVK. false in any other case
     func isValidUnifiedFullViewingKey(_ ufvk: String) -> Bool
 
-    /// Reports which kinds of item the given string-encoded `UnifiedFullViewingKey` carries.
+    /// Reports which kinds of item `ufvk` carries.
     ///
-    /// Whitespace around the key is ignored. The rust layer never puts any part of `ufvk` in the error it reports.
-    /// - Parameter ufvk: UTF-8 encoded String to describe
-    /// - Returns: the components of the key, or `nil` when `ufvk` is not a UFVK for this backend's `networkType` or contains
-    ///   null bytes before its end
+    /// The rust layer never puts any part of `ufvk` in the error it reports.
+    /// - Parameter ufvk: the key to describe
+    /// - Returns: the components of the key, or `nil` when `ufvk` is not a UFVK for this backend's `networkType` or its
+    ///   encoding contains null bytes before its end
     /// - Throws: `rustDescribeUnifiedFullViewingKey` if the rust layer fails to check `ufvk`.
-    func describeUnifiedFullViewingKey(_ ufvk: String) throws -> UnifiedFullViewingKeyComponents?
+    func describeUnifiedFullViewingKey(_ ufvk: UnifiedFullViewingKey) throws -> UnifiedFullViewingKeyComponents?
 
     /// Verifies that the given string-encoded `UnifiedIncomingViewingKey` is valid.
     /// - Parameter uivk: UTF-8 encoded String to validate
