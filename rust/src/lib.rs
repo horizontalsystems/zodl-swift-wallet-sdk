@@ -1100,7 +1100,8 @@ pub unsafe extern "C" fn zcashlc_delete_account(
 ///
 /// Returns `true` on success, or `false` if an error is raised, including when no wallet database
 /// exists at `db_data`, which this function never creates, when no account with the given UUID
-/// exists in the wallet, and when `name` is null or not valid UTF-8.
+/// exists in the wallet, and when `name` is null, empty or not valid UTF-8. Any other name is stored
+/// as given.
 ///
 /// # Safety
 ///
@@ -1138,6 +1139,9 @@ pub unsafe extern "C" fn zcashlc_set_account_name(
         let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
         let account_uuid = account_uuid_from_bytes(account_uuid_bytes)?;
         let name = unsafe { CStr::from_ptr(name).to_str()? };
+        if name.is_empty() {
+            return Err(anyhow!("the account name is empty"));
+        }
 
         db_data.set_account_name(account_uuid, name)?;
 
@@ -6621,6 +6625,20 @@ mod tests {
             "{message}"
         );
         assert!(!missing.exists(), "the rename must not create the database");
+    }
+
+    /// An empty name is refused with a last error, and the account keeps its name.
+    #[test]
+    fn set_account_name_refuses_an_empty_name() {
+        let (_dir, db_path, account_uuid) = wallet_with_account();
+
+        assert!(!set_account_name(&db_path, &account_uuid, Some(c"")));
+
+        assert_eq!(last_error_message(), "the account name is empty");
+        assert_eq!(
+            stored_account_name(&db_path, &account_uuid).as_deref(),
+            Some(FIXTURE_ACCOUNT_NAME)
+        );
     }
 
     /// A null name is refused with a last error instead of being read, and the account keeps its

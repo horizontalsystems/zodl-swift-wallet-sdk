@@ -862,11 +862,14 @@ public protocol Synchronizer: AnyObject {
     /// Sets the human-readable name of an account, replacing any name it had. The account's keys and all other state are
     /// unchanged, and ``listAccounts()`` returns the new name afterwards. The rename does not stop synchronization.
     ///
+    /// A name is a label to show, not an identity: it can change at any time, so never derive keys, file names or other
+    /// identifiers from it.
+    ///
     /// - Parameters:
     ///   - accountUUID: the account to rename.
-    ///   - name: the new name, stored as given.
+    ///   - name: the new name. It is stored as given, except that an empty name is refused.
     /// - Throws: `ZcashError.rustSetAccountName` when the name cannot be stored, for example when no account has
-    ///   `accountUUID`, or when `name` contains a null character.
+    ///   `accountUUID`, or when `name` is empty or contains a null character.
     func renameAccount(_ accountUUID: AccountUUID, name: String) async throws
 
     /// Provides access to transaction creation and submission operations

@@ -64,10 +64,10 @@ Changes are relative to `5.2.1`.
 - `Synchronizer.renameAccount(_:name:)` stores a new name for an account in the wallet database,
   replacing any name it had. The account's keys and all other state are unchanged, and
   `listAccounts()` returns the new name afterwards. It throws the new `ZcashError.rustSetAccountName`
-  (`ZRUST0173`) when the name cannot be stored, for example when no account has the given UUID or
-  the name contains a null character. It does not stop synchronization. A protocol-extension default
-  keeps other `Synchronizer` conformers compiling; it throws, so a conformer that offers renaming
-  must implement it.
+  (`ZRUST0173`) when the name cannot be stored, for example when no account has the given UUID, or
+  the name is empty or contains a null character. It does not stop synchronization. A
+  protocol-extension default keeps other `Synchronizer` conformers compiling; it throws, so a
+  conformer that offers renaming must implement it.
 
 ## Changed
 
