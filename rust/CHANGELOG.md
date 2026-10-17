@@ -705,9 +705,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (zakura-core/wallet-libraries#83). Each entry is replaced by the release that contains its
   pull request. The `zcashlc_voting_*` C surface is unchanged.
 - `[patch.crates-io]` takes the librustzcash crates from `zcash/librustzcash@cbf8984`: the
-  `zcash_client_sqlite` 0.23.0-pre.1 release plus `WalletDb::set_account_name`
-  (zcash/librustzcash#3139), which `zcashlc_set_account_name` calls. Their versions are unchanged,
-  and the patch is replaced by the release that contains that pull request.
+  `zcash_client_sqlite` 0.23.0-pre.1 release plus a backport of `WalletDb::set_account_name`, which
+  `zcashlc_set_account_name` calls. Upstream adds the method in the draft zcash/librustzcash#3139,
+  not in this revision. Their versions are unchanged, and the patch is replaced by the release that
+  contains that pull request.
 - `zcashlc_init_data_database` now creates the
   `ext_zcashlc_orchard_ironwood_migration_immediate_runs` extension table, moving into it any
   records held by the `sdk_immediate_runs` table that read-write `zcashlc_migration_*` calls used

@@ -116,9 +116,6 @@ Changes are relative to `5.2.1`.
   `Account` no longer equals, or hashes like, the value an earlier version returned, so match
   accounts by `id`. Its `Codable` encoding now includes both keys, so an `Account` a wallet stores
   or sends carries the account's viewing key. See `MIGRATING.md`.
-- The librustzcash crates now come from a git revision of their current pre-release that adds the
-  account renaming `Synchronizer.renameAccount(_:name:)` relies on. Their versions are unchanged,
-  and the family rides that revision until a librustzcash release publishes the change.
 
 ## Removed
 
