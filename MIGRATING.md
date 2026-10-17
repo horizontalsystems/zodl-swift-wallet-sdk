@@ -56,8 +56,12 @@ exhaustive `switch` over either type stops compiling until they are handled.
   would fail.
 
 The payloads of the first two are the rust layer's message, which never contains any part of the key.
-Those two failures say nothing about the key itself, so report that the key could not be checked, not
-that it is invalid. The third is an answer about the key: its import would fail, so refuse it.
+With one exception, those two failures say nothing about the key itself, so report that the key could
+not be checked, not that it is invalid. The exception is a key for another network than the wallet's:
+`findAccountSharingKeyComponents(_:)` throws `rustFindAccountKeyOverlap` for it every time, so build
+the `UnifiedFullViewingKey` for the wallet's own network, or check it first with
+`DerivationTool.describeUnifiedFullViewingKey(_:)`, which returns `nil` for it. The third is an answer
+about the key: its import would fail, so refuse it.
 
 ```swift
 case .rustDescribeUnifiedFullViewingKey, .rustFindAccountKeyOverlap:
