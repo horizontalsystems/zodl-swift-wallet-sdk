@@ -129,6 +129,26 @@ struct AccountKeyOverlapTests {
         #expect(missingAccount?.code == .rustFindAccountKeyOverlap)
     }
 
+    /// The rust layer sets no error when it returns a value, so an error that an earlier failure on the
+    /// same thread left unread must not become the message of these failures.
+    @Test
+    func unknownKindOrMissingAccountIgnoresAStaleError() {
+        defer { zcashlc_clear_last_error() }
+
+        // An unknown network id makes the call fail and leave its message as this thread's last error.
+        #expect(zcashlc_describe_unified_full_viewing_key([CChar]("".utf8CString), 99) == -2)
+
+        let unknownKind = #expect(throws: ZcashError.self) {
+            try reported(FfiAccountKeyOverlapKind(rawValue: 5)).unsafeToAccountKeyOverlap()
+        }
+        #expect(overlapMessage(unknownKind) == "`findAccountKeyOverlap` reported an unknown kind")
+
+        let missingAccount = #expect(throws: ZcashError.self) {
+            try reported(FfiAccountKeyOverlapKind_Conflicting, reportsAccount: false).unsafeToAccountKeyOverlap()
+        }
+        #expect(overlapMessage(missingAccount) == "`findAccountKeyOverlap` reported no account")
+    }
+
     // MARK: - Synchronizers
 
     @Test
@@ -165,6 +185,14 @@ struct AccountKeyOverlapTests {
 
     /// What `zcashlc_find_account_key_overlap` returns for `kind` when it reports `Self.account`, or,
     /// when `reportsAccount` is `false`, the all-zero account it reports for no account.
+    /// `ZcashError`'s `==` compares only the code, so the message has to be read from the case itself.
+    private func overlapMessage(_ error: ZcashError?) -> String? {
+        guard case let .rustFindAccountKeyOverlap(message)? = error else {
+            return nil
+        }
+        return message
+    }
+
     private func reported(_ kind: FfiAccountKeyOverlapKind, reportsAccount: Bool = true) -> FfiAccountKeyOverlap {
         var account = FfiAccount()
         if reportsAccount {
