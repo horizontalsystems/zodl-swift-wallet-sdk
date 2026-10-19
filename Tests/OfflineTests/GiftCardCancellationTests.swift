@@ -415,7 +415,8 @@ struct GiftCardCancellationFixture {
             },
             cleanupTiming: cleanupTiming,
             checkTiming: checkTiming,
-            checkPolicy: checkPolicy
+            checkPolicy: checkPolicy,
+            saplingParamsSourceURL: .tests
         )
         return GiftCardCancellationFixture(
             card: card,

@@ -6,6 +6,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 # Unreleased
 
+# 6.0.0 - 2026-10-15
+
 Changes are relative to `5.2.1`.
 
 ## Added
@@ -132,6 +134,14 @@ Changes are relative to `5.2.1`.
   of `ZcashError.rustImportAccountUfvk`, `rustDeriveAddressFromUfvk` and `rustSlipstreamStart` used
   to repeat the value that failed to decode, followed by the decoder's description of it; it is now
   a fixed sentence.
+
+## Checkpoints
+
+Mainnet
+
+````
+Sources/ZODLSwiftWalletSDK/Resources/checkpoints/mainnet/3517500.json
+````
 
 # 5.2.1 - 2026-10-14
 
