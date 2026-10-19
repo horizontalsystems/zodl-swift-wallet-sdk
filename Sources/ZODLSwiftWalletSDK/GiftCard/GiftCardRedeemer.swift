@@ -229,7 +229,8 @@ public actor GiftCardRedeemer {
             storageDirectory: storageDirectory,
             loggingPolicy: loggingPolicy,
             container: DIContainer(),
-            makeSynchronizer: { SlipstreamSynchronizer(initializer: $0) }
+            makeSynchronizer: { SlipstreamSynchronizer(initializer: $0) },
+            saplingParamsSourceURL: .default
         )
     }
 
@@ -244,7 +245,8 @@ public actor GiftCardRedeemer {
         makeSynchronizer: (Initializer) -> SlipstreamSynchronizer,
         cleanupTiming: GiftCardCleanupTiming = .live,
         checkTiming: GiftCardCleanupTiming = .live,
-        checkPolicy: GiftCardCheckPolicy? = nil
+        checkPolicy: GiftCardCheckPolicy? = nil,
+        saplingParamsSourceURL: SaplingParamsSourceURL
     ) throws {
         guard card.network == network.networkType else {
             throw ZcashError.giftCardNetworkMismatch
@@ -274,7 +276,7 @@ public actor GiftCardRedeemer {
             network: network,
             spendParamsURL: rootDirectory.appendingPathComponent("sapling-spend.params"),
             outputParamsURL: rootDirectory.appendingPathComponent("sapling-output.params"),
-            saplingParamsSourceURL: .default,
+            saplingParamsSourceURL: saplingParamsSourceURL,
             alias: alias,
             loggingPolicy: loggingPolicy,
             isTorEnabled: isTorEnabled,
