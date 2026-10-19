@@ -632,14 +632,13 @@ public class Initializer {
 
     /// [v2.1 E-6] Resolve the slipstream provisioning anchor. RESTORE ⇒ `chainTip` = the
     /// recover_until height: the engine's live tip, or offline max(bundled checkpoint,
-    /// birthday+1) (the syncLogsMac9 rule). The engine passes the server's tip on unchecked,
-    /// though, so there is NO anchor when that tip is one the SDK can't use (see
-    /// `SlipstreamRestoreAnchor.init(serverHeight:treeState:)`), or when the anchor can't be
-    /// resolved at all. `chainTip` is then nil and the account is created without a recovery
-    /// height: the restore looks like a new wallet, and `isRecovering` stays false while it
-    /// catches up. Only the classic `SDKSynchronizer` restore falls back to the bundled
-    /// checkpoint. NEW ⇒ `treeState` = the reorg-safe recent server tree state, or nil offline
-    /// or without an anchor (the caller keeps the bundled checkpoint defaults).
+    /// birthday+1) (the syncLogsMac9 rule), which is also what a server tip above Int32.max
+    /// gets. There is NO anchor only when it can't be resolved at all, or carries a height the
+    /// SDK can't use (see `SlipstreamRestoreAnchor.init(serverHeight:treeState:)`). `chainTip`
+    /// is then nil and the account is created without a recovery height: the restore looks
+    /// like a new wallet, and `isRecovering` stays false while it catches up. NEW ⇒
+    /// `treeState` = the reorg-safe recent server tree state, or nil offline or without an
+    /// anchor (the caller keeps the bundled checkpoint defaults).
     private func resolveSlipstreamAnchor(
         _ anchorSource: (Bool, BlockHeight, BlockHeight) async -> SlipstreamRestoreAnchor?,
         checkpointSource: CheckpointSource,

@@ -125,11 +125,11 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   network does not check that tip during sync, and `SlipstreamSynchronizer` never reports it.
   `evaluateBestOf(...)` and `evaluateServerSwitch(...)` skip such a server on every network. A
   wallet or gift card wallet that is created while the server sends such a tree state keeps the
-  bundled checkpoint. A restore with `SDKSynchronizer` while the server reports such a tip recovers
-  until the same height as when the server cannot be reached, and its `importAccount` throws
-  `synchronizerNotPrepared`, as it does then. With `SlipstreamSynchronizer`, a restore and
-  `importAccount` get no recovery height instead: the restore looks like a new wallet, and
-  `SynchronizerState.isRecovering` stays false while it catches up. With Tor enabled,
+  bundled checkpoint. A restore while the server reports such a tip recovers until the same height
+  as when the server cannot be reached, with `SDKSynchronizer` and `SlipstreamSynchronizer` alike,
+  and `importAccount` does what it does then too: `SDKSynchronizer`'s throws
+  `synchronizerNotPrepared`, and `SlipstreamSynchronizer`'s imports the account with the recovery
+  height it gets when the server cannot be reached. With Tor enabled,
   `getTreeState(height:)` on `Synchronizer`, `SDKSynchronizer` and `SlipstreamSynchronizer` throws
   `ZcashError.rustTorLwdGetTreeState` for a height above `Int32.max` without contacting the server,
   where it used to crash above `UInt32.max`. A transaction that a server reports at such a height

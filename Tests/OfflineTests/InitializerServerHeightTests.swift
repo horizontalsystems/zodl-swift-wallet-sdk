@@ -140,9 +140,10 @@ final class InitializerServerHeightTests: ZcashTestCase {
         XCTAssertEqual(fixture.created?.recoverUntil, 3_100_000)
     }
 
-    /// The engine passes on the tip its server reported without checking it, and the anchor at a tip the SDK can't use
-    /// is nil. Unlike the classic restore, which falls back to the bundled checkpoint, a restore without an anchor is
-    /// created without a recovery height, so it looks like a new wallet while it catches up.
+    /// The anchor at a height the SDK can't use is nil. The engine resolves a server tip above Int32.max like an
+    /// unreachable server, so it reports such a height only for a birthday or checkpoint height above Int32.max. Unlike
+    /// the classic restore, which falls back to the bundled checkpoint, a restore without an anchor is created without a
+    /// recovery height, so it looks like a new wallet while it catches up.
     func testSlipstreamRestoreWithoutAnAnchorIsCreatedWithoutARecoveryHeight() async throws {
         for tip in [UInt64(Int32.max) + 1, UInt64(UInt32.max), UInt64(Int64.max) + 1, UInt64.max] {
             mockContainer = DIContainer()

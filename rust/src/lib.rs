@@ -7904,6 +7904,9 @@ pub unsafe extern "C" fn zcashlc_slipstream_notify_tx_change(
 ///   recent tree state (`tip − 100`, floored at Sapling activation); offline ⇒ `height` 0 +
 ///   null `treestate` (the host keeps its bundled checkpoint defaults).
 ///
+/// A server tip or tree-state height above `i32::MAX` resolves as offline, so `height` is above
+/// `i32::MAX` only when `birthday` or `fallback_checkpoint_height` is.
+///
 /// Handle-less by design: provisioning happens BEFORE [`zcashlc_slipstream_open`] in the
 /// host init flow, and `importAccount` must not serialize against the live handle. Creates
 /// a short-lived runtime and blocks until resolved (typically one round-trip; the direct
