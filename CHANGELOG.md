@@ -6,6 +6,14 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 # Unreleased
 
+## Fixed
+
+- TLS connections that the SDK's Rust core opens, such as those to lightwalletd servers and HTTP
+  endpoints over Tor, no longer trust the "emSign ECC Root CA - G3" root, and reject certificate
+  chains through a small set of intermediate keys that are now distrusted over specific security
+  concerns (`webpki-roots` 1.0.10, `rustls-webpki` 0.103.16). A server whose certificate chains to
+  either now fails the TLS handshake. No caller changes are required.
+
 # 5.2.1 - 2026-10-14
 
 ## Changed
