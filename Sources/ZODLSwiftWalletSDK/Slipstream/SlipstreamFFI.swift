@@ -144,6 +144,37 @@ public struct SlipstreamStopReport: Equatable, Sendable {
         settled && drained
     }
 
+    /// Which of the stop's waits ran out, and after how long, as the end of a sentence — for
+    /// instance `a sync pass was still running after 10.0 s` — or `nil` for a quiescent report,
+    /// which refuses nothing. `ZcashError.slipstreamEngineNotQuiescent` shows it in its
+    /// `errorDescription`. It is built from the two verdicts and the two waits alone, so it names
+    /// no account, key or address.
+    public var refusalReason: String? {
+        let settle = Self.seconds(settleWait)
+        let drain = Self.seconds(drainWait)
+        switch (settled, drained) {
+        case (true, true):
+            return nil
+        case (false, true):
+            return "a sync pass was still running after \(settle)"
+        case (true, false):
+            return "a wallet write was still running after \(drain)"
+        case (false, false) where settleWait == .zero && drainWait == .zero:
+            // A wait that ran out took at least its budget, so two failed verdicts without any wait
+            // are the FFI's answer for a stop that could not run at all, not a timeout.
+            return "the engine's stop failed before it could wait"
+        case (false, false):
+            return "a sync pass was still running after \(settle), and a wallet write after a further \(drain)"
+        }
+    }
+
+    /// `duration` in seconds to one decimal place, with the unit: `10.0 s`.
+    private static func seconds(_ duration: Swift.Duration) -> String {
+        let (seconds, attoseconds) = duration.components
+        let value = Double(seconds) + Double(attoseconds) / 1e18
+        return "\(String(format: "%.1f", value)) s"
+    }
+
     /// The report of a stop that had nothing to wait for. A stop answers it when the engine has no
     /// open handle, because then nothing can be writing.
     static let quiescent = SlipstreamStopReport(settled: true, drained: true, settleWait: .zero, drainWait: .zero)

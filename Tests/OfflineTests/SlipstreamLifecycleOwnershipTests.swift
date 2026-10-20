@@ -727,9 +727,11 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
             try await sync.deleteAccount(TestsData.mockedAccountUUID)
             XCTFail("a non-quiescent stop must refuse the mutation")
         } catch let error as ZcashError {
-            guard case .slipstreamEngineNotQuiescent = error else {
+            guard case .slipstreamEngineNotQuiescent(let report) = error else {
                 return XCTFail("unexpected error \(error.code)")
             }
+            XCTAssertEqual(report, .passStillRunning, "the refusal carries the stop's report")
+            XCTAssertEqual(error.detail, "a sync pass was still running after 10.0 s", "and says which wait ran out")
         }
 
         XCTAssertFalse(welding.deleteAccountCalled, "the wallet must not be mutated on top of a live writer")
@@ -759,9 +761,11 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
             try await sync.deleteAccount(TestsData.mockedAccountUUID)
             XCTFail("a stop whose wallet write outlived its budget must refuse the mutation")
         } catch let error as ZcashError {
-            guard case .slipstreamEngineNotQuiescent = error else {
+            guard case .slipstreamEngineNotQuiescent(let report) = error else {
                 return XCTFail("unexpected error \(error.code)")
             }
+            XCTAssertEqual(report, .writeStillRunning, "the refusal carries the stop's report")
+            XCTAssertEqual(error.detail, "a wallet write was still running after 10.0 s", "and says which wait ran out")
         }
 
         XCTAssertFalse(welding.deleteAccountCalled, "the wallet must not be mutated on top of a live writer")
@@ -847,9 +851,10 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
             .store(in: &cancellables)
         await fulfillment(of: [failed], timeout: 5)
 
-        guard case .slipstreamEngineNotQuiescent = try XCTUnwrap(rewindError as? ZcashError) else {
+        guard case .slipstreamEngineNotQuiescent(let report) = try XCTUnwrap(rewindError as? ZcashError) else {
             return XCTFail("a non-quiescent stop must refuse the truncate")
         }
+        XCTAssertEqual(report, .passStillRunning, "the refusal carries the stop's report")
         XCTAssertFalse(
             welding.truncateToChainStateChainStateCalled,
             "the chain state must not be truncated on top of a live writer"
@@ -929,9 +934,10 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
             .store(in: &cancellables)
         await fulfillment(of: [finished], timeout: 5)
 
-        guard case .slipstreamEngineNotQuiescent = try XCTUnwrap(wipeError as? ZcashError) else {
+        guard case .slipstreamEngineNotQuiescent(let report) = try XCTUnwrap(wipeError as? ZcashError) else {
             return XCTFail("a non-quiescent stop must refuse the wipe")
         }
+        XCTAssertEqual(report, .passStillRunning, "the refusal carries the stop's report")
         let calls = await engine.calls
         XCTAssertFalse(calls.contains("close"), "the handle must not be freed under a live writer: \(calls)")
         XCTAssertNotEqual(sync.latestState.internalSyncStatus, .unprepared, "the wallet was left intact")
@@ -954,9 +960,10 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
             try await sync.switchTo(endpoint: LightWalletEndpoint(address: "other.example.com", port: 443, secure: true))
             XCTFail("a non-quiescent stop must refuse the reopen")
         } catch let error as ZcashError {
-            guard case .slipstreamEngineNotQuiescent = error else {
+            guard case .slipstreamEngineNotQuiescent(let report) = error else {
                 return XCTFail("unexpected error \(error.code)")
             }
+            XCTAssertEqual(report, .passStillRunning, "the refusal carries the stop's report")
         }
 
         let calls = await engine.calls
@@ -964,6 +971,40 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
             calls.contains { $0.hasPrefix("reopen(") },
             "a second handle must not be opened onto a wallet the first one may still be writing: \(calls)"
         )
+    }
+
+    /// [MOB-2184] The stall recovery reopens the handle, so it meets the same refusal. It has no
+    /// caller to throw to, so the host learns of it from the state stream, with the reason, right
+    /// after the give-up, and no second handle is opened.
+    func testAStallRecoveryRefusedByItsStopReportsTheReasonAndOpensNoHandle() async throws {
+        let engine = GatedFakeSlipstreamEngine()
+        await engine.setNextSnapshot(SlipstreamSnapshot.testSyncing(progressPermille: 100))
+        let sync = try makeSlipstreamSynchronizer(engine: engine)
+        await sync.setInternalSyncStatusForTesting(.disconnected)
+        let events = RecordedEvents()
+        sync.eventStream.sink { events.append($0) }.store(in: &cancellables)
+
+        try await sync.start(retry: false)
+        engine.stopReport = .passStillRunning
+
+        await sync.runStallRecovery(
+            expectedPassGeneration: await sync.passGenerationForTesting(),
+            expectedStopRequestGeneration: await sync.stopRequestGenerationForTesting(),
+            attempt: 1
+        )
+
+        guard case .error(let error) = sync.latestState.internalSyncStatus else {
+            return XCTFail("the refusal must reach the state stream: \(sync.latestState.internalSyncStatus)")
+        }
+        XCTAssertEqual((error as? ZcashError)?.code, .slipstreamEngineNotQuiescent)
+        XCTAssertEqual((error as? ZcashError)?.detail, "a sync pass was still running after 10.0 s")
+        XCTAssertEqual(
+            events.syncStalledEvents,
+            [SyncStalledReport(attempt: 1, gaveUp: false), SyncStalledReport(attempt: 1, gaveUp: true)],
+            "the host hears the restart and the give-up"
+        )
+        let calls = await engine.calls
+        XCTAssertFalse(calls.contains { $0.hasPrefix("reopen(") }, "no second handle was opened: \(calls)")
     }
 
     /// The control: a quiescent stop is the ordinary case, and it must still mutate. Without this

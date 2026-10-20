@@ -158,7 +158,7 @@ final class GiftCardCleanupTests: ZcashTestCase {
             try await fixture.redeemer.cleanup()
             XCTFail("A refused wipe must propagate its error")
         } catch {
-            XCTAssertEqual(error as? ZcashError, .slipstreamEngineNotQuiescent)
+            XCTAssertEqual((error as? ZcashError)?.code, .slipstreamEngineNotQuiescent)
         }
         let isOpen = await fixture.engine.isOpen
         XCTAssertTrue(isOpen)
@@ -631,7 +631,7 @@ final class GiftCardCleanupTests: ZcashTestCase {
             try await fixture.redeemer.cleanup()
             XCTFail("Refused wipe must retain the cached native owners")
         } catch {
-            XCTAssertEqual(error as? ZcashError, .slipstreamEngineNotQuiescent)
+            XCTAssertEqual((error as? ZcashError)?.code, .slipstreamEngineNotQuiescent)
         }
         XCTAssertEqual(events.events, ["connect:default", "connect:group"])
         XCTAssertTrue(runtimes.isAlive(runtimes.parent))

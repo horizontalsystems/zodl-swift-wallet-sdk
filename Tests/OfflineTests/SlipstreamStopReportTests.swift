@@ -57,4 +57,45 @@ final class SlipstreamStopReportTests: ZcashTestCase {
         XCTAssertLessThan(report.settleWait, .seconds(1), "\(report)")
         XCTAssertLessThan(report.drainWait, .seconds(1), "\(report)")
     }
+
+    /// [MOB-2184] The reason names the wait that ran out and how long it took, in each of the three
+    /// shapes a refusal can take, and names nothing when nothing was refused.
+    func testTheRefusalReasonNamesTheWaitThatRanOutAndHowLong() {
+        let bothRanOut = SlipstreamStopReport(
+            settled: false,
+            drained: false,
+            settleWait: .milliseconds(10_004),
+            drainWait: .milliseconds(12_345)
+        )
+
+        XCTAssertEqual(SlipstreamStopReport.passStillRunning.refusalReason, "a sync pass was still running after 10.0 s")
+        XCTAssertEqual(SlipstreamStopReport.writeStillRunning.refusalReason, "a wallet write was still running after 10.0 s")
+        XCTAssertEqual(
+            bothRanOut.refusalReason,
+            "a sync pass was still running after 10.0 s, and a wallet write after a further 12.3 s"
+        )
+        XCTAssertNil(SlipstreamStopReport.quiescent.refusalReason, "a quiescent stop refuses nothing")
+    }
+
+    /// A stop that could not run at all — the FFI answers it with both verdicts false and no wait —
+    /// must not read as a timeout of zero seconds.
+    func testAStopThatCouldNotRunSaysSoRatherThanNamingAWait() {
+        let report = SlipstreamStopReport(FfiSlipstreamStopReport(settled: 0, drained: 0, settle_ms: 0, drain_ms: 0))
+
+        XCTAssertFalse(report.isQuiescent)
+        XCTAssertEqual(report.refusalReason, "the engine's stop failed before it could wait")
+    }
+
+    /// The app shows a refusal through `localizedDescription`, so that is where the reason has to
+    /// arrive: after the code and the case's fixed message, as the error's detail.
+    func testARefusalSaysInItsDescriptionWhichWaitRanOut() {
+        let error = ZcashError.slipstreamEngineNotQuiescent(.passStillRunning)
+
+        XCTAssertEqual(error.code, .slipstreamEngineNotQuiescent)
+        XCTAssertEqual(error.detail, "a sync pass was still running after 10.0 s")
+        XCTAssertEqual(
+            error.localizedDescription,
+            "ZRUST0155: \(error.message) (a sync pass was still running after 10.0 s)"
+        )
+    }
 }

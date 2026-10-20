@@ -696,10 +696,9 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         // the pass is stopped either way, and an engine writer that outlives it has only the
         // engine's own file to finish with.
         let report = await engine.stop()
-        if !report.isQuiescent {
-            let waits = "settled: \(report.settled) after \(report.settleWait), drained: \(report.drained) after \(report.drainWait)"
+        if let reason = report.refusalReason {
             initializer.logger.warn(
-                "SlipstreamSynchronizer.stop: the engine reported a non-quiescent stop (\(waits))",
+                "SlipstreamSynchronizer.stop: the engine reported a non-quiescent stop: \(reason)",
                 file: #file,
                 function: #function,
                 line: #line
@@ -1127,7 +1126,7 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
 
         do {
             guard report.isQuiescent else {
-                throw ZcashError.slipstreamEngineNotQuiescent
+                throw ZcashError.slipstreamEngineNotQuiescent(report)
             }
             try await engine.reopen(server: currentEndpoint, network: initializer.network)
         } catch {
@@ -1565,7 +1564,7 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         let report = await engine.stop()
         guard report.isQuiescent else {
             await restartAfterARefusedOperation(wasRunning: wasRunning)
-            throw ZcashError.slipstreamEngineNotQuiescent
+            throw ZcashError.slipstreamEngineNotQuiescent(report)
         }
 
         let uuid: AccountUUID
@@ -1654,7 +1653,7 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         let report = await engine.stop()
         guard report.isQuiescent else {
             await restartAfterARefusedOperation(wasRunning: wasRunning)
-            throw ZcashError.slipstreamEngineNotQuiescent
+            throw ZcashError.slipstreamEngineNotQuiescent(report)
         }
 
         do {
@@ -2146,7 +2145,7 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         let report = await engine.stop()
         guard report.isQuiescent else {
             await restartAfterARefusedOperation(wasRunning: wasRunning)
-            subject.send(completion: .failure(ZcashError.slipstreamEngineNotQuiescent))
+            subject.send(completion: .failure(ZcashError.slipstreamEngineNotQuiescent(report)))
             return
         }
 
@@ -2263,7 +2262,7 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         let report = await engine.stop()
         guard report.isQuiescent else {
             await restartAfterARefusedOperation(wasRunning: wasRunning)
-            subject.send(completion: .failure(ZcashError.slipstreamEngineNotQuiescent))
+            subject.send(completion: .failure(ZcashError.slipstreamEngineNotQuiescent(report)))
             return
         }
 
@@ -2617,7 +2616,7 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         let report = await engine.stop()
         guard report.isQuiescent else {
             await restartAfterARefusedOperation(wasRunning: wasRunning)
-            throw ZcashError.slipstreamEngineNotQuiescent
+            throw ZcashError.slipstreamEngineNotQuiescent(report)
         }
 
         // Re-open the engine handle against the new endpoint.
@@ -2685,7 +2684,7 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         let report = await engine.stop()
         guard report.isQuiescent else {
             await restartAfterARefusedOperation(wasRunning: wasRunning)
-            throw ZcashError.slipstreamEngineNotQuiescent
+            throw ZcashError.slipstreamEngineNotQuiescent(report)
         }
 
         try await engine.reopen(server: endpoint, network: initializer.network)
