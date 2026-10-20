@@ -474,10 +474,15 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   zero the wallet database reports for every non-stabilized note until that range is scanned. A
   pass that stalls before scanning it, or that never queues a ChainTip-priority range, keeps
   `tip_fresh = 0` until it reaches Done. The field and its type are unchanged.
-- `zcashlc_slipstream_stop` now returns `false` while any aborted pass is still unwinding or an
-  in-flight wallet commit has not drained within its bounded budget, and a pass that outlived an
-  earlier stop or start stays on record so a later stop keeps reporting `false` until it has
-  actually finished; previously it returned `true` regardless.
+- `zcashlc_slipstream_stop` returns an `FfiSlipstreamStopReport` by value instead of `bool`. Its
+  `settled` (`uint8_t`) is 0 while any aborted pass is still unwinding when the stop's ten-second
+  budget runs out, and `drained` is 0 while an in-flight wallet commit has not drained within its
+  own ten-second budget; each is 1 otherwise. `settle_ms` and `drain_ms` (`uint64_t`) say how long
+  each wait took. A pass that outlived an earlier stop or start stays on record, so a later stop
+  keeps reporting `settled = 0` until that pass has actually finished. A stop that cannot run, on a
+  null handle for instance, returns all zeros. Previously the function returned `true` regardless.
+  A caller that read the `bool` must read the struct: the wallet file was proved quiescent only
+  when `settled` and `drained` are both 1.
 - `zcashlc_propose_transfer`, `zcashlc_propose_transfer_from_uri`,
   `zcashlc_propose_send_max_transfer`, and `zcashlc_create_proposed_transactions` classify their
   failures instead of flattening them into a string. Their last-error text now reads

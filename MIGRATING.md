@@ -1,5 +1,27 @@
 # Migrating from previous versions to _Unreleased_
 
+## `SlipstreamEngine.stop()` returns a `SlipstreamStopReport`
+
+The stop used to answer only whether it proved the wallet file quiescent. It now says what it
+found, and the old answer is the report's `isQuiescent`:
+
+```swift
+// Before
+let quiescent = await engine.stop()
+if !quiescent {
+    // The engine could not prove its pass and its wallet writer had stopped.
+}
+
+// After
+let report = await engine.stop()
+if !report.isQuiescent {
+    // `report.settled` and `report.drained` say which of the two waits ran out, and
+    // `report.settleWait` and `report.drainWait` how long each took.
+}
+```
+
+A call that discards the result, such as `await engine.stop()`, compiles unchanged.
+
 ## Imported accounts return their viewing keys — `Account.ufvk` and `Account.uivk`
 
 `Synchronizer.listAccounts()`, and every other API that returns an `Account`, now returns the

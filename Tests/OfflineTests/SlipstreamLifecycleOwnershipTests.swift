@@ -721,7 +721,7 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
         await sync.setInternalSyncStatusForTesting(.disconnected)
 
         try await sync.start(retry: false)
-        engine.stopQuiescent = false
+        engine.stopReport = .passStillRunning
 
         do {
             try await sync.deleteAccount(TestsData.mockedAccountUUID)
@@ -741,6 +741,33 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
         XCTAssertTrue(isRunning, "a refused mutation leaves the synchronizer running, as it found it")
     }
 
+    /// [MOB-2184] Either wait running out leaves the wallet file unproved. A stop whose pass
+    /// finished unwinding but whose wallet write did not drain refuses the mutation just as firmly
+    /// as one whose pass is still running.
+    func testDeleteRefusesToMutateWhenAWalletWriteOutlivedTheStop() async throws {
+        let engine = GatedFakeSlipstreamEngine()
+        await engine.setNextSnapshot(SlipstreamSnapshot.testSyncing(progressPermille: 100))
+        let welding = ZcashRustBackendWeldingMock()
+        welding.deleteAccountClosure = { _ in }
+        let sync = try makeSlipstreamSynchronizer(engine: engine, welding: welding)
+        await sync.setInternalSyncStatusForTesting(.disconnected)
+
+        try await sync.start(retry: false)
+        engine.stopReport = .writeStillRunning
+
+        do {
+            try await sync.deleteAccount(TestsData.mockedAccountUUID)
+            XCTFail("a stop whose wallet write outlived its budget must refuse the mutation")
+        } catch let error as ZcashError {
+            guard case .slipstreamEngineNotQuiescent = error else {
+                return XCTFail("unexpected error \(error.code)")
+            }
+        }
+
+        XCTAssertFalse(welding.deleteAccountCalled, "the wallet must not be mutated on top of a live writer")
+        sync.stop()
+    }
+
     /// [MOB-1850] The refusal must not wear off. A stop whose budget ran out gave up waiting for a
     /// pass, but giving up is not the pass finishing, so the stop AFTER it faces the very same live
     /// writer and must refuse just as firmly. This is the shape that reached the field: the second
@@ -755,7 +782,7 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
         await sync.setInternalSyncStatusForTesting(.disconnected)
 
         try await sync.start(retry: false)
-        engine.stopQuiescent = false
+        engine.stopReport = .passStillRunning
 
         for attempt in 1...2 {
             do {
@@ -803,7 +830,7 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
         await sync.setInternalSyncStatusForTesting(.disconnected)
 
         try await sync.start(retry: false)
-        engine.stopQuiescent = false
+        engine.stopReport = .passStillRunning
 
         let failed = XCTestExpectation(description: "rewind reported the refusal")
         var rewindError: Error?
@@ -843,7 +870,7 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
         await sync.setInternalSyncStatusForTesting(.disconnected)
 
         try await sync.start(retry: false)
-        engine.stopQuiescent = false
+        engine.stopReport = .passStillRunning
 
         for attempt in 1...2 {
             let failed = XCTestExpectation(description: "rewind attempt \(attempt) reported the refusal")
@@ -885,7 +912,7 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
         await sync.setInternalSyncStatusForTesting(.disconnected)
 
         try await sync.start(retry: false)
-        engine.stopQuiescent = false
+        engine.stopReport = .passStillRunning
 
         let finished = XCTestExpectation(description: "wipe reported the refusal")
         var wipeError: Error?
@@ -921,7 +948,7 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
         await sync.setInternalSyncStatusForTesting(.disconnected)
 
         try await sync.start(retry: false)
-        engine.stopQuiescent = false
+        engine.stopReport = .passStillRunning
 
         do {
             try await sync.switchTo(endpoint: LightWalletEndpoint(address: "other.example.com", port: 443, secure: true))
@@ -969,7 +996,7 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
         await sync.setInternalSyncStatusForTesting(.disconnected)
 
         try await sync.start(retry: false)
-        engine.stopQuiescent = false
+        engine.stopReport = .passStillRunning
 
         do {
             try await sync.deleteAccount(TestsData.mockedAccountUUID)
@@ -982,7 +1009,7 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
         XCTAssertFalse(welding.deleteAccountCalled, "nothing was written while the writer was unaccounted for")
 
         // The writer finished: the engine can now prove what it could not prove before.
-        engine.stopQuiescent = true
+        engine.stopReport = .quiescent
 
         try await sync.deleteAccount(TestsData.mockedAccountUUID)
 

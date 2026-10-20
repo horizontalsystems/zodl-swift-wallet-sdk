@@ -695,10 +695,11 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         // non-quiescent one changes nothing here beyond what a reader of the logs should know:
         // the pass is stopped either way, and an engine writer that outlives it has only the
         // engine's own file to finish with.
-        let quiescent = await engine.stop()
-        if !quiescent {
+        let report = await engine.stop()
+        if !report.isQuiescent {
+            let waits = "settled: \(report.settled) after \(report.settleWait), drained: \(report.drained) after \(report.drainWait)"
             initializer.logger.warn(
-                "SlipstreamSynchronizer.stop: the engine reported a non-quiescent stop",
+                "SlipstreamSynchronizer.stop: the engine reported a non-quiescent stop (\(waits))",
                 file: #file,
                 function: #function,
                 line: #line
@@ -1122,10 +1123,10 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         // collision the recovery exists to clear. Thrown into the reopen's own failure handling,
         // so the attempt counts as spent and the host hears the give-up exactly as it would from
         // an endpoint that could not be reopened at all.
-        let quiescent = await engine.stop()
+        let report = await engine.stop()
 
         do {
-            guard quiescent else {
+            guard report.isQuiescent else {
                 throw ZcashError.slipstreamEngineNotQuiescent
             }
             try await engine.reopen(server: currentEndpoint, network: initializer.network)
@@ -1561,7 +1562,8 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         // proceed on the assumption: an orphan commit landing after the force-re-queue is exactly
         // the silent scope loss this serialization exists to prevent. Leave the wallet untouched,
         // put the pass back the way it was found, and tell the caller.
-        guard await engine.stop() else {
+        let report = await engine.stop()
+        guard report.isQuiescent else {
             await restartAfterARefusedOperation(wasRunning: wasRunning)
             throw ZcashError.slipstreamEngineNotQuiescent
         }
@@ -1649,7 +1651,8 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         // [MOB-1850] See `importAccountOnLifecycleQueue`: deleting an account whose key an
         // in-flight pass may still be writing notes for is what killed the wallet in the first
         // place, so a stop the engine could not prove refuses the delete rather than risking it.
-        guard await engine.stop() else {
+        let report = await engine.stop()
+        guard report.isQuiescent else {
             await restartAfterARefusedOperation(wasRunning: wasRunning)
             throw ZcashError.slipstreamEngineNotQuiescent
         }
@@ -2140,7 +2143,8 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         // writer the engine could not account for is precisely what stopping first is meant to
         // rule out, so an unproved stop refuses the truncate instead of gambling on it. Reported
         // on the subject, the channel every other rewind failure uses.
-        guard await engine.stop() else {
+        let report = await engine.stop()
+        guard report.isQuiescent else {
             await restartAfterARefusedOperation(wasRunning: wasRunning)
             subject.send(completion: .failure(ZcashError.slipstreamEngineNotQuiescent))
             return
@@ -2256,7 +2260,8 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         // that most needs the stop it is standing on to have been real. On an unproved stop it
         // frees nothing and deletes nothing: closing the handle under a live writer, or removing
         // the database out from under one, is worse than any wipe that did not happen.
-        guard await engine.stop() else {
+        let report = await engine.stop()
+        guard report.isQuiescent else {
             await restartAfterARefusedOperation(wasRunning: wasRunning)
             subject.send(completion: .failure(ZcashError.slipstreamEngineNotQuiescent))
             return
@@ -2609,7 +2614,8 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         // [MOB-1850] A switch REOPENS the handle, and a second handle onto a wallet the first one
         // may still be writing is a collision no endpoint change is worth. On an unproved stop the
         // switch is refused and the pass is put back where it was found.
-        guard await engine.stop() else {
+        let report = await engine.stop()
+        guard report.isQuiescent else {
             await restartAfterARefusedOperation(wasRunning: wasRunning)
             throw ZcashError.slipstreamEngineNotQuiescent
         }
@@ -2676,7 +2682,8 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         // [MOB-1850] `switchToOnLifecycleQueue`'s reasoning verbatim: this rebuilds the handle, so
         // an unproved stop must not be built on. Unlike a switch this is usually called when
         // nothing is running, in which case there is nothing to put back.
-        guard await engine.stop() else {
+        let report = await engine.stop()
+        guard report.isQuiescent else {
             await restartAfterARefusedOperation(wasRunning: wasRunning)
             throw ZcashError.slipstreamEngineNotQuiescent
         }

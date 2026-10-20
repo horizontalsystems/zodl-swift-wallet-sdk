@@ -6,6 +6,20 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 # Unreleased
 
+## Added
+
+- `SlipstreamStopReport`, what a stop of the Slipstream engine found: whether every sync pass the
+  engine had aborted finished unwinding within its ten-second budget (`settled`), whether no engine
+  wallet write was still running within its own (`drained`), how long each wait took (`settleWait`,
+  `drainWait`, as `Duration`), and `isQuiescent`, which is true only when both waits finished. Its
+  public initializer lets a consumer build one for a test double.
+
+## Changed
+
+- `SlipstreamEngine.stop()` returns a `SlipstreamStopReport` instead of a `Bool`. The old `Bool` is
+  the report's `isQuiescent`: code that tested the result stops compiling until it reads that
+  property. A call that discards the result needs no change. See `MIGRATING.md`.
+
 # 6.0.0 - 2026-10-15
 
 Changes are relative to `5.2.1`.

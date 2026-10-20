@@ -116,30 +116,32 @@ actor GatedFakeSlipstreamEngine: SlipstreamEngineControlling {
     /// When set, `start` throws it once its gate has been passed.
     var startError: Error?
 
-    /// [MOB-1850] What `stop()` reports: `true` (the default) is a QUIESCENT stop — the engine
-    /// confirmed its aborted pass and its wallet writer had both finished — and `false` is the
-    /// timeout the real FFI now surfaces, on which every wallet mutation refuses to write.
+    /// [MOB-1850] What `stop()` reports. The default, `.quiescent`, is a stop that had nothing to
+    /// wait for — the engine confirmed its aborted pass and its wallet writer had both finished —
+    /// and a report whose `isQuiescent` is false is the timeout the real FFI surfaces, on which
+    /// every wallet mutation refuses to write. `.passStillRunning` and `.writeStillRunning` (below)
+    /// are the two such reports a test usually wants.
     ///
     /// `nonisolated` and lock-guarded rather than actor-isolated like `reopenError` and
     /// `startError`, because a stop can arrive from a `nonisolated` teardown at any time and a test
     /// sets this while the synchronizer is running; like `Gate`'s, the lock is `NSLock`. That
     /// choice dates from the package's iOS 13 / macOS 12 floor, below `OSAllocatedUnfairLock`'s
     /// iOS 16 / macOS 13.
-    nonisolated var stopQuiescent: Bool {
+    nonisolated var stopReport: SlipstreamStopReport {
         get {
-            stopQuiescentLock.lock()
-            defer { stopQuiescentLock.unlock() }
-            return stopQuiescentStorage
+            stopReportLock.lock()
+            defer { stopReportLock.unlock() }
+            return stopReportStorage
         }
         set {
-            stopQuiescentLock.lock()
-            stopQuiescentStorage = newValue
-            stopQuiescentLock.unlock()
+            stopReportLock.lock()
+            stopReportStorage = newValue
+            stopReportLock.unlock()
         }
     }
 
-    private nonisolated let stopQuiescentLock = NSLock()
-    private nonisolated(unsafe) var stopQuiescentStorage = true
+    private nonisolated let stopReportLock = NSLock()
+    private nonisolated(unsafe) var stopReportStorage = SlipstreamStopReport.quiescent
 
     // `nonisolated` is load-bearing, not decoration: an actor's `let` is implicitly nonisolated only
     // inside its own module, and every test that uses these lives in a test target rather than in
@@ -255,11 +257,11 @@ actor GatedFakeSlipstreamEngine: SlipstreamEngineControlling {
         if let snapshotOnStart { nextSnapshot = snapshotOnStart }
     }
 
-    func stop() async -> Bool {
+    func stop() async -> SlipstreamStopReport {
         record("stop")
         await stopGate.wait()
         record("stop:done")
-        return stopQuiescent
+        return stopReport
     }
 
     func notifyTxChange() {
@@ -304,4 +306,24 @@ actor GatedFakeSlipstreamEngine: SlipstreamEngineControlling {
         record("drainEvents")
         return []
     }
+}
+
+extension SlipstreamStopReport {
+    /// A stop whose wait for the aborted sync pass ran out at the ten-second budget, while the
+    /// engine's wallet writes had finished: what a scan that outlasts the budget produces.
+    static let passStillRunning = SlipstreamStopReport(
+        settled: false,
+        drained: true,
+        settleWait: .seconds(10),
+        drainWait: .zero
+    )
+
+    /// A stop whose aborted passes had all finished, but whose wait for the engine's wallet writes
+    /// ran out at the ten-second budget.
+    static let writeStillRunning = SlipstreamStopReport(
+        settled: true,
+        drained: false,
+        settleWait: .zero,
+        drainWait: .seconds(10)
+    )
 }

@@ -179,19 +179,20 @@ public actor SlipstreamEngine {
     /// FFI blocks, bounded ≤10 s, waiting for the wallet file to fall quiet). Hopped off
     /// the cooperative pool — the drain is a real wait; never block an actor thread.
     ///
-    /// [MOB-1850] Returns whether the stop was QUIESCENT: `true` when the engine confirmed that
-    /// both its aborted pass and its wallet writer had finished, `false` when either was still
-    /// running when the ten-second budget ran out. The pass is stopped either way — what the
-    /// answer reports is whether the wallet file was PROVED free of the engine's own writers.
-    /// It is the contract `deleteAccount`/`importAccount`/`rewind`/`wipe` serialize on: on
-    /// `false` they refuse to write rather than interleave with a commit that may still land.
+    /// [MOB-1850] Returns what the stop found. `isQuiescent` is `true` when the engine confirmed
+    /// that both its aborted pass and its wallet writer had finished, `false` when either was still
+    /// running when its ten-second budget ran out; `settled`, `drained`, `settleWait` and
+    /// `drainWait` say which wait it was and how long each took. The pass is stopped either way —
+    /// what the report says is whether the wallet file was PROVED free of the engine's own writers.
+    /// It is the contract `deleteAccount`/`importAccount`/`rewind`/`wipe` serialize on: when it is
+    /// not quiescent they refuse to write rather than interleave with a commit that may still land.
     /// A nil handle is quiescent by definition — there is no engine to be writing.
     @discardableResult
-    public func stop() async -> Bool {
-        guard let handlePtr = handle else { return true }
+    public func stop() async -> SlipstreamStopReport {
+        guard let handlePtr = handle else { return .quiescent }
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
-                continuation.resume(returning: zcashlc_slipstream_stop(handlePtr))
+                continuation.resume(returning: SlipstreamStopReport(zcashlc_slipstream_stop(handlePtr)))
             }
         }
     }

@@ -117,3 +117,52 @@ public struct SlipstreamEngineEvent {
     /// For SyncDone: transactions stored. For SyncError: error code. Others: 0.
     public let value: UInt64
 }
+
+/// What a stop of the Slipstream engine found: whether each of its two bounded waits finished
+/// within its budget, and how long each took. Returned by `SlipstreamEngine.stop()`.
+///
+/// A stop aborts the running sync pass, then waits for every pass the engine has aborted to finish
+/// unwinding, then for the engine's own wallet writes to drain, giving each wait ten seconds of its
+/// own. The pass is stopped either way. What the report adds is whether the stop also PROVED the
+/// wallet file quiescent (`isQuiescent`), which is the only thing a caller about to change the
+/// wallet can act on.
+public struct SlipstreamStopReport: Equatable, Sendable {
+    /// Every sync pass the engine had aborted finished unwinding within the budget.
+    public let settled: Bool
+    /// No engine wallet write was still running within the budget.
+    public let drained: Bool
+    /// How long the wait for the aborted sync passes took: at least the budget when it ran out,
+    /// close to zero when there was no pass left to wait for.
+    public let settleWait: Swift.Duration
+    /// How long the wait for the engine's wallet writes took, measured the same way.
+    public let drainWait: Swift.Duration
+
+    /// Whether the stop proved the wallet file quiescent: both waits finished. A caller about to
+    /// change the wallet refuses when this is `false` rather than writing on top of an engine
+    /// writer.
+    public var isQuiescent: Bool {
+        settled && drained
+    }
+
+    /// The report of a stop that had nothing to wait for. A stop answers it when the engine has no
+    /// open handle, because then nothing can be writing.
+    static let quiescent = SlipstreamStopReport(settled: true, drained: true, settleWait: .zero, drainWait: .zero)
+
+    public init(settled: Bool, drained: Bool, settleWait: Swift.Duration, drainWait: Swift.Duration) {
+        self.settled = settled
+        self.drained = drained
+        self.settleWait = settleWait
+        self.drainWait = drainWait
+    }
+
+    /// The C report `zcashlc_slipstream_stop` returns by value: each verdict as 1 or 0, each wait
+    /// in whole milliseconds.
+    init(_ cReport: FfiSlipstreamStopReport) {
+        self.init(
+            settled: cReport.settled != 0,
+            drained: cReport.drained != 0,
+            settleWait: .milliseconds(cReport.settle_ms),
+            drainWait: .milliseconds(cReport.drain_ms)
+        )
+    }
+}
