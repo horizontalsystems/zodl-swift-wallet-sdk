@@ -1481,13 +1481,17 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         // tip; offline ⇒ the engine's max(checkpoint, birthday+1) fallback — an offline
         // import now keeps its recovery identity instead of provisioning recover_until=NULL).
         // Identifying fetches ride Tor when enabled (same engine state dir as start()).
-        let anchor = await SlipstreamEngine.restoreAnchor(
-            isRestore: true,
-            birthday: birthday ?? 0,
-            fallbackCheckpointHeight: checkpointSource.birthday(for: BlockHeight.max).height,
-            server: currentEndpoint,
-            network: initializer.network,
-            torDirPath: await slipstreamTorDirPath()
+        // [MOB-2184] Resolved through `restoreAnchor`, as `prepare` resolves its anchor: the
+        // resolver a shipped synchronizer is built with is exactly that primitive, and a test can
+        // hand in one that needs no server.
+        let fallbackCheckpoint = checkpointSource.birthday(for: BlockHeight.max).height
+        let anchor = await restoreAnchor(
+            true, // a restore: the anchor is the account's recover-until height
+            birthday ?? 0,
+            fallbackCheckpoint,
+            currentEndpoint,
+            initializer.network,
+            await slipstreamTorDirPath()
         )
         let chainTipHeight = anchor.map { UInt32($0.height) }
         let effectiveBirthday = birthday ?? (chainTipHeight.map { BlockHeight($0) } ?? initializer.walletBirthday)
