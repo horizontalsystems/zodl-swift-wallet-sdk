@@ -6847,7 +6847,8 @@ pub struct FfiSlipstreamSnapshot {
 }
 
 /// [MOB-1850] C-compatible stop report: what a Slipstream stop found. Returned by
-/// [`zcashlc_slipstream_stop`] (by value — no heap allocation).
+/// [`zcashlc_slipstream_stop`] and [`zcashlc_slipstream_stop_for_wallet_change`] (by value — no
+/// heap allocation).
 ///
 /// The engine's own `FfiSlipstreamStopReport`, re-declared here because cbindgen reads only this
 /// crate, as the snapshot is. It is converted from the engine's C form, so the conversion stays

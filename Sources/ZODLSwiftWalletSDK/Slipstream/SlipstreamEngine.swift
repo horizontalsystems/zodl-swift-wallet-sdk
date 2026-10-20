@@ -204,7 +204,6 @@ public actor SlipstreamEngine {
     /// the ten-second budget when accounts are added in quick succession. This stop ends the scan at
     /// its next block, writes nothing for the scan call it interrupted, and leaves those blocks for
     /// the next pass to scan again. A nil handle is quiescent by definition, as for `stop()`.
-    @discardableResult
     public func stopForWalletChange() async -> SlipstreamStopReport {
         await stopOffTheCooperativePool(zcashlc_slipstream_stop_for_wallet_change)
     }

@@ -11,7 +11,8 @@ that ignore the payload keep compiling; a value of the case now needs one:
 XCTAssertEqual(error as? ZcashError, .slipstreamEngineNotQuiescent)
 let refusal = ZcashError.slipstreamEngineNotQuiescent
 
-// After: compare the code, or build the case from a report.
+// After: compare the code, or build the case from a report. `ZcashError` equality compares
+// only the code, so any report matches: an error equals `refusal` whatever report it carries.
 XCTAssertEqual((error as? ZcashError)?.code, .slipstreamEngineNotQuiescent)
 let refusal = ZcashError.slipstreamEngineNotQuiescent(
     SlipstreamStopReport(settled: false, drained: true, settleWait: .seconds(10), drainWait: .zero)

@@ -119,7 +119,8 @@ public struct SlipstreamEngineEvent {
 }
 
 /// What a stop of the Slipstream engine found: whether each of its two bounded waits finished
-/// within its budget, and how long each took. Returned by `SlipstreamEngine.stop()`.
+/// within its budget, and how long each took. Returned by `SlipstreamEngine.stop()` and
+/// `SlipstreamEngine.stopForWalletChange()`.
 ///
 /// A stop aborts the running sync pass, then waits for every pass the engine has aborted to finish
 /// unwinding, then for the engine's own wallet writes to drain, giving each wait ten seconds of its
@@ -186,8 +187,8 @@ public struct SlipstreamStopReport: Equatable, Sendable {
         self.drainWait = drainWait
     }
 
-    /// The C report `zcashlc_slipstream_stop` returns by value: each verdict as 1 or 0, each wait
-    /// in whole milliseconds.
+    /// The C report `zcashlc_slipstream_stop` and `zcashlc_slipstream_stop_for_wallet_change`
+    /// return by value: each verdict as 1 or 0, each wait in whole milliseconds.
     init(_ cReport: FfiSlipstreamStopReport) {
         self.init(
             settled: cReport.settled != 0,

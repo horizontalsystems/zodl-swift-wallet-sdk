@@ -182,8 +182,9 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
     ///
     /// The assertion is precisely that: at no point in the recorded trace does a teardown begin
     /// while an engine `start` is still in flight. (`deleteAccount` stands in for `importAccount`,
-    /// which has the identical stop-mutate-restart shape but reaches the FFI's `restore_anchor`
-    /// first — a real network call, and so not something an offline test may depend on.)
+    /// which has the identical stop-mutate-restart shape. The import's restore anchor now goes
+    /// through the synchronizer's injected resolver, so an import can be driven offline as well, as
+    /// `testImportRefusesToMutateWhenTheStopWasNotQuiescent` does.)
     func testStallRecoveryCannotStartTheEngineInsideAnAccountMutationsStoppedInterval() async throws {
         let engine = GatedFakeSlipstreamEngine()
         await engine.setNextSnapshot(SlipstreamSnapshot.testSyncing(progressPermille: 100))
@@ -527,7 +528,7 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
     ///
     /// `deleteAccount` stands in for `importAccount`/`rewind`, which share the identical
     /// stop-mutate-restart shape (see `testStallRecoveryCannotStartTheEngineInsideAnAccountMutationsStoppedInterval`'s
-    /// doc for why `deleteAccount` is the offline stand-in for `importAccount`).
+    /// doc).
     func testDeleteAccountsStoppedIntervalPublishesNoStrayState() async throws {
         let engine = GatedFakeSlipstreamEngine()
         await engine.setNextSnapshot(SlipstreamSnapshot.testSyncing(progressPermille: 100))
@@ -704,11 +705,9 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
 
     // The engine's stop drains its own wallet writer, bounded; when that budget runs out the FFI
     // now REPORTS it instead of logging it away, and every operation that was writing on the
-    // strength of that stop refuses rather than proceeding. `deleteAccount` is the offline
-    // stand-in for `importAccount` here for the reason the suite already relies on elsewhere:
-    // `importAccount` fetches a restore anchor from a server before it reaches the lifecycle
-    // queue, and the two share `importAccountOnLifecycleQueue`'s stop/mutate/restart shape
-    // verbatim.
+    // strength of that stop refuses rather than proceeding. Most of these drive `deleteAccount`,
+    // which shares `importAccountOnLifecycleQueue`'s stop/mutate/restart shape verbatim;
+    // `importAccount` is driven too, through a restore-anchor resolver that needs no server.
 
     /// A refused mutation leaves the wallet exactly as it found it — and leaves the pass running,
     /// because nothing about the wallet changed to justify stopping it.
@@ -769,6 +768,61 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
         }
 
         XCTAssertFalse(welding.deleteAccountCalled, "the wallet must not be mutated on top of a live writer")
+        sync.stop()
+    }
+
+    /// [MOB-2184] The field scenario behind the stop for a wallet change: an account import whose
+    /// stop found a sync pass still running when its budget ran out. The import is refused before
+    /// the account is written, its description says which wait ran out, and the pass that was
+    /// running is put back.
+    func testImportRefusesToMutateWhenTheStopWasNotQuiescent() async throws {
+        let engine = GatedFakeSlipstreamEngine()
+        await engine.setNextSnapshot(SlipstreamSnapshot.testSyncing(progressPermille: 100))
+        let welding = ZcashRustBackendWeldingMock()
+        welding.importAccountUfvkSeedFingerprintZip32AccountIndexTreeStateRecoverUntilPurposeNameKeySourceClosure = { _, _, _, _, _, _, _, _ in
+            TestsData.mockedAccountUUID
+        }
+        // The import resolves its restore anchor before it reaches the lifecycle queue; this
+        // resolver answers without a server.
+        let sync = try makeSlipstreamSynchronizer(engine: engine, welding: welding, restoreAnchor: { _, _, _, _, _, _ in nil })
+        await sync.setInternalSyncStatusForTesting(.disconnected)
+
+        try await sync.start(retry: false)
+        engine.stopReport = .passStillRunning
+
+        do {
+            _ = try await sync.importAccount(
+                ufvk: "not-a-viewing-key",
+                seedFingerprint: nil,
+                zip32AccountIndex: nil,
+                purpose: .viewOnly,
+                name: "Imported",
+                keySource: nil,
+                birthday: 1_000_000
+            )
+            XCTFail("a non-quiescent stop must refuse the import")
+        } catch let error as ZcashError {
+            guard case .slipstreamEngineNotQuiescent(let report) = error else {
+                return XCTFail("unexpected error \(error.code)")
+            }
+            XCTAssertEqual(report, .passStillRunning, "the refusal carries the stop's report")
+            XCTAssertEqual(error.detail, "a sync pass was still running after 10.0 s", "and says which wait ran out")
+            XCTAssertTrue(
+                error.localizedDescription.contains("a sync pass was still running after 10.0 s"),
+                "in the description the app shows: \(error.localizedDescription)"
+            )
+        }
+
+        XCTAssertFalse(
+            welding.importAccountUfvkSeedFingerprintZip32AccountIndexTreeStateRecoverUntilPurposeNameKeySourceCalled,
+            "the account must not be written on top of a live writer"
+        )
+        let calls = await engine.calls
+        let lastStop = try XCTUnwrap(calls.lastIndex(of: "stopForWalletChange"), "the refusal still tore the pass down: \(calls)")
+        let lastStartDone = try XCTUnwrap(calls.lastIndex(of: "start:done"), "the pass restarts because it was running: \(calls)")
+        XCTAssertGreaterThan(lastStartDone, lastStop, "the restart after the refusal is the one left running: \(calls)")
+        let isRunning = await sync.isRunningForTesting()
+        XCTAssertTrue(isRunning, "a refused import leaves the synchronizer running, as it found it")
         sync.stop()
     }
 
@@ -971,6 +1025,51 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
             calls.contains { $0.hasPrefix("reopen(") },
             "a second handle must not be opened onto a wallet the first one may still be writing: \(calls)"
         )
+    }
+
+    /// [MOB-2184] `restartSync(at:)` rebuilds the handle, so it meets the switch's refusal, here
+    /// for a wallet write that outlived its budget: no second handle is opened and no endpoint is
+    /// recorded, the description says which wait ran out, and the pass that was running is put
+    /// back.
+    func testRestartSyncRefusesToReopenWhenTheStopWasNotQuiescent() async throws {
+        let engine = GatedFakeSlipstreamEngine()
+        await engine.setNextSnapshot(SlipstreamSnapshot.testSyncing(progressPermille: 100))
+        let sync = try makeSlipstreamSynchronizer(engine: engine)
+        await sync.setInternalSyncStatusForTesting(.disconnected)
+
+        try await sync.start(retry: false)
+        engine.stopReport = .writeStillRunning
+        let endpointBefore = await sync.currentEndpointForTesting()
+
+        let other = LightWalletEndpoint(address: "other.example.com", port: 443, secure: true)
+        do {
+            try await sync.restartSync(at: other)
+            XCTFail("a non-quiescent stop must refuse the rebuild")
+        } catch let error as ZcashError {
+            guard case .slipstreamEngineNotQuiescent(let report) = error else {
+                return XCTFail("unexpected error \(error.code)")
+            }
+            XCTAssertEqual(report, .writeStillRunning, "the refusal carries the stop's report")
+            XCTAssertEqual(error.detail, "a wallet write was still running after 10.0 s", "and says which wait ran out")
+            XCTAssertTrue(
+                error.localizedDescription.contains("a wallet write was still running after 10.0 s"),
+                "in the description the app shows: \(error.localizedDescription)"
+            )
+        }
+
+        let calls = await engine.calls
+        XCTAssertFalse(
+            calls.contains { $0.hasPrefix("reopen(") },
+            "a second handle must not be opened onto a wallet the first one may still be writing: \(calls)"
+        )
+        let endpointAfter = await sync.currentEndpointForTesting()
+        XCTAssertEqual(endpointAfter, endpointBefore, "the refused rebuild records no new endpoint")
+        let lastStop = try XCTUnwrap(calls.lastIndex(of: "stopForWalletChange"), "the refusal still tore the pass down: \(calls)")
+        let lastStartDone = try XCTUnwrap(calls.lastIndex(of: "start:done"), "the pass restarts because it was running: \(calls)")
+        XCTAssertGreaterThan(lastStartDone, lastStop, "the restart after the refusal is the one left running: \(calls)")
+        let isRunning = await sync.isRunningForTesting()
+        XCTAssertTrue(isRunning, "a refused rebuild leaves the synchronizer running, as it found it")
+        sync.stop()
     }
 
     /// [MOB-2184] The stall recovery reopens the handle, so it meets the same refusal. It has no

@@ -486,9 +486,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own ten-second budget; each is 1 otherwise. `settle_ms` and `drain_ms` (`uint64_t`) say how long
   each wait took. A pass that outlived an earlier stop or start stays on record, so a later stop
   keeps reporting `settled = 0` until that pass has actually finished. A stop that cannot run, on a
-  null handle for instance, returns all zeros. Previously the function returned `true` regardless.
-  A caller that read the `bool` must read the struct: the wallet file was proved quiescent only
-  when `settled` and `drained` are both 1.
+  null handle for instance, returns all zeros. The `bool` was `true` only when both waits finished
+  within their budgets, and `false` when either ran out or the stop could not run. A caller that
+  read the `bool` must read the struct: the wallet file was proved quiescent only when `settled`
+  and `drained` are both 1.
 - `zcashlc_propose_transfer`, `zcashlc_propose_transfer_from_uri`,
   `zcashlc_propose_send_max_transfer`, and `zcashlc_create_proposed_transactions` classify their
   failures instead of flattening them into a string. Their last-error text now reads
