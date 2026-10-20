@@ -714,6 +714,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stale graft-buffer rows that misplace commitment-tree leaves or strand a shard, plus the engine
   facades' implementation of `WalletWrite::set_account_name`. That revision is built against the
   librustzcash revision above, and the patch is replaced by the release that contains them.
+- `zcashlc_slipstream_stop` and `zcashlc_slipstream_start` now call the engine for the bounded
+  stop that proves the wallet file quiescent, which zodl-inc/slipstream#28 moved into the engine;
+  that change also adds the stop for a wallet change.
 - `zcashlc_init_data_database` now creates the
   `ext_zcashlc_orchard_ironwood_migration_immediate_runs` extension table, moving into it any
   records held by the `sdk_immediate_runs` table that read-write `zcashlc_migration_*` calls used
