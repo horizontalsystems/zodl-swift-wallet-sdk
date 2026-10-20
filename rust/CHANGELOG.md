@@ -8,6 +8,12 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `zcashlc_slipstream_stop_for_wallet_change(handle)`, the stop to call right before changing the
+  wallet (adding or removing an account, a rewind, a wipe, or reopening a handle on the same
+  wallet). It asks the running session to end its scan at the next block, then stops exactly as
+  `zcashlc_slipstream_stop` does and returns the same `FfiSlipstreamStopReport`. Refuse the change
+  unless `settled` and `drained` are both 1. `zcashlc_slipstream_stop` lets a scan call in progress
+  run to the end of its chunk first, which can outlast its ten-second budget.
 - `zcashlc_payment_uri_parse` validates supported cross-chain payment request URIs and returns an
   internal JSON envelope for SDK bindings.
 - `zcashlc_parse_gift_card_link(link, error_out)` reads a gift card link — any `https` URL whose

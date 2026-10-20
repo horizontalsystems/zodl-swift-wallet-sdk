@@ -207,13 +207,13 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
         let recoveryIsStarting = await waitUntil { await engine.calls.filter { $0 == "start" }.count == 2 }
         XCTAssertTrue(recoveryIsStarting, "the recovery reached its restart and is held there")
 
-        let stopsBeforeTheDelete = await engine.calls.filter { $0 == "stop" }.count
+        let stopsBeforeTheDelete = await engine.calls.filter { $0 == "stopForWalletChange" }.count
         let delete = Task { try await sync.deleteAccount(TestsData.mockedAccountUUID) }
 
         // A NEGATIVE claim — the mutation has not begun, because the recovery still holds the
         // queue — so it is made by letting real time pass.
         try await Task.sleep(nanoseconds: 300_000_000)
-        let stopsWhileHeld = await engine.calls.filter { $0 == "stop" }.count
+        let stopsWhileHeld = await engine.calls.filter { $0 == "stopForWalletChange" }.count
         XCTAssertEqual(stopsWhileHeld, stopsBeforeTheDelete, "the delete waits for the recovery to finish")
 
         await engine.openGate(.start)
@@ -228,7 +228,7 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
         // And the wallet ends with a pass UP: the last completed start is later than the last
         // teardown. (`calls.last` would be whatever poll chatter arrived most recently.)
         let lastStartDone = try XCTUnwrap(calls.lastIndex(of: "start:done"))
-        let lastStop = try XCTUnwrap(calls.lastIndex(of: "stop"))
+        let lastStop = try XCTUnwrap(calls.lastIndex(of: "stopForWalletChange"))
         XCTAssertGreaterThan(lastStartDone, lastStop, "the mutation's own pass is the one left running: \(calls)")
 
         sync.stop()
@@ -310,7 +310,7 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
         sync.wipe()
             .sink(receiveCompletion: { _ in wiped.fulfill() }, receiveValue: { _ in })
             .store(in: &cancellables)
-        let wipeReachedTheEngine = await waitUntil { await engine.calls.contains("stop") }
+        let wipeReachedTheEngine = await waitUntil { await engine.calls.contains("stopForWalletChange") }
         XCTAssertTrue(wipeReachedTheEngine, "the wipe is inside its teardown")
 
         await sync.requestStallRecovery(
@@ -545,7 +545,7 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
 
         await engine.closeGate(.stop)
         let delete = Task { try await sync.deleteAccount(TestsData.mockedAccountUUID) }
-        let stopped = await waitUntil { await engine.calls.contains("stop") }
+        let stopped = await waitUntil { await engine.calls.contains("stopForWalletChange") }
         XCTAssertTrue(stopped, "the delete's turn reached its teardown and is held there")
 
         let emissionsAtHold = statuses.all.count
@@ -593,7 +593,7 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
         }
 
         let calls = await engine.calls
-        let lastStop = try XCTUnwrap(calls.lastIndex(of: "stop"), "the failed delete still tore the engine down: \(calls)")
+        let lastStop = try XCTUnwrap(calls.lastIndex(of: "stopForWalletChange"), "the failed delete still tore the engine down: \(calls)")
         let lastStartDone = try XCTUnwrap(calls.lastIndex(of: "start:done"), "a failed delete must not leave the engine dead: \(calls)")
         XCTAssertGreaterThan(lastStartDone, lastStop, "the restart after the failed delete is the one left running: \(calls)")
 
@@ -736,7 +736,7 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
 
         XCTAssertFalse(welding.deleteAccountCalled, "the wallet must not be mutated on top of a live writer")
         let calls = await engine.calls
-        let lastStop = try XCTUnwrap(calls.lastIndex(of: "stop"), "the refusal still tore the pass down: \(calls)")
+        let lastStop = try XCTUnwrap(calls.lastIndex(of: "stopForWalletChange"), "the refusal still tore the pass down: \(calls)")
         let lastStartDone = try XCTUnwrap(calls.lastIndex(of: "start:done"), "the pass restarts because it was running: \(calls)")
         XCTAssertGreaterThan(lastStartDone, lastStop, "the restart after the refusal is the one left running: \(calls)")
         let isRunning = await sync.isRunningForTesting()
@@ -804,11 +804,11 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
             )
             let calls = await engine.calls
             XCTAssertEqual(
-                calls.filter { $0 == "stop" }.count,
+                calls.filter { $0 == "stopForWalletChange" }.count,
                 attempt,
                 "attempt \(attempt): each refused mutation stops the pass exactly once: \(calls)"
             )
-            let lastStop = try XCTUnwrap(calls.lastIndex(of: "stop"), "attempt \(attempt): \(calls)")
+            let lastStop = try XCTUnwrap(calls.lastIndex(of: "stopForWalletChange"), "attempt \(attempt): \(calls)")
             let lastStartDone = try XCTUnwrap(
                 calls.lastIndex(of: "start:done"),
                 "attempt \(attempt): a refusal must leave a restarted pass behind it: \(calls)"
@@ -905,7 +905,7 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
         }
 
         let calls = await engine.calls
-        XCTAssertEqual(calls.filter { $0 == "stop" }.count, 2, "each refused rewind stopped the pass once: \(calls)")
+        XCTAssertEqual(calls.filter { $0 == "stopForWalletChange" }.count, 2, "each refused rewind stopped the pass once: \(calls)")
     }
 
     /// A wipe deletes the files every other operation reads, so it is the one that must refuse most
@@ -1093,7 +1093,7 @@ final class SlipstreamLifecycleOwnershipTests: ZcashTestCase {
             switch call {
             case "start": startsInFlight += 1
             case "start:done": startsInFlight -= 1
-            case "stop", "close": if startsInFlight > 0 { return index }
+            case "stop", "stopForWalletChange", "close": if startsInFlight > 0 { return index }
             default: break
             }
         }

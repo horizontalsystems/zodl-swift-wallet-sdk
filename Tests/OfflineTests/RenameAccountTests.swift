@@ -135,7 +135,7 @@ struct RenameAccountTests {
             let stillSyncing = synchronizer.latestState.internalSyncStatus.isSyncing
             await synchronizer.stopAndWait()
 
-            #expect(!calls.contains("stop"), "the rename must not stop the pass: \(calls)")
+            #expect(!calls.contains(where: GatedFakeSlipstreamEngine.isStop), "the rename must not stop the pass: \(calls)")
             #expect(calls.filter { $0 == "start" }.count == 1, "nor start another one: \(calls)")
             #expect(stillSyncing)
         }

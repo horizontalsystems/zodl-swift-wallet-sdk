@@ -5641,6 +5641,61 @@ mod tests {
         );
     }
 
+    /// [MOB-2184] Only the stop a host makes right before it changes the wallet asks the running
+    /// session to end at its next block; a plain stop leaves that request alone. Both stamp the
+    /// stop for tip freshness, and both are quiescent on a handle with no pass running.
+    #[test]
+    fn only_the_wallet_change_stop_asks_the_scan_to_stop() {
+        let (_dir, db_path) = crate::voting::test_support::temp_wallet_db(NETWORK_ID_TESTNET);
+        // A handle dials nothing until a pass is spawned. Port 9 is the discard port, so a stray
+        // connection would fail fast.
+        let host = "127.0.0.1";
+        let handle = unsafe {
+            zcashlc_slipstream_open(
+                db_path.as_ptr(),
+                db_path.len(),
+                host.as_ptr(),
+                host.len(),
+                9,
+                false,
+                NETWORK_ID_TESTNET,
+                0, // unknown physical memory
+            )
+        };
+        assert!(!handle.is_null(), "the handle must open");
+        // Each look at the handle is a fresh shared borrow, taken only while no FFI call has it.
+        let stop_requested = || unsafe { &*handle }.inner.progress.stop_requested();
+        let stamped = || unsafe { &*handle }.last_stop_at.lock().unwrap().is_some();
+
+        let report = unsafe { zcashlc_slipstream_stop(handle) };
+        assert_eq!((report.settled, report.drained), (1, 1), "{report:?}");
+        assert!(
+            !stop_requested(),
+            "a plain stop must not ask the scan to stop early"
+        );
+        assert!(stamped(), "the plain stop stamps the stop");
+
+        *unsafe { &*handle }.last_stop_at.lock().unwrap() = None;
+        let report = unsafe { zcashlc_slipstream_stop_for_wallet_change(handle) };
+        assert_eq!((report.settled, report.drained), (1, 1), "{report:?}");
+        assert!(
+            stop_requested(),
+            "a stop for a wallet change must ask the running session to stop at its next block"
+        );
+        assert!(
+            stamped(),
+            "the stop for a wallet change stamps the stop too"
+        );
+
+        unsafe { zcashlc_slipstream_free(handle) };
+
+        assert_eq!(
+            unsafe { zcashlc_slipstream_stop_for_wallet_change(std::ptr::null_mut()) },
+            FfiSlipstreamStopReport::default(),
+            "a stop that cannot run reports neither wait as finished"
+        );
+    }
+
     /// A transaction the wallet never stored, such as one `decrypt_and_store_transaction` skipped
     /// because it does not involve the wallet, must not report its trust as set: the update
     /// underneath would succeed on zero rows.
@@ -7360,6 +7415,10 @@ pub unsafe extern "C" fn zcashlc_slipstream_start(
 /// instance, returns all zeros, which is not quiescent. The handle remains live; poll
 /// [`zcashlc_slipstream_snapshot`] to confirm state transitions to idle.
 ///
+/// This is the plain stop (backgrounding, shutdown): a scan call in progress runs to its end, by
+/// default the end of its chunk, before the abort reaches it. Right before changing the wallet,
+/// stop with [`zcashlc_slipstream_stop_for_wallet_change`] instead.
+///
 /// # Safety
 ///
 /// - `handle` must be a non-null pointer returned by [`zcashlc_slipstream_open`] that
@@ -7368,6 +7427,53 @@ pub unsafe extern "C" fn zcashlc_slipstream_start(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zcashlc_slipstream_stop(
     handle: *mut SlipstreamHandle,
+) -> FfiSlipstreamStopReport {
+    // SAFETY: this function's contract is the helper's.
+    unsafe { stop_slipstream(handle, slipstream_core::ffi_handle::SlipstreamHandle::stop) }
+}
+
+/// Stops any in-flight Slipstream sync for a wallet change: asks the running session to end its
+/// scan at the next block, then stops exactly as [`zcashlc_slipstream_stop`] does and returns the
+/// same report.
+///
+/// [MOB-2184] Call this, not [`zcashlc_slipstream_stop`], right before changing the wallet (adding
+/// or removing an account, a rewind, a wipe, or reopening a handle on the same wallet), and refuse
+/// the change unless `settled` and `drained` are both 1. A plain stop lets a scan call in progress
+/// run to the end of its chunk first, which can outlast the ten-second budget when accounts are
+/// added in quick succession. This one ends the scan at its next block, without writing anything
+/// for the scan call it interrupted, and the next session scans those blocks again.
+///
+/// # Safety
+///
+/// - `handle` must be a non-null pointer returned by [`zcashlc_slipstream_open`] that
+///   has not previously been freed.
+/// - `handle` must not be passed to two FFI calls at the same time.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zcashlc_slipstream_stop_for_wallet_change(
+    handle: *mut SlipstreamHandle,
+) -> FfiSlipstreamStopReport {
+    // SAFETY: this function's contract is the helper's.
+    unsafe {
+        stop_slipstream(
+            handle,
+            slipstream_core::ffi_handle::SlipstreamHandle::stop_for_wallet_change,
+        )
+    }
+}
+
+/// The body the two C stops share: the tip-freshness stamp, then `stop` on the engine handle with
+/// the stop budget, its report in its C form. A null handle, or a panic, answers all zeros.
+///
+/// # Safety
+///
+/// `handle` must be null, or a pointer returned by [`zcashlc_slipstream_open`] that has not been
+/// freed and that no other FFI call is using at the same time.
+unsafe fn stop_slipstream(
+    handle: *mut SlipstreamHandle,
+    stop: fn(
+        &mut slipstream_core::ffi_handle::SlipstreamHandle,
+        std::time::Duration,
+    ) -> slipstream_core::ffi_handle::StopReport,
 ) -> FfiSlipstreamStopReport {
     let handle = AssertUnwindSafe(handle);
     let res = catch_panic(|| {
@@ -7384,9 +7490,10 @@ pub unsafe extern "C" fn zcashlc_slipstream_stop(
         // cooperative pool, because both waits are real, bounded waits. The pass is stopped
         // either way; what the report says is whether the wallet file was PROVED quiescent,
         // which is the only thing a caller about to mutate it can act on.
-        Ok(FfiSlipstreamStopReport::from(
-            handle.inner.stop(SLIPSTREAM_STOP_BUDGET),
-        ))
+        Ok(FfiSlipstreamStopReport::from(stop(
+            &mut handle.inner,
+            SLIPSTREAM_STOP_BUDGET,
+        )))
     });
     unwrap_exc_or(res, FfiSlipstreamStopReport::default())
 }
