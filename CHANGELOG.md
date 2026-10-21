@@ -50,6 +50,14 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   check. A wallet an earlier version already left in that state is not repaired by this change.
   Nothing changes at the call site.
 
+## Checkpoints
+
+Mainnet
+
+````
+Sources/ZODLSwiftWalletSDK/Resources/checkpoints/mainnet/3525000.json
+````
+
 # 6.0.0 - 2026-10-15
 
 Changes are relative to `5.2.2`.
