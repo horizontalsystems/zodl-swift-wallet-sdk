@@ -38,6 +38,31 @@ Changes are relative to `5.2.1`.
 - `PaymentURIParser` reports missing, retyped, or unknown fields in the Rust result envelope as
   `invalidEnvelope` rather than `invalidURI`. Callers can distinguish an SDK/core mismatch from a
   bad scanned URI without asking the user to rescan.
+- `DerivationTool.describeUnifiedFullViewingKey(_:)` reports which items a `UnifiedFullViewingKey`
+  carries, as a `UnifiedFullViewingKeyComponents` with `hasP2pkh`, `hasP2sh`, `hasSapling`,
+  `hasOrchard`, `hasUnknownItems` and `hasTransparent` (a P2PKH or a P2SH item). A wallet can use it
+  to require an item, such as Orchard, before it imports a key. It returns `nil` when the key is not
+  a unified full viewing key for the tool's network, for instance a key created for the other
+  network, and throws `ZcashError.rustDescribeUnifiedFullViewingKey` (`ZRUST0172`) when the check
+  itself fails. It reads no database, makes no network request, and puts no part of the key in an
+  error.
+- `Synchronizer.findAccountSharingKeyComponents(_:)` tells a wallet what importing a
+  `UnifiedFullViewingKey` would do, before it imports the key. It returns `nil` when the import would
+  add an account, and otherwise an `AccountKeyOverlap`: the `account` that already shares an Orchard,
+  Sapling or transparent P2PKH viewing key component with the key, and the `kind` of the overlap. An
+  `alreadyImported` or `conflicting` import fails, while a `wouldUpgrade` import adds no account and
+  replaces that account's viewing key with the key; `importWouldFail` says which. It throws
+  `ZcashError.accountKeyOverlapMultipleAccounts` (`ZRUST0171`) when several accounts share a
+  component, which makes the import fail too, and `ZcashError.rustFindAccountKeyOverlap`
+  (`ZRUST0170`) when the lookup itself fails. The answer is a snapshot, because the lookup and an
+  import run in separate transactions. It reads the wallet database without changing it, does not
+  stop synchronization, and puts no part of the key in an error. A protocol-extension default keeps
+  other `Synchronizer` conformers compiling; it throws, so a conformer that offers the lookup must
+  implement it.
+- `Account.viewOnlyKeySource` (`"view_only"`) is the `keySource` to pass to
+  `Synchronizer.importAccount(ufvk:seedFingerprint:zip32AccountIndex:purpose:name:keySource:birthday:)`
+  when a wallet imports a unified full viewing key as a view-only account (`AccountPurpose.viewOnly`).
+  It is a tag for the wallet to read back from `Account.keySource`; the SDK does not act on it.
 
 ## Changed
 
@@ -69,6 +94,22 @@ Changes are relative to `5.2.1`.
 - `migrationProgress(accountUUID:)` and `recordImmediateMigration(accountUUID:txid:)` use a record
   that `prepare()` now creates, so on a wallet upgraded from an earlier SDK version they throw until
   the synchronizer has been prepared with this version.
+- `ZcashError` and `ZcashErrorCode` gain `rustDescribeUnifiedFullViewingKey` (`ZRUST0172`), which
+  only `DerivationTool.describeUnifiedFullViewingKey(_:)` throws, and `rustFindAccountKeyOverlap`
+  (`ZRUST0170`) and `accountKeyOverlapMultipleAccounts` (`ZRUST0171`), which only
+  `Synchronizer.findAccountSharingKeyComponents(_:)` throws. An exhaustive `switch` over either
+  stops compiling until they are handled; see `MIGRATING.md`.
+- `Synchronizer.listAccounts()`, and every other API that returns an `Account`, now sets `ufvk` and
+  `uivk` for an account imported without derivation data, such as a hardware-wallet or view-only
+  account; they were `nil`. Code that recognises such an account by `ufvk == nil` no longer finds
+  it: test `hdAccountIndex == nil` instead, which stays `nil` for it, as `seedFingerprint` does.
+  Whatever a wallet derives from `account.ufvk` changes for these accounts. Given `account.ufvk`,
+  `AccountMetadataKey.derivePrivateUseMetadataKey(ufvk:privateUseSubject:)` now derives different
+  keys for them, so metadata written under the keys that `ufvk: nil` gave becomes unreachable; to
+  keep it, go on passing `ufvk: nil` for an imported account that already has metadata. Such an
+  `Account` no longer equals, or hashes like, the value an earlier version returned, so match
+  accounts by `id`. Its `Codable` encoding now includes both keys, so an `Account` a wallet stores
+  or sends carries the account's viewing key. See `MIGRATING.md`.
 
 ## Removed
 
@@ -89,6 +130,10 @@ Changes are relative to `5.2.1`.
 - The `libzcashlc` XCFramework's C objects claimed the Xcode SDK version they were built with as their
   minimum OS, above the package's platforms, so linking it could warn that objects were "built for
   newer version". They now claim iOS 16 / macOS 14. No caller changes are required.
+- Errors from importing or decoding a unified viewing key no longer contain the key. The `rustError`
+  of `ZcashError.rustImportAccountUfvk`, `rustDeriveAddressFromUfvk` and `rustSlipstreamStart` used
+  to repeat the value that failed to decode, followed by the decoder's description of it; it is now
+  a fixed sentence.
 
 ## Checkpoints
 

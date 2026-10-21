@@ -547,6 +547,21 @@ public protocol Synchronizer: AnyObject {
     /// Returns a list of the accounts in the wallet.
     func listAccounts() async throws -> [Account]
 
+    /// Finds the account in the wallet that shares a viewing key component (Orchard, Sapling or transparent P2PKH) with
+    /// `ufvk`, and reports what importing `ufvk` with
+    /// ``importAccount(ufvk:seedFingerprint:zip32AccountIndex:purpose:name:keySource:birthday:)`` would do to it.
+    ///
+    /// The answer is a snapshot: the lookup and an import run in separate transactions, so an account imported, changed or
+    /// deleted in between can make the import do something else. The lookup reads the wallet database without changing
+    /// it, and does not stop synchronization.
+    ///
+    /// - Parameter ufvk: the key to look up. No part of it is put in an error.
+    /// - Returns: `nil` when importing `ufvk` would add a new account; otherwise the account that shares a component with
+    ///   `ufvk`, and what importing `ufvk` would do to it.
+    /// - Throws: `ZcashError.accountKeyOverlapMultipleAccounts` when several accounts share a component with `ufvk`, which
+    ///   also makes importing it fail, and `ZcashError.rustFindAccountKeyOverlap` when the lookup itself fails.
+    func findAccountSharingKeyComponents(_ ufvk: UnifiedFullViewingKey) async throws -> AccountKeyOverlap?
+
     /// Imports a new account with UnifiedFullViewingKey.
     /// - Parameters:
     ///   - ufvk: unified full viewing key
@@ -1613,6 +1628,16 @@ private struct RestartSyncUnimplemented: LocalizedError {
     }
 }
 
+/// Error thrown by the default `Synchronizer.findAccountSharingKeyComponents(_:)` implementation.
+private struct AccountSharingKeyComponentsUnimplemented: LocalizedError {
+    var errorDescription: String? {
+        """
+        Synchronizer.findAccountSharingKeyComponents(_:) has no default implementation. \
+        Override this method in your Synchronizer conformer to look up the account that shares a viewing key component.
+        """
+    }
+}
+
 /// Error thrown by the default `Synchronizer.signPCZTWithLedger` implementation.
 private struct LedgerSigningUnimplemented: LocalizedError {
     var errorDescription: String? {
@@ -1796,6 +1821,13 @@ public extension Synchronizer {
     /// transports fall through here and report the capability as unavailable.
     func restartSync(at endpoint: LightWalletEndpoint) async throws {
         throw RestartSyncUnimplemented()
+    }
+
+    /// Default implementation so adding `findAccountSharingKeyComponents(_:)` to the protocol is not a
+    /// source-breaking change for downstream conformers. Both shipped synchronizers override it; the
+    /// rest report the capability as unavailable.
+    func findAccountSharingKeyComponents(_ ufvk: UnifiedFullViewingKey) async throws -> AccountKeyOverlap? {
+        throw AccountSharingKeyComponentsUnimplemented()
     }
 
     /// Default implementation so adding `broadcaster` to the protocol is not a

@@ -417,6 +417,37 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transactions from a proposal (`zcashlc_create_proposed_transactions`) fails because the wallet
   has not scanned to a height it can anchor them on. Such failures were reported as
   `ProposalInvalid` (`17`).
+- `zcashlc_describe_unified_full_viewing_key` reports which items (P2PKH, P2SH, Sapling, Orchard,
+  unknown) a unified full viewing key carries. It takes the key as a null-terminated string and a
+  `network_id`, ignores whitespace around the key, and returns a bitmask of the items: `1` P2PKH,
+  `2` P2SH, `4` Sapling, `8` Orchard, and `16` for an item of a typecode the library does not
+  recognize. It returns `-1`, with no last error set, when the input is not a unified full viewing
+  key for `network_id`, and `-2`, with the last error set, on an internal failure: a null pointer,
+  input that is not UTF-8, an invalid `network_id`, or a panic. The last error never contains any
+  part of the key.
+- `zcashlc_find_account_key_overlap(db_data, db_data_len, ufvk, network_id)` finds the account in
+  the wallet that shares an incoming viewing key component (Orchard, Sapling or transparent P2PKH)
+  with a unified full viewing key, and reports what importing that key with
+  `zcashlc_import_account_ufvk` would do to it. It opens the wallet database read-only and ignores
+  whitespace around the key. It returns an `FfiAccountKeyOverlap`, freed with
+  `zcashlc_free_account_key_overlap`, whose `kind` is an `FfiAccountKeyOverlapKind`:
+  - `None` (`0`): no account shares a component, so the import adds an account.
+  - `AlreadyImported` (`1`): the account's viewing key already covers every item of the key, so
+    the import fails.
+  - `WouldUpgrade` (`2`): the key carries every incoming viewing key item of the account and
+    something its viewing key does not cover, so the import adds no account: it replaces the
+    account's viewing key with the key instead.
+  - `Conflicting` (`3`): the key shares a component with the account but lacks or changes
+    another, so the import fails.
+  - `MultipleAccounts` (`4`): the key's components match more than one account, so the import
+    fails.
+
+  Its `account` is that `FfiAccount`. For `None` and `MultipleAccounts` it is the value
+  `zcashlc_get_account` returns for an unknown account, with all-zero `uuid_bytes` and null
+  strings. The function returns null, with the last error set, on any other outcome: a null key, a
+  key that is not UTF-8 or not a unified full viewing key for `network_id`, an invalid
+  `network_id`, a wallet database that cannot be read, or a panic. The last error never contains
+  any part of the key.
 
 ### Changed
 
@@ -834,6 +865,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `zcashlc_migration_*` read-write entry points no longer create the wallet database, or any table
   in it, when asked about a wallet that does not exist or was never initialized; they return an
   error instead (a stray table used to make an empty file look like a wallet).
+- Decode errors from `zcashlc_import_account_ufvk`, `zcashlc_derive_address_from_ufvk`,
+  `zcashlc_derive_address_from_uivk` and `zcashlc_slipstream_start` no longer contain the key.
 
 ## 2.8.0-rc.2 - 2026-07-28
 

@@ -1462,6 +1462,10 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         try await initializer.rustBackend.listAccounts()
     }
 
+    public func findAccountSharingKeyComponents(_ ufvk: UnifiedFullViewingKey) async throws -> AccountKeyOverlap? {
+        try await initializer.rustBackend.findAccountKeyOverlap(ufvk: ufvk)
+    }
+
     // swiftlint:disable:next function_parameter_count
     public func importAccount(
         ufvk: String,

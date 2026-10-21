@@ -1,5 +1,77 @@
 # Migrating from previous versions to _Unreleased_
 
+## Imported accounts return their viewing keys — `Account.ufvk` and `Account.uivk`
+
+`Synchronizer.listAccounts()`, and every other API that returns an `Account`, now returns the
+viewing keys of an account imported without derivation data, such as a hardware-wallet or a
+view-only account. Its `ufvk` and `uivk` used to be `nil`. Its `seedFingerprint` and
+`hdAccountIndex` are still `nil`, so recognise such an account by `hdAccountIndex == nil`; a test
+for `ufvk == nil` no longer matches it.
+
+Whatever a wallet derives from `account.ufvk` changes for these accounts. A wallet that passes
+`account.ufvk` to `AccountMetadataKey.derivePrivateUseMetadataKey(ufvk:privateUseSubject:)` derived
+such an account's keys from `ufvk: nil`, and now derives different ones, which cannot read the
+metadata written under the old keys. To keep that metadata reachable, go on deriving with
+`ufvk: nil` for an imported account that already has metadata.
+
+Before:
+
+```swift
+let isImported = account.ufvk == nil
+
+// `account.ufvk` was `nil` for an imported account, so this derived the keys of `ufvk: nil`.
+let keys = try metadataKey.derivePrivateUseMetadataKey(
+    ufvk: account.ufvk,
+    privateUseSubject: subject
+)
+```
+
+After:
+
+```swift
+let isImported = account.hdAccountIndex == nil
+
+// An imported account that already has metadata keeps the keys it was written under.
+let keys = try metadataKey.derivePrivateUseMetadataKey(
+    ufvk: isImported && hasStoredMetadata(for: account.id) ? nil : account.ufvk,
+    privateUseSubject: subject
+)
+```
+
+Such an `Account` also no longer equals, or hashes like, the value an earlier version returned, so
+match accounts by `id`. Its `Codable` encoding now includes `ufvk` and `uivk`: an `Account` a wallet
+stores or sends carries the account's viewing key, so keep it only where that key may go.
+
+## `ZcashError` gained cases — viewing key checks
+
+`ZcashError` and `ZcashErrorCode` have three new cases, which only the viewing key checks throw. An
+exhaustive `switch` over either type stops compiling until they are handled.
+
+- `rustDescribeUnifiedFullViewingKey` (`ZRUST0172`): `DerivationTool.describeUnifiedFullViewingKey(_:)`
+  could not check the key.
+- `rustFindAccountKeyOverlap` (`ZRUST0170`): `Synchronizer.findAccountSharingKeyComponents(_:)` could
+  not look the key up, for instance because the wallet database could not be read.
+- `accountKeyOverlapMultipleAccounts` (`ZRUST0171`): `Synchronizer.findAccountSharingKeyComponents(_:)`
+  found more than one account that shares a viewing key component with the key, so importing the key
+  would fail.
+
+The payloads of the first two are the rust layer's message, which never contains any part of the key.
+With one exception, those two failures say nothing about the key itself, so report that the key could
+not be checked, not that it is invalid. The exception is a key for another network than the wallet's:
+`findAccountSharingKeyComponents(_:)` throws `rustFindAccountKeyOverlap` for it every time, so build
+the `UnifiedFullViewingKey` for the wallet's own network, or check it first with
+`DerivationTool.describeUnifiedFullViewingKey(_:)`, which returns `nil` for it. The third is an answer
+about the key: its import would fail, so refuse it.
+
+```swift
+case .rustDescribeUnifiedFullViewingKey, .rustFindAccountKeyOverlap:
+    // The check itself failed, so the key is neither accepted nor rejected: offer another attempt.
+    break
+case .accountKeyOverlapMultipleAccounts:
+    // Several accounts share the key's components, so importing it would fail: refuse it.
+    break
+```
+
 ## The package is `zodl-swift-wallet-sdk` and the module is `ZODLSwiftWalletSDK`
 
 The package, its library product, and its module are renamed, and the repository has moved to
