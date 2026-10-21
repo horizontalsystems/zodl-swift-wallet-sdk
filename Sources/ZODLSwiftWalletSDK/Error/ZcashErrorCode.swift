@@ -297,6 +297,8 @@ public enum ZcashErrorCode: String {
     case accountKeyOverlapMultipleAccounts = "ZRUST0171"
     /// Error from rust layer when calling ZcashKeyDerivationBackend.describeUnifiedFullViewingKey
     case rustDescribeUnifiedFullViewingKey = "ZRUST0172"
+    /// Error from rust layer when calling ZcashRustBackend.setAccountName
+    case rustSetAccountName = "ZRUST0173"
     /// Error from rust layer when calling ZcashRustBackend.migrationProgress
     case rustMigrationProgress = "ZRUST0099"
     /// Error from rust layer when calling ZcashRustBackend.migrationIsNoteSplitNeeded

@@ -12,6 +12,8 @@ public protocol StringEncoded {
 
 public struct Account: Equatable, Hashable, Codable, Identifiable {
     public let id: AccountUUID
+    /// The account's human-readable name. It is a label to show, which `Synchronizer.renameAccount(_:name:)` can change
+    /// at any time, not an identity: never derive keys, file names or other identifiers from it.
     public let name: String?
     public let keySource: String?
     public let seedFingerprint: [UInt8]?

@@ -2961,6 +2961,25 @@ class SynchronizerMock: Synchronizer {
         try await deleteAccountClosure!(accountUUID)
     }
 
+    // MARK: - renameAccount
+
+    var renameAccountNameThrowableError: Error?
+    var renameAccountNameCallsCount = 0
+    var renameAccountNameCalled: Bool {
+        return renameAccountNameCallsCount > 0
+    }
+    var renameAccountNameReceivedArguments: (accountUUID: AccountUUID, name: String)?
+    var renameAccountNameClosure: ((AccountUUID, String) async throws -> Void)?
+
+    func renameAccount(_ accountUUID: AccountUUID, name: String) async throws {
+        if let error = renameAccountNameThrowableError {
+            throw error
+        }
+        renameAccountNameCallsCount += 1
+        renameAccountNameReceivedArguments = (accountUUID: accountUUID, name: name)
+        try await renameAccountNameClosure!(accountUUID, name)
+    }
+
     // MARK: - transactionSubmissionStatus
 
     var transactionSubmissionStatusForCallsCount = 0
@@ -5482,6 +5501,25 @@ class ZcashRustBackendWeldingMock: ZcashRustBackendWelding {
         deleteAccountCallsCount += 1
         deleteAccountReceivedAccountUUID = accountUUID
         try await deleteAccountClosure!(accountUUID)
+    }
+
+    // MARK: - setAccountName
+
+    var setAccountNameNameThrowableError: Error?
+    var setAccountNameNameCallsCount = 0
+    var setAccountNameNameCalled: Bool {
+        return setAccountNameNameCallsCount > 0
+    }
+    var setAccountNameNameReceivedArguments: (accountUUID: AccountUUID, name: String)?
+    var setAccountNameNameClosure: ((AccountUUID, String) async throws -> Void)?
+
+    func setAccountName(_ accountUUID: AccountUUID, name: String) async throws {
+        if let error = setAccountNameNameThrowableError {
+            throw error
+        }
+        setAccountNameNameCallsCount += 1
+        setAccountNameNameReceivedArguments = (accountUUID: accountUUID, name: name)
+        try await setAccountNameNameClosure!(accountUUID, name)
     }
 
     // MARK: - migrationAdvanceStep

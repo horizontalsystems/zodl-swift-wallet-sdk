@@ -1421,6 +1421,10 @@ public class SDKSynchronizer: AwaitableStopSynchronizer {
         try await initializer.rustBackend.deleteAccount(accountUUID)
     }
 
+    public func renameAccount(_ accountUUID: AccountUUID, name: String) async throws {
+        try await initializer.rustBackend.setAccountName(accountUUID, name: name)
+    }
+
     // MARK: Immediate incoming transactions
     //
     // Both go straight to the wallet database: they are meant to be called about a transaction

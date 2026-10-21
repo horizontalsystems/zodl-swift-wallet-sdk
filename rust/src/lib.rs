@@ -232,6 +232,32 @@ pub(crate) fn wallet_db_connection(
     Ok(conn)
 }
 
+/// Refuses a wallet-database path where no database exists, before any connection that could
+/// create it is opened.
+///
+/// Only `zcashlc_init_data_database` creates the wallet database, so no other call may let a
+/// read-write open make SQLite create an empty file at a path for a wallet that was never
+/// initialized, or whose database a wipe has just deleted. The path the platform passes may be a
+/// SQLite `file:` URI, which only SQLite resolves, so asking the filesystem whether it exists would
+/// refuse every real wallet. SQLite is asked instead, with a read-only open: that cannot create the
+/// file, and it fails with `SQLITE_CANTOPEN` when there is none. SQLite reports that code for a file
+/// that exists but cannot be opened too, for example on a permissions or data-protection failure, so
+/// the refusal says "does not exist or cannot be opened". Its own message for that failure carries
+/// the database path, so it is replaced by one that names no path, the same for both contexts.
+/// `before` names what the caller was about to do.
+pub(crate) fn require_wallet_db(db_path: &Path, before: &str) -> anyhow::Result<()> {
+    match wallet_db_connection(db_path, WalletDbAccess::ReadOnly) {
+        Ok(_) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::CannotOpen => {
+            Err(anyhow!(
+                "the wallet database does not exist or cannot be opened; initialize it with \
+                 zcashlc_init_data_database before {before}"
+            ))
+        }
+        Err(e) => Err(anyhow!("Error checking for the wallet database: {e}")),
+    }
+}
+
 /// Builds a WalletDb value from path data provided over the FFI, over a connection that
 /// [`wallet_db_connection`] opens with `access`. [`wallet_db`] and [`wallet_db_read_only`] differ
 /// only in the access they pass, so a handle is put together the same way for both.
@@ -1062,6 +1088,62 @@ pub unsafe extern "C" fn zcashlc_delete_account(
         let account_uuid = account_uuid_from_bytes(account_uuid_bytes)?;
 
         db_data.delete_account(account_uuid)?;
+
+        Ok(true)
+    });
+
+    unwrap_exc_or(res, false)
+}
+
+/// Sets the human-readable name of the specified account, replacing any name it had. The
+/// account's keys and all other state are left unchanged.
+///
+/// Returns `true` on success, or `false` if an error is raised, including when no wallet database
+/// exists at `db_data`, which this function never creates, when no account with the given UUID
+/// exists in the wallet, and when `name` is null, empty or not valid UTF-8. Any other name is stored
+/// as given.
+///
+/// # Safety
+///
+/// - `db_data` must be non-null and valid for reads for `db_data_len` bytes, and it must have an
+///   alignment of `1`. Its contents must be a string representing a valid system path in the
+///   operating system's preferred representation.
+/// - The memory referenced by `db_data` must not be mutated for the duration of the function call.
+/// - The total size `db_data_len` must be no larger than `isize::MAX`. See the safety
+///   documentation of pointer::offset.
+/// - `account_uuid_bytes` must be non-null and valid for reads for 16 bytes, and it must have an
+///   alignment of `1`.
+/// - The memory referenced by `account_uuid_bytes` must not be mutated for the duration of the
+///   function call.
+/// - `name` must be null or must point to a null-terminated string.
+/// - The memory referenced by `name` must not be mutated for the duration of the function call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zcashlc_set_account_name(
+    db_data: *const u8,
+    db_data_len: usize,
+    network_id: u32,
+    account_uuid_bytes: *const u8,
+    name: *const c_char,
+) -> bool {
+    let res = catch_panic(|| {
+        if name.is_null() {
+            return Err(anyhow!("no account name was supplied"));
+        }
+        let network = parse_network(network_id)?;
+        // `wallet_db` opens read-write, which creates a missing database file. A rename that was
+        // still waiting for the database when a wipe deleted it must not leave an empty one behind.
+        let db_path = Path::new(OsStr::from_bytes(unsafe {
+            slice::from_raw_parts(db_data, db_data_len)
+        }));
+        require_wallet_db(db_path, "renaming an account")?;
+        let mut db_data = unsafe { wallet_db(system_rng(), db_data, db_data_len, network)? };
+        let account_uuid = account_uuid_from_bytes(account_uuid_bytes)?;
+        let name = unsafe { CStr::from_ptr(name).to_str()? };
+        if name.is_empty() {
+            return Err(anyhow!("the account name is empty"));
+        }
+
+        db_data.set_account_name(account_uuid, name)?;
 
         Ok(true)
     });
@@ -6418,6 +6500,161 @@ mod tests {
 
         unsafe { zcashlc_slipstream_free(handle) };
     }
+
+    // ── Renaming an account ──────────────────────────────────────────────────────────────────
+
+    /// The name the rename tests give an account. Its emoji lies outside the Basic Multilingual
+    /// Plane, so the name crosses the FFI as multi-byte UTF-8 in both directions.
+    const RENAMED_ACCOUNT_NAME: &str = "Renamed account 🔐";
+
+    /// The name `temp_wallet_db_with_account` imports its account with.
+    const FIXTURE_ACCOUNT_NAME: &str = "voting";
+
+    /// A testnet wallet database holding one view-only account, with the uuid of that account.
+    fn wallet_with_account() -> (tempfile::TempDir, String, [u8; 16]) {
+        let (dir, db_path, account_uuid) =
+            crate::voting::test_support::temp_wallet_db_with_account(NETWORK_ID_TESTNET);
+        let account_uuid = Uuid::parse_str(&account_uuid)
+            .expect("the fixture reports a uuid")
+            .into_bytes();
+        (dir, db_path, account_uuid)
+    }
+
+    /// Calls [`zcashlc_set_account_name`] on the testnet wallet database at `db_path`, passing a
+    /// null pointer for a `None` name. The last error is cleared first, so an error it leaves was
+    /// set by this call.
+    fn set_account_name(db_path: &str, account_uuid: &[u8; 16], name: Option<&CStr>) -> bool {
+        zcashlc_clear_last_error();
+        unsafe {
+            zcashlc_set_account_name(
+                db_path.as_ptr(),
+                db_path.len(),
+                NETWORK_ID_TESTNET,
+                account_uuid.as_ptr(),
+                name.map_or(std::ptr::null(), CStr::as_ptr),
+            )
+        }
+    }
+
+    /// The name of the account `account_uuid`, read through [`zcashlc_get_account`], which is
+    /// how the Swift SDK reads each account it lists.
+    fn stored_account_name(db_path: &str, account_uuid: &[u8; 16]) -> Option<String> {
+        let account = unsafe {
+            zcashlc_get_account(
+                db_path.as_ptr(),
+                db_path.len(),
+                NETWORK_ID_TESTNET,
+                account_uuid.as_ptr(),
+            )
+        };
+        assert!(!account.is_null(), "the account is read");
+        let name = unsafe { (*account).account_name() };
+        unsafe { ffi::zcashlc_free_account(account) };
+        name
+    }
+
+    #[test]
+    fn set_account_name_replaces_the_name_of_the_account() {
+        let (_dir, db_path, account_uuid) = wallet_with_account();
+        assert_eq!(
+            stored_account_name(&db_path, &account_uuid).as_deref(),
+            Some(FIXTURE_ACCOUNT_NAME)
+        );
+
+        let name = CString::new(RENAMED_ACCOUNT_NAME).expect("the name has no interior NUL");
+        assert!(set_account_name(&db_path, &account_uuid, Some(&name)));
+
+        assert_eq!(
+            stored_account_name(&db_path, &account_uuid).as_deref(),
+            Some(RENAMED_ACCOUNT_NAME)
+        );
+    }
+
+    /// An account the wallet does not hold is refused with a last error, and the account the
+    /// wallet does hold keeps its name.
+    #[test]
+    fn set_account_name_refuses_an_unknown_account() {
+        let (_dir, db_path, account_uuid) = wallet_with_account();
+        let unknown = [0x07; 16];
+        assert_ne!(unknown, account_uuid);
+
+        let name = CString::new(RENAMED_ACCOUNT_NAME).expect("the name has no interior NUL");
+        assert!(!set_account_name(&db_path, &unknown, Some(&name)));
+
+        let message = last_error_message();
+        assert!(
+            message.contains("does not belong to this wallet"),
+            "{message}"
+        );
+        assert_eq!(
+            stored_account_name(&db_path, &account_uuid).as_deref(),
+            Some(FIXTURE_ACCOUNT_NAME)
+        );
+    }
+
+    /// A name that is not UTF-8 is refused with a last error, and the account keeps its name.
+    #[test]
+    fn set_account_name_refuses_a_name_that_is_not_utf8() {
+        let (_dir, db_path, account_uuid) = wallet_with_account();
+        let name = c"Renamed \xff";
+
+        assert!(!set_account_name(&db_path, &account_uuid, Some(name)));
+
+        let message = last_error_message();
+        assert!(message.contains("utf-8"), "{message}");
+        assert_eq!(
+            stored_account_name(&db_path, &account_uuid).as_deref(),
+            Some(FIXTURE_ACCOUNT_NAME)
+        );
+    }
+
+    /// A wallet database that does not exist is refused, and the rename does not create it, for
+    /// instance when a wipe deleted the database while the rename was waiting for it.
+    #[test]
+    fn set_account_name_does_not_create_a_missing_wallet_database() {
+        let (dir, _db_path, account_uuid) = wallet_with_account();
+        let missing = dir.path().join("missing.sqlite");
+        let missing_path = missing.to_str().expect("the temporary path is UTF-8");
+        let name = CString::new(RENAMED_ACCOUNT_NAME).expect("the name has no interior NUL");
+
+        assert!(!set_account_name(missing_path, &account_uuid, Some(&name)));
+
+        let message = last_error_message();
+        assert!(
+            message.contains("does not exist or cannot be opened"),
+            "{message}"
+        );
+        assert!(!missing.exists(), "the rename must not create the database");
+    }
+
+    /// An empty name is refused with a last error, and the account keeps its name.
+    #[test]
+    fn set_account_name_refuses_an_empty_name() {
+        let (_dir, db_path, account_uuid) = wallet_with_account();
+
+        assert!(!set_account_name(&db_path, &account_uuid, Some(c"")));
+
+        assert_eq!(last_error_message(), "the account name is empty");
+        assert_eq!(
+            stored_account_name(&db_path, &account_uuid).as_deref(),
+            Some(FIXTURE_ACCOUNT_NAME)
+        );
+    }
+
+    /// A null name is refused with a last error instead of being read, and the account keeps its
+    /// name.
+    #[test]
+    fn set_account_name_refuses_a_null_name() {
+        let (_dir, db_path, account_uuid) = wallet_with_account();
+
+        assert!(!set_account_name(&db_path, &account_uuid, None));
+
+        assert_eq!(last_error_message(), "no account name was supplied");
+        assert_eq!(
+            stored_account_name(&db_path, &account_uuid).as_deref(),
+            Some(FIXTURE_ACCOUNT_NAME)
+        );
+    }
 }
 
 // ── Slipstream FFI surface ────────────────────────────────────────────────────
@@ -6721,6 +6958,7 @@ pub unsafe extern "C" fn zcashlc_slipstream_open(
             state: std::sync::Arc::new(std::sync::Mutex::new(SyncState::Idle)),
             events: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             task: None,
+            unfinished_passes: Vec::new(),
             pass_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             endpoint: slipstream_core::config::Endpoint {
                 host: host.to_string(),

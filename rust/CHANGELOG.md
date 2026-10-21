@@ -448,6 +448,11 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   key that is not UTF-8 or not a unified full viewing key for `network_id`, an invalid
   `network_id`, a wallet database that cannot be read, or a panic. The last error never contains
   any part of the key.
+- `zcashlc_set_account_name(db_data, db_data_len, network_id, account_uuid_bytes, name)` sets the
+  name of an account, replacing any name it had; the account's keys and all other state are
+  unchanged. `name` is a null-terminated UTF-8 string. It returns `true` on success, and `false`
+  with the last error set when no account has `account_uuid_bytes`, when `name` is null or not
+  UTF-8, or when the wallet database cannot be written.
 
 ### Changed
 
@@ -685,7 +690,7 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   therefore trail a just-mined broadcast by at most one such pass. Reads no longer contend with
   proving.
 - The crate now builds against the NU7 pre-release generation of the `librustzcash` crates and
-  the `zodl-slipstream` 0.4.0-pre.1 engine.
+  the `zodl-slipstream` 0.4.0-pre.2 engine.
 - Every unified address, UFVK and UIVK string a `zcashlc_*` function returns is ZIP 316
   revision 0, with every receiver or item the value carries, as before the NU7 move. Revision 2
   is used only for a value revision 0 cannot represent (one with expiry metadata, a P2SH
@@ -699,6 +704,16 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (valargroup/vote-nullifier-pir#173), and `zakura-wallet-lib`
   (zakura-core/wallet-libraries#83). Each entry is replaced by the release that contains its
   pull request. The `zcashlc_voting_*` C surface is unchanged.
+- `[patch.crates-io]` takes the librustzcash crates from `zcash/librustzcash@68b2cf1f`: the
+  `zcash_client_sqlite` 0.23.0-pre.1 release plus a backport of zcash/librustzcash#3139, which adds
+  `WalletWrite::set_account_name` and which upstream has merged as `357359a4`.
+  `zcashlc_set_account_name` calls that trait method. Their versions are unchanged, and the patch is
+  replaced by the release that contains that pull request.
+- `zodl-slipstream` is now required as `=0.4.0-pre.2`, and `[patch.crates-io]` takes it from
+  `zodl-inc/slipstream@58647969`: the 0.4.0-pre.2 release plus zodl-inc/slipstream#30, which fixes
+  stale graft-buffer rows that misplace commitment-tree leaves or strand a shard, plus the engine
+  facades' implementation of `WalletWrite::set_account_name`. That revision is built against the
+  librustzcash revision above, and the patch is replaced by the release that contains them.
 - `zcashlc_init_data_database` now creates the
   `ext_zcashlc_orchard_ironwood_migration_immediate_runs` extension table, moving into it any
   records held by the `sdk_immediate_runs` table that read-write `zcashlc_migration_*` calls used
