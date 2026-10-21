@@ -5509,122 +5509,6 @@ mod tests {
         );
     }
 
-    /// [MOB-1850] A wallet writer still holding the gate when the drain's budget runs out is a
-    /// NON-QUIESCENT stop, and the drain must say so. Logging the timeout away and answering
-    /// "quiescent" is what let the host mutate the wallet on top of a live engine writer.
-    #[test]
-    fn drain_reports_a_writer_that_outlives_the_deadline() {
-        let progress = slipstream_core::ProgressArc::default();
-        // The RAII gate is the engine's own way of holding the counter up for the life of a
-        // commit, so the test raises it exactly as the persist lane does.
-        let gate = slipstream_core::events::WalletWriterGate::hold(progress.clone());
-        let quiescent =
-            drain_slipstream_wallet_writers_until(&progress, std::time::Duration::from_millis(50));
-        assert!(
-            !quiescent,
-            "a writer still running at the deadline must be reported, not logged away"
-        );
-        drop(gate);
-        assert!(drain_slipstream_wallet_writers_until(
-            &progress,
-            std::time::Duration::from_millis(50)
-        ));
-    }
-
-    /// Releases a `spawn_gated_pass` loop, explicitly via `release()` or implicitly when this
-    /// guard is dropped. A failing assertion panics and unwinds BEFORE a test reaches its explicit
-    /// release, and local variables are dropped in reverse declaration order during unwinding, so a
-    /// guard declared after the runtime is always dropped — and so releases its worker thread —
-    /// before the runtime itself is. Without that, `Runtime::drop` would block forever joining a
-    /// worker still parked in the gated loop, turning a failing assertion into a hang.
-    struct PassRelease(std::sync::Arc<std::sync::atomic::AtomicBool>);
-
-    impl PassRelease {
-        fn release(&self) {
-            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-
-    impl Drop for PassRelease {
-        fn drop(&mut self) {
-            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-
-    /// Spawns a pass parked in a synchronous loop (no await point, so `abort()` cannot take it
-    /// down) and returns its join handle plus the guard that releases it.
-    fn spawn_gated_pass(
-        runtime: &tokio::runtime::Runtime,
-    ) -> (tokio::task::JoinHandle<()>, PassRelease) {
-        let release = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (held, running) = (release.clone(), started.clone());
-        let task = runtime.spawn(async move {
-            running.store(true, std::sync::atomic::Ordering::SeqCst);
-            while !held.load(std::sync::atomic::Ordering::SeqCst) {
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-        });
-        while !started.load(std::sync::atomic::Ordering::SeqCst) {
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        (task, PassRelease(release))
-    }
-
-    /// [MOB-1850] The pass half of the same contract, and the reason a pass has to STAY on record.
-    /// `abort()` cannot interrupt a task that is inside a synchronous stretch, so one that is still
-    /// there when the budget runs out must be reported — and it must go on being reported by every
-    /// later stop, because taking the handle out of the slot is not the same as the pass finishing.
-    #[test]
-    fn a_repeated_stop_stays_non_quiescent_while_the_original_pass_is_unfinished() {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .unwrap();
-        let budget = std::time::Duration::from_millis(50);
-        let (first, release_first) = spawn_gated_pass(&runtime);
-        let observer = first.abort_handle();
-        let mut slot = Some(first.abort_handle());
-        let mut unfinished: Vec<tokio::task::AbortHandle> = Vec::new();
-
-        assert!(
-            !settle_engine_passes(&mut slot, &mut unfinished, budget),
-            "first stop: the pass outlives the budget"
-        );
-        assert!(
-            !settle_engine_passes(&mut slot, &mut unfinished, budget),
-            "second stop must not claim quiescence while the first pass still runs"
-        );
-        assert!(!observer.is_finished());
-
-        // A start-style replacement installs a new pass while the old one is still unfinished.
-        let (second, release_second) = spawn_gated_pass(&runtime);
-        let _ = settle_engine_passes(&mut slot, &mut unfinished, budget);
-        slot = Some(second.abort_handle());
-        assert!(
-            !settle_engine_passes(&mut slot, &mut unfinished, budget),
-            "a stop after a replacement must still see the original unfinished pass"
-        );
-        assert_eq!(
-            unfinished.len(),
-            2,
-            "both unfinished passes stay on record after the replacement"
-        );
-
-        release_first.release();
-        release_second.release();
-        assert!(
-            settle_engine_passes(
-                &mut slot,
-                &mut unfinished,
-                std::time::Duration::from_secs(5)
-            ),
-            "quiescence once every pass has actually finished"
-        );
-        assert!(unfinished.is_empty());
-    }
-
     /// [MOB-1852] `update_chain_tip` re-queues the blocks up to the new tip as unscanned, and until
     /// they are scanned the wallet database reports every non-stabilized note as unspendable. A
     /// refresh alone therefore proves the tip moved, not that the spendable value can be trusted:
@@ -5660,6 +5544,155 @@ mod tests {
         assert!(
             !fresh_tip_decision(false, false, 1, 1),
             "a completed range without a refresh this run proves nothing"
+        );
+    }
+
+    // ── The stop report ──────────────────────────────────────────────────────────────────────
+
+    /// [MOB-2184] The C stop report carries the engine's whole report: each verdict as 1 or 0, each
+    /// wait in whole milliseconds, and a wait too long to count in a `u64` of milliseconds as
+    /// `u64::MAX`.
+    #[test]
+    fn the_c_stop_report_carries_both_verdicts_and_both_waits() {
+        let report = slipstream_core::ffi_handle::StopReport {
+            settled: true,
+            drained: false,
+            settle_wait: std::time::Duration::from_micros(1_500_999),
+            drain_wait: std::time::Duration::MAX,
+        };
+        assert_eq!(
+            FfiSlipstreamStopReport::from(report),
+            FfiSlipstreamStopReport {
+                settled: 1,
+                drained: 0,
+                settle_ms: 1_500,
+                drain_ms: u64::MAX,
+            }
+        );
+    }
+
+    /// [MOB-2184] HOSTING.md documents the stop report's C layout, and the engine requires every C
+    /// wrapper's re-declaration of it to keep the engine's field order: `repr(C)` lays the fields
+    /// out in declaration order, so a reordered copy would compile cleanly and put each field where
+    /// a host expects another one.
+    #[test]
+    fn the_c_stop_report_keeps_the_engines_layout() {
+        use slipstream_core::ffi_handle::FfiSlipstreamStopReport as EngineReport;
+        use std::mem::{align_of, offset_of, size_of};
+
+        assert_eq!(
+            size_of::<FfiSlipstreamStopReport>(),
+            size_of::<EngineReport>()
+        );
+        assert_eq!(
+            align_of::<FfiSlipstreamStopReport>(),
+            align_of::<EngineReport>()
+        );
+        assert_eq!(
+            offset_of!(FfiSlipstreamStopReport, settled),
+            offset_of!(EngineReport, settled)
+        );
+        assert_eq!(
+            offset_of!(FfiSlipstreamStopReport, drained),
+            offset_of!(EngineReport, drained)
+        );
+        assert_eq!(
+            offset_of!(FfiSlipstreamStopReport, settle_ms),
+            offset_of!(EngineReport, settle_ms)
+        );
+        assert_eq!(
+            offset_of!(FfiSlipstreamStopReport, drain_ms),
+            offset_of!(EngineReport, drain_ms)
+        );
+    }
+
+    /// [MOB-2184] A handle with no pass running has nothing to settle and nothing to drain, so its
+    /// stop is quiescent. A stop that cannot run at all, here on a null handle, answers the
+    /// all-zero report, which is not: a caller about to change the wallet refuses on it.
+    #[test]
+    fn a_stop_reports_what_it_found() {
+        let (_dir, db_path) = crate::voting::test_support::temp_wallet_db(NETWORK_ID_TESTNET);
+        // A handle dials nothing until a pass is spawned. Port 9 is the discard port, so a stray
+        // connection would fail fast.
+        let host = "127.0.0.1";
+        let handle = unsafe {
+            zcashlc_slipstream_open(
+                db_path.as_ptr(),
+                db_path.len(),
+                host.as_ptr(),
+                host.len(),
+                9,
+                false,
+                NETWORK_ID_TESTNET,
+                0, // unknown physical memory
+            )
+        };
+        assert!(!handle.is_null(), "the handle must open");
+
+        let report = unsafe { zcashlc_slipstream_stop(handle) };
+        assert_eq!((report.settled, report.drained), (1, 1), "{report:?}");
+
+        unsafe { zcashlc_slipstream_free(handle) };
+
+        assert_eq!(
+            unsafe { zcashlc_slipstream_stop(std::ptr::null_mut()) },
+            FfiSlipstreamStopReport::default(),
+            "a stop that cannot run reports neither wait as finished"
+        );
+    }
+
+    /// [MOB-2184] Only the stop a host makes right before it changes the wallet asks the running
+    /// session to end at its next block; a plain stop leaves that request alone. Both stamp the
+    /// stop for tip freshness, and both are quiescent on a handle with no pass running.
+    #[test]
+    fn only_the_wallet_change_stop_asks_the_scan_to_stop() {
+        let (_dir, db_path) = crate::voting::test_support::temp_wallet_db(NETWORK_ID_TESTNET);
+        // A handle dials nothing until a pass is spawned. Port 9 is the discard port, so a stray
+        // connection would fail fast.
+        let host = "127.0.0.1";
+        let handle = unsafe {
+            zcashlc_slipstream_open(
+                db_path.as_ptr(),
+                db_path.len(),
+                host.as_ptr(),
+                host.len(),
+                9,
+                false,
+                NETWORK_ID_TESTNET,
+                0, // unknown physical memory
+            )
+        };
+        assert!(!handle.is_null(), "the handle must open");
+        // Each look at the handle is a fresh shared borrow, taken only while no FFI call has it.
+        let stop_requested = || unsafe { &*handle }.inner.progress.stop_requested();
+        let stamped = || unsafe { &*handle }.last_stop_at.lock().unwrap().is_some();
+
+        let report = unsafe { zcashlc_slipstream_stop(handle) };
+        assert_eq!((report.settled, report.drained), (1, 1), "{report:?}");
+        assert!(
+            !stop_requested(),
+            "a plain stop must not ask the scan to stop early"
+        );
+        assert!(stamped(), "the plain stop stamps the stop");
+
+        *unsafe { &*handle }.last_stop_at.lock().unwrap() = None;
+        let report = unsafe { zcashlc_slipstream_stop_for_wallet_change(handle) };
+        assert_eq!((report.settled, report.drained), (1, 1), "{report:?}");
+        assert!(
+            stop_requested(),
+            "a stop for a wallet change must ask the running session to stop at its next block"
+        );
+        assert!(
+            stamped(),
+            "the stop for a wallet change stamps the stop too"
+        );
+
+        unsafe { zcashlc_slipstream_free(handle) };
+
+        assert_eq!(
+            unsafe { zcashlc_slipstream_stop_for_wallet_change(std::ptr::null_mut()) },
+            FfiSlipstreamStopReport::default(),
+            "a stop that cannot run reports neither wait as finished"
         );
     }
 
@@ -6714,12 +6747,6 @@ pub struct SlipstreamHandle {
     /// [API v2.1 E-2] `stop()` timestamp: freshness survives a stop→start hop shorter than
     /// 120 s (the SDK's `SDKFlags.sdkStarted` quick-background parity).
     last_stop_at: std::sync::Mutex<Option<std::time::Instant>>,
-    /// [MOB-1850] Aborted passes that had not finished when a stop or start gave up waiting; a
-    /// later stop reports quiescence only once this is empty. The only handle the engine itself
-    /// keeps is `inner.task`, and the stop that aborts a pass TAKES it — so without this record
-    /// the next stop finds an empty slot and reports a pass quiescent that it never watched
-    /// finish, while that pass is still inside a synchronous wallet write.
-    unfinished_passes: Vec<tokio::task::AbortHandle>,
     /// [v0.7 P1b] Alternate lightwalletd servers for probe-then-commit + wire
     /// failover. Set via [`zcashlc_slipstream_set_alternate_servers`]; each
     /// `start()` merges them into the pass config, deduped against the
@@ -6754,6 +6781,10 @@ struct SummaryCacheEntry {
 const SUMMARY_IDLE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
 /// [API v2.1 E-2] Freshness survives stop→start hops shorter than this (SDKFlags parity).
 const TIP_FRESH_STOP_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
+/// [MOB-1850] The budget the engine gives each of the two bounded waits a stop or start makes:
+/// one for the aborted passes, one for its wallet commit. Far above the worst observed device
+/// commit (a few seconds, A10).
+const SLIPSTREAM_STOP_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// C-compatible snapshot of Slipstream engine progress. Returned by
 /// [`zcashlc_slipstream_snapshot`] (by value — no heap allocation).
@@ -6813,6 +6844,40 @@ pub struct FfiSlipstreamSnapshot {
     /// version moved since the last poll → re-fetch transactions + publish
     /// `foundTransactions`. Never reset while the handle lives.
     pub tx_set_version: u64,
+}
+
+/// [MOB-1850] C-compatible stop report: what a Slipstream stop found. Returned by
+/// [`zcashlc_slipstream_stop`] and [`zcashlc_slipstream_stop_for_wallet_change`] (by value — no
+/// heap allocation).
+///
+/// The engine's own `FfiSlipstreamStopReport`, re-declared here because cbindgen reads only this
+/// crate, as the snapshot is. It is converted from the engine's C form, so the conversion stays
+/// the engine's. The fields keep the engine's order: `repr(C)` lays them out in declaration order,
+/// and the engine documents that layout for every C wrapper.
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct FfiSlipstreamStopReport {
+    /// 1 when every pass the engine had aborted finished unwinding within the budget, 0 otherwise.
+    pub settled: u8,
+    /// 1 when no engine wallet writer was still running within the budget, 0 otherwise. The wallet
+    /// file was proved quiescent only when this and `settled` are both 1.
+    pub drained: u8,
+    /// How long the wait for the aborted passes took, in whole milliseconds.
+    pub settle_ms: u64,
+    /// How long the wait for the engine's wallet writers took, in whole milliseconds.
+    pub drain_ms: u64,
+}
+
+impl From<slipstream_core::ffi_handle::StopReport> for FfiSlipstreamStopReport {
+    fn from(report: slipstream_core::ffi_handle::StopReport) -> Self {
+        let engine = slipstream_core::ffi_handle::FfiSlipstreamStopReport::from(report);
+        Self {
+            settled: engine.settled,
+            drained: engine.drained,
+            settle_ms: engine.settle_ms,
+            drain_ms: engine.drain_ms,
+        }
+    }
 }
 
 /// [API v2.1 E-6] C-compatible wallet-provisioning anchor. Returned by
@@ -7006,7 +7071,6 @@ pub unsafe extern "C" fn zcashlc_slipstream_open(
             tip_refreshes_at_run_start: std::sync::atomic::AtomicU64::new(0),
             tip_fresh: std::sync::atomic::AtomicBool::new(false),
             last_stop_at: std::sync::Mutex::new(None),
-            unfinished_passes: Vec::new(),
             alternate_servers: std::sync::Mutex::new(Vec::new()),
             post_flip_hold: std::sync::Mutex::new(PostFlipHold::default()),
         })))
@@ -7151,32 +7215,16 @@ pub unsafe extern "C" fn zcashlc_slipstream_start(
                 .store(false, std::sync::atomic::Ordering::Relaxed);
         }
 
-        // Cancel any in-flight task before spawning a new one.
-        // [MOB-1850] The result is deliberately ignored HERE: a start proceeds either way, as it
-        // always has (a same-handle restart is safe). Only the stop-then-mutate callers act on the
-        // flag, and they reach it through `zcashlc_slipstream_stop` — but a pass this start could
-        // not wait out STAYS on record, so the next stop still answers for it. The borrow is split
-        // in its own scope so the rest of the function keeps the plain `&mut handle.inner` it had.
-        let _ = {
-            let SlipstreamHandle {
-                inner,
-                unfinished_passes,
-                ..
-            } = &mut *handle;
-            settle_engine_passes(
-                &mut inner.task,
-                unfinished_passes,
-                std::time::Duration::from_secs(10),
-            )
-        };
-
         let h = &mut handle.inner;
-        // [B4-16 drain] The aborted pass's write-behind commit may still be running
-        // (`spawn_blocking` — uncancellable); wait it out BEFORE spawning the new
-        // session, so the new pass's first writes never collide with an orphan
-        // ("database is locked" at pass start) and no orphan Scanned-mark can land
-        // after this point. Kills the B4-12 orphan-overlap class at the root.
-        let _ = drain_slipstream_wallet_writers(&h.progress);
+        // Cancel any in-flight task, and wait out its write-behind commit, before spawning the new
+        // session. [B4-16 drain] The commit runs in `spawn_blocking` and cannot be cancelled; the
+        // new pass's first writes must never collide with an orphan ("database is locked" at pass
+        // start), and no orphan Scanned-mark may land after this point.
+        // [MOB-1850] The engine's report is deliberately ignored HERE: a start proceeds either way,
+        // as it always has (a same-handle restart is safe). Only the stop-then-mutate callers act
+        // on a verdict, which they get from a stop, and a pass this start could not wait out stays
+        // on the engine's record, so the next stop still answers for it.
+        let _ = h.quiesce_before_start(SLIPSTREAM_STOP_BUDGET);
         *h.state.lock().unwrap_or_else(|p| p.into_inner()) = SyncState::Syncing;
 
         let ufvk_str: Option<String> = if ufvk.is_null() || ufvk_len == 0 {
@@ -7358,13 +7406,19 @@ pub unsafe extern "C" fn zcashlc_slipstream_start(
 
 /// Stops any in-flight Slipstream sync and waits, bounded, for the wallet file to fall quiet.
 ///
-/// [MOB-1850] Returns whether the stop was QUIESCENT: `true` when the aborted pass finished
-/// unwinding AND no wallet writer was still in flight by the time the ten-second budget ran out,
-/// `false` when either outlived it. A `false` answer does not mean the stop failed — the engine
-/// is Idle either way — it means the wallet file was never proved free of the engine's own
-/// writers, so a caller about to mutate that file (import, delete, truncate) should refuse rather
-/// than write on top of one. The handle remains live; poll [`zcashlc_slipstream_snapshot`] to
-/// confirm state transitions to idle.
+/// [MOB-1850] Returns what the stop found, by value: `settled` is 1 when every pass the engine had
+/// aborted finished unwinding within the ten-second budget, `drained` is 1 when no wallet writer
+/// was still in flight within its own ten seconds, and `settle_ms` and `drain_ms` say how long each
+/// wait took. The stop was QUIESCENT only when both verdicts are 1. One that is not does not mean
+/// the stop failed — the engine is Idle either way — it means the wallet file was never proved free
+/// of the engine's own writers, so a caller about to mutate that file (import, delete, truncate)
+/// should refuse rather than write on top of one. A stop that cannot run, on a null handle for
+/// instance, returns all zeros, which is not quiescent. The handle remains live; poll
+/// [`zcashlc_slipstream_snapshot`] to confirm state transitions to idle.
+///
+/// This is the plain stop (backgrounding, shutdown): a scan call in progress runs to its end, by
+/// default the end of its chunk, before the abort reaches it. Right before changing the wallet,
+/// stop with [`zcashlc_slipstream_stop_for_wallet_change`] instead.
 ///
 /// # Safety
 ///
@@ -7372,7 +7426,56 @@ pub unsafe extern "C" fn zcashlc_slipstream_start(
 ///   has not previously been freed.
 /// - `handle` must not be passed to two FFI calls at the same time.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zcashlc_slipstream_stop(handle: *mut SlipstreamHandle) -> bool {
+pub unsafe extern "C" fn zcashlc_slipstream_stop(
+    handle: *mut SlipstreamHandle,
+) -> FfiSlipstreamStopReport {
+    // SAFETY: this function's contract is the helper's.
+    unsafe { stop_slipstream(handle, slipstream_core::ffi_handle::SlipstreamHandle::stop) }
+}
+
+/// Stops any in-flight Slipstream sync for a wallet change: asks the running session to end its
+/// scan at the next block, then stops exactly as [`zcashlc_slipstream_stop`] does and returns the
+/// same report.
+///
+/// [MOB-2184] Call this, not [`zcashlc_slipstream_stop`], right before changing the wallet (adding
+/// or removing an account, a rewind, a wipe, or reopening a handle on the same wallet), and refuse
+/// the change unless `settled` and `drained` are both 1. A plain stop lets a scan call in progress
+/// run to the end of its chunk first, which can outlast the ten-second budget when accounts are
+/// added in quick succession. This one ends the scan at its next block, without writing anything
+/// for the scan call it interrupted, and the next session scans those blocks again.
+///
+/// # Safety
+///
+/// - `handle` must be a non-null pointer returned by [`zcashlc_slipstream_open`] that
+///   has not previously been freed.
+/// - `handle` must not be passed to two FFI calls at the same time.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zcashlc_slipstream_stop_for_wallet_change(
+    handle: *mut SlipstreamHandle,
+) -> FfiSlipstreamStopReport {
+    // SAFETY: this function's contract is the helper's.
+    unsafe {
+        stop_slipstream(
+            handle,
+            slipstream_core::ffi_handle::SlipstreamHandle::stop_for_wallet_change,
+        )
+    }
+}
+
+/// The body the two C stops share: the tip-freshness stamp, then `stop` on the engine handle with
+/// the stop budget, its report in its C form. A null handle, or a panic, answers all zeros.
+///
+/// # Safety
+///
+/// `handle` must be null, or a pointer returned by [`zcashlc_slipstream_open`] that has not been
+/// freed and that no other FFI call is using at the same time.
+unsafe fn stop_slipstream(
+    handle: *mut SlipstreamHandle,
+    stop: fn(
+        &mut slipstream_core::ffi_handle::SlipstreamHandle,
+        std::time::Duration,
+    ) -> slipstream_core::ffi_handle::StopReport,
+) -> FfiSlipstreamStopReport {
     let handle = AssertUnwindSafe(handle);
     let res = catch_panic(|| {
         let handle = unsafe { handle.as_mut() }.ok_or_else(|| anyhow!("null handle"))?;
@@ -7382,36 +7485,18 @@ pub unsafe extern "C" fn zcashlc_slipstream_stop(handle: *mut SlipstreamHandle) 
             .last_stop_at
             .lock()
             .unwrap_or_else(|p| p.into_inner()) = Some(std::time::Instant::now());
-        // [MOB-1850] Every pass this handle has aborted and not yet watched finish is settled
-        // here, not just the one in the slot: a previous stop that gave up waiting TOOK that
-        // slot's handle, and the pass it gave up on is exactly the writer this stop must not
-        // report away. Split borrow so `unfinished_passes` and `inner` are held at once.
-        let settled = {
-            let SlipstreamHandle {
-                inner,
-                unfinished_passes,
-                ..
-            } = &mut *handle;
-            settle_engine_passes(
-                &mut inner.task,
-                unfinished_passes,
-                std::time::Duration::from_secs(10),
-            )
-        };
-        let h = &mut handle.inner;
-        // [B4-16 drain] abort() cannot cancel an in-flight write-behind commit
-        // (`spawn_blocking`) — drain it so a returned stop means the wallet file is
-        // QUIESCENT: the host's next write (deleteAccount / importAccount / rewind
-        // truncate) can no longer interleave with an orphan commit. Swift hops this
-        // call off the cooperative pool (the drain is a real, bounded wait).
-        let drained = drain_slipstream_wallet_writers(&h.progress);
-        *h.state.lock().unwrap_or_else(|p| p.into_inner()) = SyncState::Idle;
-        // [MOB-1850] The pass is stopped either way — the state goes Idle above regardless. What
-        // the answer reports is whether the wallet file was PROVED quiescent, which is the only
-        // thing a caller about to mutate it can act on.
-        Ok(settled && drained)
+        // [MOB-1850] The engine settles every pass this handle has aborted and not yet watched
+        // finish (not just the one in the slot), then drains its write-behind commit, which
+        // abort() cannot cancel ([B4-16]), then goes Idle. Swift hops this call off the
+        // cooperative pool, because both waits are real, bounded waits. The pass is stopped
+        // either way; what the report says is whether the wallet file was PROVED quiescent,
+        // which is the only thing a caller about to mutate it can act on.
+        Ok(FfiSlipstreamStopReport::from(stop(
+            &mut handle.inner,
+            SLIPSTREAM_STOP_BUDGET,
+        )))
     });
-    unwrap_exc_or(res, false)
+    unwrap_exc_or(res, FfiSlipstreamStopReport::default())
 }
 
 /// [MOB-1852] The freshness rule behind `SlipstreamHandle::tip_fresh_now`, kept free of the
@@ -7431,84 +7516,6 @@ fn fresh_tip_decision(
         return true;
     }
     state == 3 || (refresh_advanced && spendable_hint == 1)
-}
-
-/// Aborts the running pass (if any), keeps every pass that has not finished yet on record, and
-/// waits within `budget` for all of them to finish. Returns whether the engine is quiescent with
-/// respect to its passes. A pass that outlives the budget STAYS on record, so a later stop cannot
-/// claim quiescence merely because the most recent handle has already been taken.
-///
-/// [B4-16 drain] `abort()` is ASYNCHRONOUS — the task keeps running until its next await
-/// point, so a synchronous in-flight wallet write (an enhance `decrypt_and_store`, a
-/// chain-tip or subtree-roots update — field evidence: a `deleteAccount` landing in that
-/// window failed its read→write lock upgrade, "error + try again") can land AFTER
-/// `abort()` returns. Wait (bounded) for the task to finish unwinding. Combined with
-/// `drain_slipstream_wallet_writers` (the persist lane's `spawn_blocking` commit — the
-/// engine's ONLY detached writer), a stop/start-abort that returns `true` means the wallet
-/// file is FULLY quiescent; `false` means it could not be proved so within the budget.
-fn settle_engine_passes(
-    task_slot: &mut Option<tokio::task::AbortHandle>,
-    unfinished: &mut Vec<tokio::task::AbortHandle>,
-    budget: std::time::Duration,
-) -> bool {
-    if let Some(task) = task_slot.take() {
-        task.abort();
-        unfinished.push(task);
-    }
-    let deadline = std::time::Instant::now() + budget;
-    loop {
-        unfinished.retain(|task| !task.is_finished());
-        if unfinished.is_empty() {
-            return true;
-        }
-        if std::time::Instant::now() >= deadline {
-            tracing::warn!(
-                "slipstream stop/start: {} aborted pass(es) still unwinding at the deadline — reporting a non-quiescent stop",
-                unfinished.len()
-            );
-            return false;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
-/// [B4-16 drain] Bounded wait for the engine's in-flight wallet-file writer — the
-/// write-behind lane's deferred commit, a `spawn_blocking` closure `task.abort()` cannot
-/// cancel. Field evidence (2026-07-04): an orphan commit outlived an `importAccount`
-/// restart, collided with the new pass's first writes ("database is locked" →
-/// non-transient failure, absorbed by the revival loop) and — worse — landed its
-/// Scanned-mark AFTER the import's force-rescan re-queue, silently shrinking the new
-/// account's scan scope. Called by stop() and start() right after settling the passes.
-/// 10 s cap ≫ the worst observed device commit (a few seconds, A10). [MOB-1850] A timeout
-/// is REPORTED (`false`) rather than logged away: a caller that is about to mutate the wallet
-/// needs to know the file was never proved quiescent, and can refuse instead of writing on top
-/// of a live writer. The busy_timeouts remain the backstop for the callers that proceed anyway.
-fn drain_slipstream_wallet_writers(progress: &slipstream_core::ProgressArc) -> bool {
-    drain_slipstream_wallet_writers_until(progress, std::time::Duration::from_secs(10))
-}
-
-/// The bounded body of [`drain_slipstream_wallet_writers`], with the budget as a parameter so a
-/// test can exercise the deadline branch without waiting ten seconds for it.
-fn drain_slipstream_wallet_writers_until(
-    progress: &slipstream_core::ProgressArc,
-    budget: std::time::Duration,
-) -> bool {
-    let deadline = std::time::Instant::now() + budget;
-    let mut waited = false;
-    while progress.wallet_writers() > 0 {
-        if std::time::Instant::now() >= deadline {
-            tracing::warn!(
-                "slipstream stop/start: in-flight wallet commit still running at the deadline — reporting a non-quiescent stop"
-            );
-            return false;
-        }
-        waited = true;
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    if waited {
-        tracing::info!("slipstream stop/start: drained in-flight wallet commit");
-    }
-    true
 }
 
 /// Reads a snapshot of current Slipstream progress atomics (non-blocking, poll-based — D8).

@@ -8,6 +8,12 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `zcashlc_slipstream_stop_for_wallet_change(handle)`, the stop to call right before changing the
+  wallet (adding or removing an account, a rewind, a wipe, or reopening a handle on the same
+  wallet). It asks the running session to end its scan at the next block, then stops exactly as
+  `zcashlc_slipstream_stop` does and returns the same `FfiSlipstreamStopReport`. Refuse the change
+  unless `settled` and `drained` are both 1. `zcashlc_slipstream_stop` lets a scan call in progress
+  run to the end of its chunk first, which can outlast its ten-second budget.
 - `zcashlc_payment_uri_parse` validates supported cross-chain payment request URIs and returns an
   internal JSON envelope for SDK bindings.
 - `zcashlc_parse_gift_card_link(link, error_out)` reads a gift card link — any `https` URL whose
@@ -474,10 +480,16 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   zero the wallet database reports for every non-stabilized note until that range is scanned. A
   pass that stalls before scanning it, or that never queues a ChainTip-priority range, keeps
   `tip_fresh = 0` until it reaches Done. The field and its type are unchanged.
-- `zcashlc_slipstream_stop` now returns `false` while any aborted pass is still unwinding or an
-  in-flight wallet commit has not drained within its bounded budget, and a pass that outlived an
-  earlier stop or start stays on record so a later stop keeps reporting `false` until it has
-  actually finished; previously it returned `true` regardless.
+- `zcashlc_slipstream_stop` returns an `FfiSlipstreamStopReport` by value instead of `bool`. Its
+  `settled` (`uint8_t`) is 0 while any aborted pass is still unwinding when the stop's ten-second
+  budget runs out, and `drained` is 0 while an in-flight wallet commit has not drained within its
+  own ten-second budget; each is 1 otherwise. `settle_ms` and `drain_ms` (`uint64_t`) say how long
+  each wait took. A pass that outlived an earlier stop or start stays on record, so a later stop
+  keeps reporting `settled = 0` until that pass has actually finished. A stop that cannot run, on a
+  null handle for instance, returns all zeros. The `bool` was `true` only when both waits finished
+  within their budgets, and `false` when either ran out or the stop could not run. A caller that
+  read the `bool` must read the struct: the wallet file was proved quiescent only when `settled`
+  and `drained` are both 1.
 - `zcashlc_propose_transfer`, `zcashlc_propose_transfer_from_uri`,
   `zcashlc_propose_send_max_transfer`, and `zcashlc_create_proposed_transactions` classify their
   failures instead of flattening them into a string. Their last-error text now reads
@@ -714,6 +726,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stale graft-buffer rows that misplace commitment-tree leaves or strand a shard, plus the engine
   facades' implementation of `WalletWrite::set_account_name`. That revision is built against the
   librustzcash revision above, and the patch is replaced by the release that contains them.
+- `zcashlc_slipstream_stop` and `zcashlc_slipstream_start` now call the engine for the bounded
+  stop that proves the wallet file quiescent, which zodl-inc/slipstream#28 moved into the engine;
+  that change also adds the stop for a wallet change.
 - `zcashlc_init_data_database` now creates the
   `ext_zcashlc_orchard_ironwood_migration_immediate_runs` extension table, moving into it any
   records held by the `sdk_immediate_runs` table that read-write `zcashlc_migration_*` calls used

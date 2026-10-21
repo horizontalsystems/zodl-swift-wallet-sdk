@@ -1,5 +1,55 @@
 # Migrating from previous versions to _Unreleased_
 
+## `ZcashError.slipstreamEngineNotQuiescent` carries the refused stop's report
+
+`ZRUST0155` now carries the `SlipstreamStopReport` of the stop that refused the operation, so its
+`localizedDescription` can say which of the engine's waits ran out and after how long. Patterns
+that ignore the payload keep compiling; a value of the case now needs one:
+
+```swift
+// Before
+XCTAssertEqual(error as? ZcashError, .slipstreamEngineNotQuiescent)
+let refusal = ZcashError.slipstreamEngineNotQuiescent
+
+// After: compare the code, or build the case from a report. `ZcashError` equality compares
+// only the code, so any report matches: an error equals `refusal` whatever report it carries.
+XCTAssertEqual((error as? ZcashError)?.code, .slipstreamEngineNotQuiescent)
+let refusal = ZcashError.slipstreamEngineNotQuiescent(
+    SlipstreamStopReport(settled: false, drained: true, settleWait: .seconds(10), drainWait: .zero)
+)
+
+// Unchanged: these match the case whatever it carries.
+// catch ZcashError.slipstreamEngineNotQuiescent { ... }
+// case .slipstreamEngineNotQuiescent: ...
+
+// New: bind the report to see which wait ran out.
+if case .slipstreamEngineNotQuiescent(let report) = error {
+    log(report.refusalReason ?? "")
+}
+```
+
+## `SlipstreamEngine.stop()` returns a `SlipstreamStopReport`
+
+The stop used to answer only whether it proved the wallet file quiescent. It now says what it
+found, and the old answer is the report's `isQuiescent`:
+
+```swift
+// Before
+let quiescent = await engine.stop()
+if !quiescent {
+    // The engine could not prove its pass and its wallet writer had stopped.
+}
+
+// After
+let report = await engine.stop()
+if !report.isQuiescent {
+    // `report.settled` and `report.drained` say which of the two waits ran out, and
+    // `report.settleWait` and `report.drainWait` how long each took.
+}
+```
+
+A call that discards the result, such as `await engine.stop()`, compiles unchanged.
+
 ## Imported accounts return their viewing keys — `Account.ufvk` and `Account.uivk`
 
 `Synchronizer.listAccounts()`, and every other API that returns an `Account`, now returns the
