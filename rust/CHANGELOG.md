@@ -690,7 +690,7 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   therefore trail a just-mined broadcast by at most one such pass. Reads no longer contend with
   proving.
 - The crate now builds against the NU7 pre-release generation of the `librustzcash` crates and
-  the `zodl-slipstream` 0.4.0-pre.1 engine.
+  the `zodl-slipstream` 0.4.0-pre.2 engine.
 - Every unified address, UFVK and UIVK string a `zcashlc_*` function returns is ZIP 316
   revision 0, with every receiver or item the value carries, as before the NU7 move. Revision 2
   is used only for a value revision 0 cannot represent (one with expiry metadata, a P2SH
@@ -704,11 +704,16 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (valargroup/vote-nullifier-pir#173), and `zakura-wallet-lib`
   (zakura-core/wallet-libraries#83). Each entry is replaced by the release that contains its
   pull request. The `zcashlc_voting_*` C surface is unchanged.
-- `[patch.crates-io]` takes the librustzcash crates from `zcash/librustzcash@cbf8984`: the
-  `zcash_client_sqlite` 0.23.0-pre.1 release plus a backport of `WalletDb::set_account_name`, which
-  `zcashlc_set_account_name` calls. Upstream adds the method in the draft zcash/librustzcash#3139,
-  not in this revision. Their versions are unchanged, and the patch is replaced by the release that
-  contains that pull request.
+- `[patch.crates-io]` takes the librustzcash crates from `zcash/librustzcash@68b2cf1f`: the
+  `zcash_client_sqlite` 0.23.0-pre.1 release plus a backport of zcash/librustzcash#3139, which adds
+  `WalletWrite::set_account_name` and which upstream has merged as `357359a4`.
+  `zcashlc_set_account_name` calls that trait method. Their versions are unchanged, and the patch is
+  replaced by the release that contains that pull request.
+- `zodl-slipstream` is now required as `=0.4.0-pre.2`, and `[patch.crates-io]` takes it from
+  `zodl-inc/slipstream@58647969`: the 0.4.0-pre.2 release plus zodl-inc/slipstream#30, which fixes
+  stale graft-buffer rows that misplace commitment-tree leaves or strand a shard, plus the engine
+  facades' implementation of `WalletWrite::set_account_name`. That revision is built against the
+  librustzcash revision above, and the patch is replaced by the release that contains them.
 - `zcashlc_init_data_database` now creates the
   `ext_zcashlc_orchard_ironwood_migration_immediate_runs` extension table, moving into it any
   records held by the `sdk_immediate_runs` table that read-write `zcashlc_migration_*` calls used
