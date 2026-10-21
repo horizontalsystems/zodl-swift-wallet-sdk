@@ -8,7 +8,7 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 # 6.0.0 - 2026-10-15
 
-Changes are relative to `5.2.1`.
+Changes are relative to `5.2.2`.
 
 ## Added
 
@@ -135,12 +135,32 @@ Changes are relative to `5.2.1`.
   to repeat the value that failed to decode, followed by the decoder's description of it; it is now
   a fixed sentence.
 
+# 5.2.2 - 2026-10-20
+
+## Fixed
+
+- TLS connections that the SDK's Rust core opens, such as those to lightwalletd servers and HTTP
+  endpoints over Tor, no longer trust the "emSign ECC Root CA - G3" root, and reject certificate
+  chains through a small set of intermediate keys that are now distrusted over specific security
+  concerns (`webpki-roots` 1.0.10, `rustls-webpki` 0.103.16). A server whose certificate chains to
+  either now fails the TLS handshake. No caller changes are required.
+
 ## Checkpoints
 
 Mainnet
 
 ````
-Sources/ZODLSwiftWalletSDK/Resources/checkpoints/mainnet/3517500.json
+Sources/ZcashLightClientKit/Resources/checkpoints/mainnet/3517500.json
+...
+Sources/ZcashLightClientKit/Resources/checkpoints/mainnet/3522500.json
+````
+
+Testnet
+
+````
+Sources/ZcashLightClientKit/Resources/checkpoints/testnet/4510000.json
+...
+Sources/ZcashLightClientKit/Resources/checkpoints/testnet/4520000.json
 ````
 
 # 5.2.1 - 2026-10-14
