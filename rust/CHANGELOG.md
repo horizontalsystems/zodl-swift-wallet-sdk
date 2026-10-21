@@ -722,10 +722,11 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `zcashlc_set_account_name` calls that trait method. Their versions are unchanged, and the patch is
   replaced by the release that contains that pull request.
 - `zodl-slipstream` is now required as `=0.4.0-pre.2`, and `[patch.crates-io]` takes it from
-  `zodl-inc/slipstream@58647969`: the 0.4.0-pre.2 release plus zodl-inc/slipstream#30, which fixes
-  stale graft-buffer rows that misplace commitment-tree leaves or strand a shard, plus the engine
+  `zodl-inc/slipstream@58647969`: the 0.4.0-pre.2 release plus zodl-inc/slipstream#30 and the engine
   facades' implementation of `WalletWrite::set_account_name`. That revision is built against the
-  librustzcash revision above, and the patch is replaced by the release that contains them.
+  librustzcash revision above, and the patch is replaced by the release that contains them. #30
+  fixes stale graft-buffer rows that could put commitment-tree leaves at the wrong position, or keep
+  a shard out of the tree, after a stopped pass, a reorg or an account import.
 - `zcashlc_slipstream_stop` and `zcashlc_slipstream_start` now call the engine for the bounded
   stop that proves the wallet file quiescent, which zodl-inc/slipstream#28 moved into the engine;
   that change also adds the stop for a wallet change.

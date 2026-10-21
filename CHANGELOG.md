@@ -43,6 +43,12 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`ZRUST0155`) because a scan finishing its whole chunk outlasted the ten-second stop budget. The
   next pass scans the interrupted blocks again. `stop()` and `stopAndWait()` still let a scan call
   finish its chunk.
+- With the Slipstream engine, a sync pass that was stopped, a chain reorg, or an account import
+  could leave the wallet's note commitment tree with leaves at the wrong positions, or keep part of
+  it out of the tree, so a later spend could fail to find its anchor or witness. The engine now
+  resumes, checks and rewinds the tree data it buffers by position, and rescans what it cannot
+  check. A wallet an earlier version already left in that state is not repaired by this change.
+  Nothing changes at the call site.
 
 # 6.0.0 - 2026-10-15
 
