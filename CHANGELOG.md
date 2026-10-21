@@ -6,58 +6,6 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 # Unreleased
 
-## Added
-
-- `SlipstreamStopReport`, what a stop of the Slipstream engine found: whether every sync pass the
-  engine had aborted finished unwinding within its ten-second budget (`settled`), whether no engine
-  wallet write was still running within its own (`drained`), how long each wait took (`settleWait`,
-  `drainWait`, as `Duration`), and `isQuiescent`, which is true only when both waits finished.
-  `refusalReason` says which wait ran out and after how long, for instance `a sync pass was still
-  running after 10.0 s`, and is `nil` for a quiescent report. Its public initializer lets a
-  consumer build one for a test double.
-- `SlipstreamEngine.stopForWalletChange()`, the stop to make right before changing the wallet. It
-  asks the running sync pass to end its scan at the next block, then stops exactly as `stop()` does
-  and returns the same `SlipstreamStopReport`; `stop()` lets a scan call in progress finish its
-  chunk first. The next pass scans the interrupted blocks again.
-
-## Changed
-
-- `SlipstreamEngine.stop()` returns a `SlipstreamStopReport` instead of a `Bool`. The old `Bool` is
-  the report's `isQuiescent`: code that tested the result stops compiling until it reads that
-  property. A call that discards the result needs no change. See `MIGRATING.md`.
-- `ZcashError.slipstreamEngineNotQuiescent` (`ZRUST0155`) now carries the `SlipstreamStopReport` of
-  the stop that refused the operation, and its `errorDescription`, so its `localizedDescription`,
-  ends with the report's `refusalReason` in parentheses, for instance `ZRUST0155: … the mutation
-  was refused. (a sync pass was still running after 10.0 s)`. `ZcashError.detail` returns the same
-  text. It is built from the report's two verdicts and two waits alone and names no account, key or
-  address. Code that constructs the case, or compares an error with `==` against it, stops
-  compiling until it passes a report or compares `code`; `case .slipstreamEngineNotQuiescent:` and
-  `catch ZcashError.slipstreamEngineNotQuiescent` keep compiling. See `MIGRATING.md`.
-
-## Fixed
-
-- `SlipstreamSynchronizer.importAccount`, `deleteAccount`, `rewind(_:)`, `wipe()`,
-  `switchTo(endpoint:)` and `restartSync(at:)`, and the synchronizer's own stall recovery, now stop
-  the engine with `stopForWalletChange()`, which ends the scan at its next block. Importing several
-  accounts in quick succession no longer fails with `ZcashError.slipstreamEngineNotQuiescent`
-  (`ZRUST0155`) because a scan finishing its whole chunk outlasted the ten-second stop budget. The
-  next pass scans the interrupted blocks again. `stop()` and `stopAndWait()` still let a scan call
-  finish its chunk.
-- With the Slipstream engine, a sync pass that was stopped, a chain reorg, or an account import
-  could leave the wallet's note commitment tree with leaves at the wrong positions, or keep part of
-  it out of the tree, so a later spend could fail to find its anchor or witness. The engine now
-  resumes, checks and rewinds the tree data it buffers by position, and rescans what it cannot
-  check. A wallet an earlier version already left in that state is not repaired by this change.
-  Nothing changes at the call site.
-
-## Checkpoints
-
-Mainnet
-
-````
-Sources/ZODLSwiftWalletSDK/Resources/checkpoints/mainnet/3525000.json
-````
-
 # 6.0.0 - 2026-10-15
 
 Changes are relative to `5.2.2`.
@@ -122,6 +70,17 @@ Changes are relative to `5.2.2`.
   the name is empty or contains a null character. It does not stop synchronization. A
   protocol-extension default keeps other `Synchronizer` conformers compiling; it throws, so a
   conformer that offers renaming must implement it.
+- `SlipstreamStopReport`, what a stop of the Slipstream engine found: whether every sync pass the
+  engine had aborted finished unwinding within its ten-second budget (`settled`), whether no engine
+  wallet write was still running within its own (`drained`), how long each wait took (`settleWait`,
+  `drainWait`, as `Duration`), and `isQuiescent`, which is true only when both waits finished.
+  `refusalReason` says which wait ran out and after how long, for instance `a sync pass was still
+  running after 10.0 s`, and is `nil` for a quiescent report. Its public initializer lets a
+  consumer build one for a test double.
+- `SlipstreamEngine.stopForWalletChange()`, the stop to make right before changing the wallet. It
+  asks the running sync pass to end its scan at the next block, then stops exactly as `stop()` does
+  and returns the same `SlipstreamStopReport`; `stop()` lets a scan call in progress finish its
+  chunk first. The next pass scans the interrupted blocks again.
 
 ## Changed
 
@@ -170,6 +129,17 @@ Changes are relative to `5.2.2`.
   `Account` no longer equals, or hashes like, the value an earlier version returned, so match
   accounts by `id`. Its `Codable` encoding now includes both keys, so an `Account` a wallet stores
   or sends carries the account's viewing key. See `MIGRATING.md`.
+- `SlipstreamEngine.stop()` returns a `SlipstreamStopReport` instead of a `Bool`. The old `Bool` is
+  the report's `isQuiescent`: code that tested the result stops compiling until it reads that
+  property. A call that discards the result needs no change. See `MIGRATING.md`.
+- `ZcashError.slipstreamEngineNotQuiescent` (`ZRUST0155`) now carries the `SlipstreamStopReport` of
+  the stop that refused the operation, and its `errorDescription`, so its `localizedDescription`,
+  ends with the report's `refusalReason` in parentheses, for instance `ZRUST0155: … the mutation
+  was refused. (a sync pass was still running after 10.0 s)`. `ZcashError.detail` returns the same
+  text. It is built from the report's two verdicts and two waits alone and names no account, key or
+  address. Code that constructs the case, or compares an error with `==` against it, stops
+  compiling until it passes a report or compares `code`; `case .slipstreamEngineNotQuiescent:` and
+  `catch ZcashError.slipstreamEngineNotQuiescent` keep compiling. See `MIGRATING.md`.
 
 ## Removed
 
@@ -194,6 +164,27 @@ Changes are relative to `5.2.2`.
   of `ZcashError.rustImportAccountUfvk`, `rustDeriveAddressFromUfvk` and `rustSlipstreamStart` used
   to repeat the value that failed to decode, followed by the decoder's description of it; it is now
   a fixed sentence.
+- `SlipstreamSynchronizer.importAccount`, `deleteAccount`, `rewind(_:)`, `wipe()`,
+  `switchTo(endpoint:)` and `restartSync(at:)`, and the synchronizer's own stall recovery, now stop
+  the engine with `stopForWalletChange()`, which ends the scan at its next block. Importing several
+  accounts in quick succession no longer fails with `ZcashError.slipstreamEngineNotQuiescent`
+  (`ZRUST0155`) because a scan finishing its whole chunk outlasted the ten-second stop budget. The
+  next pass scans the interrupted blocks again. `stop()` and `stopAndWait()` still let a scan call
+  finish its chunk.
+- With the Slipstream engine, a sync pass that was stopped, a chain reorg, or an account import
+  could leave the wallet's note commitment tree with leaves at the wrong positions, or keep part of
+  it out of the tree, so a later spend could fail to find its anchor or witness. The engine now
+  resumes, checks and rewinds the tree data it buffers by position, and rescans what it cannot
+  check. A wallet an earlier version already left in that state is not repaired by this change.
+  Nothing changes at the call site.
+
+## Checkpoints
+
+Mainnet
+
+````
+Sources/ZODLSwiftWalletSDK/Resources/checkpoints/mainnet/3525000.json
+````
 
 # 5.2.2 - 2026-10-20
 
