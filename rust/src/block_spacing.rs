@@ -1,37 +1,34 @@
 //! Proof-of-work target block spacing and the conversions between block counts and target time.
 //!
 //! The consensus rules aim for 150 s between blocks before Blossom, 75 s from Blossom (ZIP 208),
-//! and 25 s from NU7. A span converted with one constant is wrong as soon as it crosses one of
-//! those activations, so every such conversion in this crate goes through here. Everything is
-//! generic over [`Parameters`], so a registered custom network uses its own activation heights.
+//! and 25 s from NU7 (ZIP 218). A span converted with one constant is wrong as soon as it crosses
+//! one of those activations, so every such conversion in this crate goes through here. Everything
+//! is generic over [`Parameters`], so a registered custom network uses its own activation heights.
 //!
-//! This is an interim copy that mirrors the upstream ZIP 218 proposal for librustzcash.
-//! `pow_target_spacing` and `default_tx_expiry_delta` keep the names proposed there (here
-//! `pow_target_spacing` returns seconds as a `u32` where upstream returns a `Duration`), and
-//! `target_seconds_between` is a signed-seconds counterpart of upstream's `target_time_between`.
-//! Replace the copy with the upstream helpers once a release ships them.
+//! Three helpers are built on librustzcash's, which carries the schedule:
+//! - [`pow_target_spacing`] is `zcash_protocol::consensus::pow_target_spacing`, in whole seconds
+//!   where upstream returns a `Duration`.
+//! - [`target_seconds_between`] is `zcash_protocol::consensus::target_time_between`, in signed
+//!   seconds.
+//! - [`default_tx_expiry_delta`] chooses between the `zcash_primitives` builder's
+//!   `BLOSSOM_DEFAULT_TX_EXPIRY_DELTA` and `NU7_DEFAULT_TX_EXPIRY_DELTA`. It deliberately does not
+//!   call the builder's own `default_tx_expiry_delta`.
+//!
+//! The rest is the SDK's own, because librustzcash has no counterpart: the spacing eras
+//! ([`SpacingEra`], [`spacing_era`]) and the inverses, [`height_after_target_seconds`] (the height
+//! a span of target time reaches) and [`default_tx_target_height_for_expiry`] (the target height
+//! of a default expiry). They are built on the helpers above, so they follow the same schedule.
 
-use zcash_primitives::transaction::builder::BLOSSOM_DEFAULT_TX_EXPIRY_DELTA;
-use zcash_protocol::consensus::{BlockHeight, H0, NetworkUpgrade, Parameters};
-
-const PRE_BLOSSOM_POW_TARGET_SPACING: u32 = 150;
-const POST_BLOSSOM_POW_TARGET_SPACING: u32 = 75;
-const POST_NU7_POW_TARGET_SPACING: u32 = 25;
-
-/// The default expiry delta, in blocks, once NU7 is active at the target height: the 50 minutes
-/// librustzcash's 40-block default spans at 75 seconds, at NU7's 25.
-const POST_NU7_DEFAULT_TX_EXPIRY_DELTA: u32 = 120;
+use zcash_primitives::transaction::builder::{
+    BLOSSOM_DEFAULT_TX_EXPIRY_DELTA, NU7_DEFAULT_TX_EXPIRY_DELTA,
+};
+use zcash_protocol::consensus::{self, BlockHeight, H0, NetworkUpgrade, Parameters};
 
 /// The target spacing of the block at `height`, in seconds: the time the consensus rules aim to
 /// put between the blocks at `height - 1` and `height`.
 pub(crate) fn pow_target_spacing<P: Parameters>(params: &P, height: BlockHeight) -> u32 {
-    if !params.is_nu_active(NetworkUpgrade::Blossom, height) {
-        PRE_BLOSSOM_POW_TARGET_SPACING
-    } else if !params.is_nu_active(NetworkUpgrade::Nu7, height) {
-        POST_BLOSSOM_POW_TARGET_SPACING
-    } else {
-        POST_NU7_POW_TARGET_SPACING
-    }
+    u32::try_from(consensus::pow_target_spacing(params, height).as_secs())
+        .expect("every target spacing is at most 150 s, so it fits a u32")
 }
 
 /// A maximal run of heights whose blocks share one target spacing.
@@ -86,19 +83,8 @@ pub(crate) fn target_seconds_between<P: Parameters>(
     if to < from {
         return -target_seconds_between(params, to, from);
     }
-    let mut seconds = 0i64;
-    let mut height = from;
-    while height < to {
-        let era = spacing_era(params, height + 1);
-        // The last height of this era that is still within `to`.
-        let segment_end = match era.end {
-            Some(end) if end <= to => end - 1,
-            _ => to,
-        };
-        seconds += i64::from(segment_end - height) * i64::from(era.spacing);
-        height = segment_end;
-    }
-    seconds
+    i64::try_from(consensus::target_time_between(params, from, to).as_secs())
+        .expect("the sum over every height, at 150 s or less each, fits an i64 with room to spare")
 }
 
 /// The height `seconds` of target time reach from `from`, counting whole blocks only. For
@@ -149,13 +135,15 @@ pub(crate) fn height_after_target_seconds<P: Parameters>(
 }
 
 /// The default expiry delta, in blocks, of a transaction whose target height is `target_height`:
-/// 40 before NU7, and 120 from NU7, the same 50 minutes.
+/// `BLOSSOM_DEFAULT_TX_EXPIRY_DELTA` (40) before NU7, and `NU7_DEFAULT_TX_EXPIRY_DELTA` (120) from
+/// NU7, the same 50 minutes. It does not call librustzcash's `default_tx_expiry_delta`, which gives
+/// 20 below Blossom where this keeps 40.
 pub(crate) fn default_tx_expiry_delta<P: Parameters>(
     params: &P,
     target_height: BlockHeight,
 ) -> u32 {
     if params.is_nu_active(NetworkUpgrade::Nu7, target_height) {
-        POST_NU7_DEFAULT_TX_EXPIRY_DELTA
+        NU7_DEFAULT_TX_EXPIRY_DELTA
     } else {
         BLOSSOM_DEFAULT_TX_EXPIRY_DELTA
     }
@@ -169,7 +157,7 @@ pub(crate) fn default_tx_target_height_for_expiry<P: Parameters>(
     params: &P,
     expiry_height: BlockHeight,
 ) -> BlockHeight {
-    let post_nu7_target = expiry_height - POST_NU7_DEFAULT_TX_EXPIRY_DELTA;
+    let post_nu7_target = expiry_height - NU7_DEFAULT_TX_EXPIRY_DELTA;
     let pre_nu7_target = expiry_height - BLOSSOM_DEFAULT_TX_EXPIRY_DELTA;
     [post_nu7_target, pre_nu7_target]
         .into_iter()
@@ -186,10 +174,8 @@ mod tests {
     const TESTNET_BLOSSOM: u32 = 584_000;
     const TESTNET_NU7: u32 = 4_465_026;
     const MAINNET_BLOSSOM: u32 = 653_600;
-    /// A mainnet height long behind the chain tip. The pinned crate gives mainnet no NU7 height,
-    /// and a later one will put it well above this, so every assertion on `MAIN_NETWORK` stays at
-    /// or below this height. Where a test needs mainnet's schedule beyond it, with NU7 never
-    /// activating, it uses `mainnet_without_nu7`.
+    const MAINNET_NU7: u32 = 3_543_405;
+    /// A mainnet height in the 75 s era: mainnet's NU7 is at 3,543,405, above it.
     const MAINNET_SETTLED: u32 = 3_000_000;
 
     fn h(height: u32) -> BlockHeight {
@@ -214,11 +200,9 @@ mod tests {
         }
     }
 
-    /// Mainnet's schedule for as long as NU7 has no activation height there: Blossom at its mainnet
-    /// height, NU7 never. It stands in for `MAIN_NETWORK` in every assertion that no NU7 era ever
-    /// begins, which `MAIN_NETWORK` itself would stop satisfying once the crate gives it an NU7
-    /// height.
-    fn mainnet_without_nu7() -> LocalNetwork {
+    /// A schedule on which NU7 never activates: Blossom at mainnet's height, NU7 never. Its 75 s
+    /// era never ends, unlike the 75 s era of either standard network.
+    fn blossom_without_nu7() -> LocalNetwork {
         custom(Some(MAINNET_BLOSSOM), None)
     }
 
@@ -231,9 +215,8 @@ mod tests {
     }
 
     /// Both standard networks, NU7 above Blossom, both at one height, NU7 without Blossom, Blossom
-    /// at genesis, and mainnet's Blossom height with NU7 never activating. The checks run through
-    /// it are properties of any schedule, never fixed values, so listing `MAIN_NETWORK` pins
-    /// nothing about its NU7 height.
+    /// at genesis, and Blossom at mainnet's height with NU7 never activating. The checks run
+    /// through it are properties of any schedule, never fixed values.
     macro_rules! for_every_network {
         ($check:ident) => {
             $check(&MAIN_NETWORK);
@@ -242,7 +225,7 @@ mod tests {
             $check(&custom(Some(1), Some(1)));
             $check(&custom(None, Some(10)));
             $check(&custom(Some(0), None));
-            $check(&mainnet_without_nu7());
+            $check(&blossom_without_nu7());
         };
     }
 
@@ -412,7 +395,7 @@ mod tests {
 
     #[test]
     fn spacing_stays_at_75_seconds_where_nu7_never_activates() {
-        let network = mainnet_without_nu7();
+        let network = blossom_without_nu7();
         assert_eq!(pow_target_spacing(&network, h(MAINNET_BLOSSOM - 1)), 150);
         assert_eq!(pow_target_spacing(&network, h(MAINNET_BLOSSOM)), 75);
         assert_eq!(pow_target_spacing(&network, h(MAINNET_SETTLED)), 75);
@@ -442,16 +425,27 @@ mod tests {
             spacing_era(&MAIN_NETWORK, h(MAINNET_BLOSSOM - 1)),
             era(0, Some(MAINNET_BLOSSOM), 150)
         );
-        // Where mainnet's era ends depends on the NU7 height it is given, so only its start and
-        // spacing are pinned, and that it ends beyond the settled height. The unbounded era is
-        // asserted on the network without NU7.
-        let mainnet_era = spacing_era(&MAIN_NETWORK, h(MAINNET_SETTLED));
-        assert_eq!(mainnet_era.start, h(MAINNET_BLOSSOM));
-        assert_eq!(mainnet_era.spacing, 75);
-        assert!(mainnet_era.end.is_none_or(|end| end > h(MAINNET_SETTLED)));
         assert_eq!(
-            spacing_era(&mainnet_without_nu7(), h(MAINNET_SETTLED)),
-            era(MAINNET_BLOSSOM, None, 75)
+            spacing_era(&MAIN_NETWORK, h(MAINNET_SETTLED)),
+            era(MAINNET_BLOSSOM, Some(MAINNET_NU7), 75)
+        );
+    }
+
+    /// Mainnet's real schedule: Blossom at 653,600 and NU7 at 3,543,405, so the 75 s era is
+    /// bounded on the right and the 25 s era never ends.
+    #[test]
+    fn mainnet_eras_switch_at_nu7() {
+        assert_eq!(
+            spacing_era(&MAIN_NETWORK, h(653_599)),
+            era(0, Some(653_600), 150)
+        );
+        assert_eq!(
+            spacing_era(&MAIN_NETWORK, h(3_543_404)),
+            era(653_600, Some(3_543_405), 75)
+        );
+        assert_eq!(
+            spacing_era(&MAIN_NETWORK, h(3_543_405)),
+            era(3_543_405, None, 25)
         );
     }
 
@@ -469,6 +463,10 @@ mod tests {
         assert_eq!(
             spacing_era(&custom(Some(1), Some(1)), h(1)),
             era(1, None, 25)
+        );
+        assert_eq!(
+            spacing_era(&blossom_without_nu7(), h(MAINNET_SETTLED)),
+            era(MAINNET_BLOSSOM, None, 75)
         );
     }
 
@@ -497,22 +495,49 @@ mod tests {
         );
     }
 
-    /// Mainnet's heights with NU7 never activating: 653,599 blocks at 150 s and 4,294,313,696 at
-    /// 75 s. Testnet: 583,999 at 150 s, 3,881,026 at 75 s and 4,290,502,270 at 25 s.
+    /// From 3,543,403, the block at 3,543,404 takes 75 s and the block at 3,543,405, mainnet's
+    /// first NU7 block, 25 s.
     #[test]
-    fn target_seconds_between_spans_every_height_without_overflow() {
-        let mainnet = mainnet_without_nu7();
+    fn mainnet_target_seconds_across_nu7() {
         assert_eq!(
-            target_seconds_between(&mainnet, h(0), h(u32::MAX)),
-            322_171_567_050
+            target_seconds_between(&MAIN_NETWORK, h(3_543_403), h(3_543_405)),
+            100
         );
         assert_eq!(
-            target_seconds_between(&mainnet, h(u32::MAX), h(0)),
-            -322_171_567_050
+            target_seconds_between(&MAIN_NETWORK, h(3_543_405), h(3_543_403)),
+            -100
+        );
+        assert_eq!(
+            height_after_target_seconds(&MAIN_NETWORK, h(3_543_403), 100),
+            h(3_543_405)
+        );
+    }
+
+    /// Mainnet: 653,599 blocks at 150 s, 2,889,805 at 75 s and 4,291,423,891 at 25 s. Testnet:
+    /// 583,999 at 150 s, 3,881,026 at 75 s and 4,290,502,270 at 25 s. Where NU7 never activates,
+    /// with Blossom at mainnet's height: 653,599 at 150 s and 4,294,313,696 at 75 s.
+    #[test]
+    fn target_seconds_between_spans_every_height_without_overflow() {
+        assert_eq!(
+            target_seconds_between(&MAIN_NETWORK, h(0), h(u32::MAX)),
+            107_600_372_500
+        );
+        assert_eq!(
+            target_seconds_between(&MAIN_NETWORK, h(u32::MAX), h(0)),
+            -107_600_372_500
         );
         assert_eq!(
             target_seconds_between(&TEST_NETWORK, h(0), h(u32::MAX)),
             107_641_233_550
+        );
+        let without_nu7 = blossom_without_nu7();
+        assert_eq!(
+            target_seconds_between(&without_nu7, h(0), h(u32::MAX)),
+            322_171_567_050
+        );
+        assert_eq!(
+            target_seconds_between(&without_nu7, h(u32::MAX), h(0)),
+            -322_171_567_050
         );
     }
 
@@ -604,7 +629,6 @@ mod tests {
 
     #[test]
     fn default_tx_expiry_delta_is_120_blocks_from_nu7() {
-        assert_eq!(BLOSSOM_DEFAULT_TX_EXPIRY_DELTA, 40);
         assert_eq!(
             default_tx_expiry_delta(&TEST_NETWORK, h(TESTNET_NU7 - 1)),
             40
@@ -615,8 +639,26 @@ mod tests {
             40
         );
         assert_eq!(
-            default_tx_expiry_delta(&mainnet_without_nu7(), h(u32::MAX)),
+            default_tx_expiry_delta(&blossom_without_nu7(), h(u32::MAX)),
             40
+        );
+    }
+
+    /// Mainnet's default expiry is 40 blocks up to 3,543,404 and 120 from 3,543,405, and 40 below
+    /// Blossom too, where librustzcash's own default is 20. The inverse maps the expiry of the
+    /// first NU7 target, and of the last target before it, back to those targets.
+    #[test]
+    fn mainnet_default_expiry_switches_at_nu7() {
+        assert_eq!(default_tx_expiry_delta(&MAIN_NETWORK, h(3_543_404)), 40);
+        assert_eq!(default_tx_expiry_delta(&MAIN_NETWORK, h(3_543_405)), 120);
+        assert_eq!(default_tx_expiry_delta(&MAIN_NETWORK, h(1)), 40);
+        assert_eq!(
+            default_tx_target_height_for_expiry(&MAIN_NETWORK, h(3_543_525)),
+            h(3_543_405)
+        );
+        assert_eq!(
+            default_tx_target_height_for_expiry(&MAIN_NETWORK, h(3_543_444)),
+            h(3_543_404)
         );
     }
 
