@@ -671,7 +671,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `zcashlc_migration_advance_step` judges an overdue schedule and shifts a slept-through backlog by the same
   rule. Below the activation a reference block is one block, so heights there are unchanged. Convert a span
   of heights to time with `zcashlc_target_seconds_between`, not at 75 seconds a block. The reorg settle depth
-  stays 10 blocks on both sides of the activation.
+  `zcashlc_migration_advance_step` judges a displaced step by is 10 reference blocks too: 10 blocks below the
+  activation and 30 from it.
 - A transaction whose expiry height the wallet does not know is assumed to expire after the default expiry
   delta for the height at which the wallet first observed it: 120 blocks from NU7 (mainnet 3,543,405,
   testnet 4,465,026), where the assumption was a fixed 40, and still 40 from Blossom until NU7. The delta

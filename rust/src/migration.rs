@@ -2476,20 +2476,27 @@ fn remaining_orchard(ctx: &mut CallCtx) -> anyhow::Result<Zatoshis> {
         .ok_or_else(|| anyhow!("spendable Orchard balance overflows"))
 }
 
-/// The drive-level policy for [`advance_migration`] on the network of `params`.
+/// The drive-level policy for [`advance_migration`] on the network of `params`, at the chain tip
+/// `tip`.
 ///
 /// ZIP 318 states the schedule's durations in reference blocks, blocks at the 75-second target
 /// spacing. The block spacing is how the drive turns them into blocks: from the network's NU7
 /// activation height each reference block spans three blocks, so a duration keeps its length in
 /// time on either side of the activation.
 ///
-/// The reorg settle depth is a fixed [`PROVABLE_ANCHOR_DEPTH`] blocks, 10, at every height. The
-/// release leaves it to the caller whether the depth should scale with the block spacing, which is
-/// an open question for this wallet; until it is answered, the depth does not scale at NU7.
-pub(crate) fn advance_config<P: Parameters>(params: &P) -> AdvanceConfig {
+/// The reorg settle depth is how many blocks the scanned chain must stand past a displaced step's
+/// anchor before the displacement counts as permanent: [`PROVABLE_ANCHOR_DEPTH`] reference blocks,
+/// 10, about 12.5 minutes. Upstream leaves the depth to the caller and says it should track the
+/// block spacing. The depth is a plain block count, so it is converted at one height only, the
+/// tip: 10 blocks below the network's NU7 activation and 30 from it. The stretch of chain the
+/// depth measures lasts longer than 12.5 minutes where it reaches back over blocks from before
+/// the activation, 75 seconds each: for the first 30 blocks after the activation, and while the
+/// scan trails the tip across it. So the depth errs long, never short.
+pub(crate) fn advance_config<P: Parameters>(params: &P, tip: BlockHeight) -> AdvanceConfig {
+    let spacing = BlockSpacing::for_network(params);
     AdvanceConfig::new(
-        ReorgSettleDepth::new(PROVABLE_ANCHOR_DEPTH),
-        BlockSpacing::for_network(params),
+        ReorgSettleDepth::new(PROVABLE_ANCHOR_DEPTH * spacing.blocks_per_reference_block(tip)),
+        spacing,
     )
 }
 
@@ -2517,13 +2524,14 @@ fn drive_advance(
     state: &mut MigrationState,
     estimated_tip: i64,
 ) -> anyhow::Result<Advance> {
-    let targets = dueness_targets(ctx.tip()?, estimated_tip);
+    let tip = ctx.tip()?;
+    let targets = dueness_targets(tip, estimated_tip);
     let mut store = account_store(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
     advance_migration(
         &mut store,
         state,
         targets,
-        &advance_config(&ctx.network),
+        &advance_config(&ctx.network, tip),
         // librustzcash #2910: re-spreading a missed broadcast schedule draws fresh
         // inter-broadcast gaps, so advancing needs entropy.
         rng,
@@ -2532,9 +2540,9 @@ fn drive_advance(
 }
 
 /// Advances the stored run with upstream's public satisfiability API, using scanned and estimated
-/// targets plus the provable-anchor reorg-settle depth. Every upstream step marshals onto its own
-/// discriminant — Reevaluate and Replan included (bare, as upstream carries them; the collapsed
-/// Attend projection is retired).
+/// targets plus the reorg settle depth that [`advance_config`] derives from the chain tip. Every
+/// upstream step marshals onto its own discriminant — Reevaluate and Replan included (bare, as
+/// upstream carries them; the collapsed Attend projection is retired).
 ///
 /// Returns NULL **with no error recorded** when `get_migration()` returns `None` — no run is
 /// stored, so there is nothing to advance and no step to report. Distinguish that benign NULL
@@ -11286,21 +11294,60 @@ mod tests {
     // ----- the drive's configuration (`advance_config`) -----
 
     /// The drive converts the schedule's durations into blocks with the spacing of the network it
-    /// runs on, which changes at that network's NU7 activation, and settles reorgs after the same
-    /// number of blocks on either side of it.
+    /// runs on, which changes at that network's NU7 activation.
     #[test]
     fn advance_config_spaces_blocks_by_the_networks_nu7_activation() {
         assert_eq!(
-            advance_config(&Network::MainNetwork).block_spacing(),
+            advance_config(&Network::MainNetwork, h(3_543_405)).block_spacing(),
             BlockSpacing::with_nu7_activation(BlockHeight::from_u32(3_543_405))
         );
         assert_eq!(
-            advance_config(&Network::TestNetwork).block_spacing(),
+            advance_config(&Network::TestNetwork, h(4_465_026)).block_spacing(),
             BlockSpacing::with_nu7_activation(BlockHeight::from_u32(4_465_026))
         );
+    }
+
+    /// A chain that follows mainnet, except that NU7 never activates on it.
+    #[derive(Clone)]
+    struct NoNu7;
+
+    impl Parameters for NoNu7 {
+        fn network_type(&self) -> zcash_protocol::consensus::NetworkType {
+            Network::MainNetwork.network_type()
+        }
+
+        fn activation_height(&self, nu: NetworkUpgrade) -> Option<BlockHeight> {
+            match nu {
+                NetworkUpgrade::Nu7 => None,
+                nu => Network::MainNetwork.activation_height(nu),
+            }
+        }
+    }
+
+    /// The reorg settle depth is 10 reference blocks, converted to blocks at the chain tip: 10
+    /// blocks below the network's NU7 activation and 30 from it, the same 12.5 minutes. A chain
+    /// on which NU7 never activates keeps 10 blocks at every height.
+    #[test]
+    fn advance_config_scales_the_settle_depth_at_the_networks_nu7_activation() {
         assert_eq!(
-            advance_config(&Network::MainNetwork).reorg_settle_depth(),
-            ReorgSettleDepth::new(PROVABLE_ANCHOR_DEPTH)
+            advance_config(&Network::MainNetwork, h(3_543_404)).reorg_settle_depth(),
+            ReorgSettleDepth::new(10)
+        );
+        assert_eq!(
+            advance_config(&Network::MainNetwork, h(3_543_405)).reorg_settle_depth(),
+            ReorgSettleDepth::new(30)
+        );
+        assert_eq!(
+            advance_config(&Network::TestNetwork, h(4_465_025)).reorg_settle_depth(),
+            ReorgSettleDepth::new(10)
+        );
+        assert_eq!(
+            advance_config(&Network::TestNetwork, h(4_465_026)).reorg_settle_depth(),
+            ReorgSettleDepth::new(30)
+        );
+        assert_eq!(
+            advance_config(&NoNu7, h(5_000_000)).reorg_settle_depth(),
+            ReorgSettleDepth::new(10)
         );
     }
 
@@ -11696,6 +11743,140 @@ mod tests {
             "mining is chain-derived: nothing is height-schedulable"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The step [`zcashlc_migration_advance_step`] serves over a run whose one transaction is a
+    /// BROADCAST transfer anchored at `boundary`, on a wallet whose chain tip is `chain_tip` and
+    /// which has scanned through `scanned`: `Ok(step)`, or `Err(message)` with the error the call
+    /// recorded when it returns NULL.
+    ///
+    /// The answer reads the drive's reorg settle depth. Upstream judges a broadcast's anchor
+    /// displaced only once `scanned - boundary` reaches that depth, and judging parses the stored
+    /// PCZT. This fixture's placeholder bytes fail the parse (see
+    /// [`advance_step_outlook_reports_next_work`]), so a judged row errors where an unjudged one
+    /// yields `Waiting`: a boundary one block either side of the depth tells the depth exactly,
+    /// with no real proven PCZT. [`assert_anchor_judged`] checks the errored side.
+    fn advance_step_for_a_broadcast_anchored_at(
+        chain_tip: u32,
+        scanned: u32,
+        boundary: u32,
+    ) -> Result<u32, String> {
+        // A database per scenario: the tests run in parallel, and the prefix names the file.
+        let path = init_fixture_db(&format!(
+            "zcashlc_advance_step_settle_{chain_tip}_{scanned}_{boundary}"
+        ));
+        let path_bytes = path.to_str().unwrap().as_bytes();
+        let account = create_fixture_account(&path);
+        // The scanned range goes first: `mark_fixture_scanned_through` replaces the whole scan
+        // queue, so a tip set before it would collapse to the scanned height. Set after, the tip
+        // extends the queue past the scanned range.
+        mark_fixture_scanned_through(&path, scanned);
+        assert!(
+            unsafe {
+                crate::zcashlc_update_chain_tip(
+                    path_bytes.as_ptr(),
+                    path_bytes.len(),
+                    chain_tip as i32,
+                    NETWORK_ID_MAINNET,
+                )
+            },
+            "chain-tip update must succeed"
+        );
+        let state = custom_state(
+            MigrationStatus::InProgress,
+            vec![tx_row(
+                0,
+                MigrationTxKind::Transfer { crossing: 0 },
+                &[],
+                3_100_000,
+                4_000_000,
+                Some(boundary),
+                MigrationTxState::Broadcast {
+                    txid: TxId::from_bytes([9u8; 32]),
+                },
+            )],
+        );
+        store_fixture_state(&path, &account, &state);
+
+        // Cleared first, so that the message read after a NULL is this call's own.
+        ffi_helpers::error_handling::clear_last_error();
+        let ptr = unsafe {
+            zcashlc_migration_advance_step(
+                path_bytes.as_ptr(),
+                path_bytes.len(),
+                account.as_ptr(),
+                NETWORK_ID_MAINNET,
+                -1,
+            )
+        };
+        let outcome = if ptr.is_null() {
+            Err(ffi_helpers::error_handling::error_message()
+                .unwrap_or_else(|| "NULL with no error recorded".to_owned()))
+        } else {
+            let step = unsafe { &*ptr }.step;
+            unsafe { zcashlc_free_migration_advance_step(ptr) };
+            Ok(step)
+        };
+        let _ = std::fs::remove_file(&path);
+        outcome
+    }
+
+    /// Asserts that `outcome` is the failure to read this fixture's placeholder PCZT, which the
+    /// call reaches only once upstream judges the broadcast's anchor. The error names the stored
+    /// PCZT (upstream words it "corrupt stored value for pczt"), which tells that failure from
+    /// any other reason the call can return NULL, and from a step.
+    #[track_caller]
+    fn assert_anchor_judged(outcome: Result<u32, String>, what: &str) {
+        assert!(
+            matches!(&outcome, Err(error) if error.contains("pczt")),
+            "{what}: expected the stored-PCZT failure, got {outcome:?}"
+        );
+    }
+
+    /// From NU7 a block is a third of a reference block, so the drive treats a displacement of a
+    /// broadcast's anchor as permanent only once the scanned chain stands 30 blocks past it: the
+    /// same 12.5 minutes as the 10 blocks below the activation. Mainnet activates NU7 at 3,543,405.
+    #[test]
+    fn advance_step_settles_a_displacement_after_30_blocks_from_nu7() {
+        assert_eq!(
+            advance_step_for_a_broadcast_anchored_at(3_600_000, 3_600_000, 3_599_971),
+            Ok(ZCASHLC_ADVANCE_STEP_WAITING),
+            "an anchor 29 blocks back has not settled"
+        );
+        assert_anchor_judged(
+            advance_step_for_a_broadcast_anchored_at(3_600_000, 3_600_000, 3_599_970),
+            "an anchor 30 blocks back is judged, which reads the placeholder PCZT and errors",
+        );
+    }
+
+    /// Below the activation a reference block is one block, so the depth stays at 10 blocks.
+    #[test]
+    fn advance_step_settles_a_displacement_after_10_blocks_below_nu7() {
+        assert_eq!(
+            advance_step_for_a_broadcast_anchored_at(3_543_000, 3_543_000, 3_542_991),
+            Ok(ZCASHLC_ADVANCE_STEP_WAITING),
+            "an anchor 9 blocks back has not settled"
+        );
+        assert_anchor_judged(
+            advance_step_for_a_broadcast_anchored_at(3_543_000, 3_543_000, 3_542_990),
+            "an anchor 10 blocks back is judged, which reads the placeholder PCZT and errors",
+        );
+    }
+
+    /// The depth is converted at the chain tip, not at the scanned height: a wallet still
+    /// scanning below the activation, whose chain tip is already past it, settles after exactly
+    /// 30 blocks, not 10 and not more.
+    #[test]
+    fn advance_step_scales_the_settle_depth_by_the_chain_tip() {
+        assert_eq!(
+            advance_step_for_a_broadcast_anchored_at(3_600_000, 3_543_000, 3_542_971),
+            Ok(ZCASHLC_ADVANCE_STEP_WAITING),
+            "an anchor 29 blocks back has not settled while the tip is past the activation"
+        );
+        assert_anchor_judged(
+            advance_step_for_a_broadcast_anchored_at(3_600_000, 3_543_000, 3_542_970),
+            "an anchor 30 blocks back is judged while the tip is past the activation",
+        );
     }
 
     // ----- progress (`zcashlc_migration_progress` — the standalone derivation) -----

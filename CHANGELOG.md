@@ -30,7 +30,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `nextExecutableAfterHeight` and `expiryHeight` of a `MigrationTransferProposal`, and the broadcast heights of
   the preparation steps, of a schedule planned from NU7 lie accordingly further apart, and a wait that crosses
   the activation keeps its length in time. Below the activation a reference block is one block, so heights
-  there are unchanged. Measure a span of heights with `TargetBlockSpacing`, not at 75 seconds a block.
+  there are unchanged. Measure a span of heights with `TargetBlockSpacing`, not at 75 seconds a block. The
+  migration also waits 10 reference blocks before it treats a step that a reorg displaced as permanent: 10
+  blocks below the activation and 30 from it, the same 12.5 minutes.
 - From NU7, a transaction whose expiry height the wallet does not know is assumed to expire 120 blocks after
   the height at which the wallet first observed it, not 40: the 50 minutes it was at 75-second blocks, where 40
   blocks are about 17 minutes of 25-second ones. While such an unmined transaction stays inside that window,
