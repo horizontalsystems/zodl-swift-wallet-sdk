@@ -11,7 +11,7 @@
 //! `target_seconds_between` is a signed-seconds counterpart of upstream's `target_time_between`.
 //! Replace the copy with the upstream helpers once a release ships them.
 
-use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
+use zcash_primitives::transaction::builder::BLOSSOM_DEFAULT_TX_EXPIRY_DELTA;
 use zcash_protocol::consensus::{BlockHeight, H0, NetworkUpgrade, Parameters};
 
 const PRE_BLOSSOM_POW_TARGET_SPACING: u32 = 150;
@@ -157,7 +157,7 @@ pub(crate) fn default_tx_expiry_delta<P: Parameters>(
     if params.is_nu_active(NetworkUpgrade::Nu7, target_height) {
         POST_NU7_DEFAULT_TX_EXPIRY_DELTA
     } else {
-        DEFAULT_TX_EXPIRY_DELTA
+        BLOSSOM_DEFAULT_TX_EXPIRY_DELTA
     }
 }
 
@@ -170,7 +170,7 @@ pub(crate) fn default_tx_target_height_for_expiry<P: Parameters>(
     expiry_height: BlockHeight,
 ) -> BlockHeight {
     let post_nu7_target = expiry_height - POST_NU7_DEFAULT_TX_EXPIRY_DELTA;
-    let pre_nu7_target = expiry_height - DEFAULT_TX_EXPIRY_DELTA;
+    let pre_nu7_target = expiry_height - BLOSSOM_DEFAULT_TX_EXPIRY_DELTA;
     [post_nu7_target, pre_nu7_target]
         .into_iter()
         .find(|&target| target + default_tx_expiry_delta(params, target) == expiry_height)
@@ -604,7 +604,7 @@ mod tests {
 
     #[test]
     fn default_tx_expiry_delta_is_120_blocks_from_nu7() {
-        assert_eq!(DEFAULT_TX_EXPIRY_DELTA, 40);
+        assert_eq!(BLOSSOM_DEFAULT_TX_EXPIRY_DELTA, 40);
         assert_eq!(
             default_tx_expiry_delta(&TEST_NETWORK, h(TESTNET_NU7 - 1)),
             40

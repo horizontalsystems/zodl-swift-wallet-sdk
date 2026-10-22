@@ -206,6 +206,32 @@ declares an older `swift-tools-version`, spell the platforms as strings instead:
 In an Xcode project, set the iOS Deployment Target to 16.0 and the macOS Deployment Target to 14.0
 (`IPHONEOS_DEPLOYMENT_TARGET`, `MACOSX_DEPLOYMENT_TARGET`).
 
+## NU7 activates on mainnet — measure block spans with `TargetBlockSpacing`
+
+NU7 activates on mainnet at height 3,543,405, as it does on testnet at 4,465,026. From that height the
+target block spacing is 25 seconds instead of 75, and the default expiry of a transaction the SDK builds is
+120 blocks instead of 40: the same 50 minutes. Nothing stops compiling, but code that turns a count of
+blocks into time at a fixed 75 seconds a block is a factor of three off for every span from that height on,
+and so is code that reads a transaction's expiry as its target height plus 40.
+
+`TargetBlockSpacing(network:)` knows the spacing at every height. `seconds(from:to:)` is the target time of
+the blocks after `from` through `to`, each at its own spacing, so a span that crosses the activation is right
+on both sides of it; `estimatedSeconds(from:to:secondsPerBlock:)` converts at a pace you measured instead.
+A migration schedule's heights follow the same rule: ZIP 318 states its delays in 75-second blocks, so from
+NU7 the same wait is three times as many blocks apart in `nextExecutableAfterHeight` and `expiryHeight` of a
+`MigrationTransferProposal`.
+
+```swift
+// Before: every block taken as 75 seconds.
+let secondsUntilBroadcast = Double(proposal.nextExecutableAfterHeight - tip) * 75
+let minutesToMine = Double(expiryHeight - targetHeight) * 75 / 60
+
+// After: each block at its own spacing.
+let spacing = TargetBlockSpacing(network: network)
+let secondsUntilBroadcast = spacing.seconds(from: tip, to: proposal.nextExecutableAfterHeight)
+let minutesToMine = spacing.seconds(from: targetHeight, to: expiryHeight) / 60
+```
+
 ## `RustErrorKind` gained a case — `anchorNotFound`
 
 `RustErrorKind`, the type of `RedactedRustError.kind`, has a new case, `anchorNotFound`: creating

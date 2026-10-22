@@ -464,8 +464,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `zcashlc_height_after_target_seconds(network_id, from_height, seconds, height_ret)` and
   `zcashlc_default_tx_target_height_for_expiry(network_id, expiry_height, target_height_ret)` convert
   between heights and target time: 150 s a block before Blossom, 75 from Blossom, 25 from NU7, at the
-  network's activation heights, a registered custom network's included. They write, respectively, the
-  run of equal spacing containing a height (`end_ret` `-1` when it never changes again); the summed
+  network's activation heights (NU7: mainnet 3,543,405, testnet 4,465,026), a registered custom network's
+  included. They write, respectively, the run of equal spacing containing a height (`end_ret` `-1` when
+  it never changes again); the summed
   spacing of the blocks after `from_height` through `to_height` (negative when lower); the height whole
   blocks reach in `seconds` (walking back when negative, stopping at 0); and the target height whose
   default expiry (40 blocks before NU7, 120 from NU7) is `expiry_height`, the earlier candidate for an
@@ -539,7 +540,7 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   balance whose canonical split the notes cannot fund now reports the whole spendable balance where
   the call used to fail. It costs one planning pass per remaining run, like the estimate.
 - Coinholder voting hosts the `zcash_voting` 5.x native round driver with the `lrz` (librustzcash)
-  backend, pinned to the published `=5.1.0` release. Opening a voting
+  backend, pinned to the published `=5.2.0-rc.2` release. Opening a voting
   database migrates schema 13 to 24 in place; older cores cannot reopen it.
   The step-by-step entry points a host used to drive are gone (see Removed) and the session surface
   that replaces them is new (see Added); what changed for the entry points that survive is:
@@ -653,11 +654,37 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   quiet once the sweep mines instead of reporting a per-run completion — while an unmined, unexpired
   immediate run still reports present with `is_immediate: true`. `FfiMigrationProgress` gains a
   trailing `is_immediate` boolean.
-- The anchor bucket interval is selected per network: mainnet keeps the ZIP 318 144-block grid, while
-  testnet and custom-parameter networks retain anchors every 12 blocks and compress the transfer and
-  preparation delays by the same factor, so a migration crosses enough boundaries to be exercised in
-  a test run. Nothing crosses the FFI for this — each wallet handle is opened with the interval its
+- The anchor bucket interval is selected per network: mainnet keeps the ZIP 318 grid of 144 reference
+  blocks, while testnet and custom-parameter networks retain anchors every 12 reference blocks and
+  compress the transfer and preparation delays by the same factor, so a migration crosses enough
+  boundaries to be exercised in a test run. A reference block is one block until NU7 activates and spans
+  three blocks from it, so from NU7 the boundaries lie three times as many blocks apart (432 on mainnet, 36
+  on testnet). Nothing crosses the FFI for this — each wallet handle is opened with the interval its
   `network_id` selects — and a migration already in flight keeps the interval it was committed under.
+- The migration engine counts ZIP 318's delays and expiry windows in reference blocks, the 75-second blocks
+  of ZIP 318, and converts them to blocks with the network's NU7 activation height (mainnet 3,543,405,
+  testnet 4,465,026): from NU7 a wait of the same length in time is three times as many blocks, and a wait
+  that crosses the activation keeps its length in time. The broadcast and expiry heights of a schedule
+  planned from NU7 lie accordingly (`FfiTransferProposal.next_executable_after_height` and `.expiry_height`,
+  `FfiMigrationPreparationStep.broadcast_height`; from `zcashlc_migration_propose_transfers`,
+  `zcashlc_migration_restart_step` and `zcashlc_migration_refresh_stale_transfers`), and
+  `zcashlc_migration_advance_step` judges an overdue schedule and shifts a slept-through backlog by the same
+  rule. Below the activation a reference block is one block, so heights there are unchanged. Convert a span
+  of heights to time with `zcashlc_target_seconds_between`, not at 75 seconds a block. The reorg settle depth
+  stays 10 blocks on both sides of the activation.
+- A transaction whose expiry height the wallet does not know is assumed to expire after the default expiry
+  delta for the height at which the wallet first observed it: 120 blocks from NU7 (mainnet 3,543,405,
+  testnet 4,465,026), where the assumption was a fixed 40, and still 40 from Blossom until NU7. The delta
+  sets how long the spends of such an unmined transaction keep counting, so the notes and transparent
+  outputs it spends stay out of the spendable amounts that `zcashlc_get_wallet_summary`,
+  `zcashlc_get_verified_transparent_balance`, `zcashlc_get_verified_transparent_balance_for_account`,
+  `zcashlc_get_total_transparent_balance` and `zcashlc_get_total_transparent_balance_for_account` report,
+  and out of new proposals, for as long as it stays unmined inside the window; how long
+  `zcashlc_transaction_data_requests` keeps returning its `GetStatus` request; and how far a
+  `TransactionsInvolvingAddress` request that searches for the spend of a transparent output reaches: its
+  `block_range_end` lies up to 121 blocks past its `block_range_start`, where it lay up to 41. A transaction
+  of that kind that never mines therefore frees its inputs 80 blocks later than before, the same 50 minutes
+  it took at 75-second blocks. Nothing changes from Blossom until NU7, and no caller changes are required.
 - Note locks are owner-keyed: the residual lock is keyed to a deterministic per-account owner, which
   makes re-locking idempotent, and `zcashlc_migration_unlock_residual` still clears the account's
   locks wholesale.
@@ -713,32 +740,23 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every live run drives at least once per open-lane pass, sync edge, and UI refresh; a read can
   therefore trail a just-mined broadcast by at most one such pass. Reads no longer contend with
   proving.
-- The crate now builds against the NU7 pre-release generation of the `librustzcash` crates and
-  the `zodl-slipstream` 0.4.0-pre.2 engine.
+- The crate now builds against the NU7 release of the `librustzcash` crates and the `zodl-slipstream`
+  0.4.0-pre.2 engine. Its `rust-version` is 1.97, up from 1.91: building `libzcashlc` from source needs
+  Rust 1.97 or newer.
 - Every unified address, UFVK and UIVK string a `zcashlc_*` function returns is ZIP 316
   revision 0, with every receiver or item the value carries, as before the NU7 move. Revision 2
   is used only for a value revision 0 cannot represent (one with expiry metadata, a P2SH
   viewing-key item, or only transparent items). Decoding accepts both revisions, unchanged.
-- `zcash_voting` moves from 5.1.0 to 5.1.1-rc.3 as it stands at the head of
-  valargroup/zcash_voting#373, which moves the crate's `lrz` backend to the NU7 pre-release
-  crates. No release carries that change yet, so `[patch.crates-io]` takes the crate from
-  `zodl-inc/zcash_voting@9bb3762`, and the crates under it that the change also needs from the
-  heads of their own pull requests: `voting-circuits`, `voting-crypto-deps` and `imt-tree`
-  (valargroup/voting-circuits#135), `pir-types` and `pir-client`
-  (valargroup/vote-nullifier-pir#173), and `zakura-wallet-lib`
-  (zakura-core/wallet-libraries#83). Each entry is replaced by the release that contains its
-  pull request. The `zcashlc_voting_*` C surface is unchanged.
-- `[patch.crates-io]` takes the librustzcash crates from `zcash/librustzcash@68b2cf1f`: the
-  `zcash_client_sqlite` 0.23.0-pre.1 release plus a backport of zcash/librustzcash#3139, which adds
-  `WalletWrite::set_account_name` and which upstream has merged as `357359a4`.
-  `zcashlc_set_account_name` calls that trait method. Their versions are unchanged, and the patch is
-  replaced by the release that contains that pull request.
+- `zcashlc_init_data_database` applies one more wallet-database migration. It changes stored data only, not
+  the schema, and cannot be reverted. No address that `zcashlc_get_current_address` or
+  `zcashlc_get_next_available_address` returns changes, and an older build can still open the database.
 - `zodl-slipstream` is now required as `=0.4.0-pre.2`, and `[patch.crates-io]` takes it from
-  `zodl-inc/slipstream@58647969`: the 0.4.0-pre.2 release plus zodl-inc/slipstream#30 and the engine
-  facades' implementation of `WalletWrite::set_account_name`. That revision is built against the
-  librustzcash revision above, and the patch is replaced by the release that contains them. #30
-  fixes stale graft-buffer rows that could put commitment-tree leaves at the wrong position, or keep
-  a shard out of the tree, after a stopped pass, a reorg or an account import.
+  `zodl-inc/slipstream@13cc8f56`, the head of zodl-inc/slipstream#26: the 0.4.0-pre.2 release plus
+  zodl-inc/slipstream#30, the NU7 block cadence and the move to the librustzcash release, which
+  includes the engine facades' implementation of `WalletWrite::set_account_name`. The patch is
+  replaced by the release that contains them. #30 fixes stale graft-buffer rows that could put
+  commitment-tree leaves at the wrong position, or keep a shard out of the tree, after a stopped
+  pass, a reorg or an account import.
 - `zcashlc_slipstream_stop` and `zcashlc_slipstream_start` now call the engine for the bounded
   stop that proves the wallet file quiescent, which zodl-inc/slipstream#28 moved into the engine;
   that change also adds the stop for a wallet change.
@@ -911,9 +929,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Decode errors from `zcashlc_import_account_ufvk`, `zcashlc_derive_address_from_ufvk`,
   `zcashlc_derive_address_from_uivk` and `zcashlc_slipstream_start` no longer contain the key.
 - `zcashlc_create_proposed_transactions` and `zcashlc_create_pczt_from_proposal` give a proposal whose
-  target height has NU7 active an expiry 120 blocks after that height, where librustzcash's builder
-  would give 40: the 50 minutes 40 blocks took at 75 seconds. A proposal with any ZIP 318 canonical
-  crossing step keeps the ZIP 318 expiry; nothing changes before NU7.
+  target height has NU7 active an expiry 120 blocks after that height, not 40: the 50 minutes 40 blocks
+  took at 75 seconds. A proposal with any ZIP 318 canonical crossing step keeps the ZIP 318 expiry;
+  nothing changes from Blossom until NU7.
   From NU7 activation, a payment to a ZIP 316 revision 2 unified address whose expiry height falls
   before the new default expiry (target height + 120) but not before the old one (target height + 40),
   which used to succeed, is still proposed but fails here: `zcashlc_create_proposed_transactions`

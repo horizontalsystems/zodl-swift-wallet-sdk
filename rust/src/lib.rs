@@ -41,7 +41,7 @@ use zcash_client_backend::{
         Account, AccountBirthday, AccountPurpose, AccountSource, CoinbaseFilter, InputSource,
         MaxSpendMode, SeedRelevance, TransactionDataRequest, TransactionStatus,
         TransparentKeyOrigin, WalletCommitmentTrees, WalletRead, WalletWrite, Zip32Derivation,
-        anchor_retention::AnchorRetentionInterval,
+        anchor_retention::{AnchorRetention, AnchorRetentionInterval},
         chain::{CommitmentTreeRoot, scan_cached_blocks},
         scanning::ScanPriority,
         wallet::{
@@ -149,9 +149,9 @@ where
     }
 }
 
-/// The anchor bucket interval used on every network other than production mainnet: 12 blocks, so
-/// that a ZIP 318 pool migration passes through enough anchor boundaries to be exercised end to
-/// end in a test run instead of over days of chain.
+/// The anchor bucket interval used on every network other than production mainnet: 12 reference
+/// blocks, so that a ZIP 318 pool migration passes through enough anchor boundaries to be
+/// exercised end to end in a test run instead of over days of chain.
 ///
 /// Shortening the grid also shortens the transfer and preparation delays, which the migration
 /// backend derives from it, so this is the only value to choose.
@@ -1220,7 +1220,7 @@ pub unsafe extern "C" fn zcashlc_get_current_address(
             UnifiedAddressRequest::AllAvailableKeys,
         ) {
             Ok(Some(ua)) => {
-                let address_str = ua.encode_receiver_preserving(&network);
+                let address_str = ua.encode(&network);
                 Ok(CString::new(address_str).unwrap().into_raw())
             }
             Ok(None) => Err(anyhow!(
@@ -1385,7 +1385,7 @@ pub unsafe extern "C" fn zcashlc_get_next_available_address(
 
         match db_data.get_next_available_address(account_uuid, address_request) {
             Ok(Some((ua, _))) => {
-                let address_str = ua.encode_receiver_preserving(&network);
+                let address_str = ua.encode(&network);
                 Ok(CString::new(address_str).unwrap().into_raw())
             }
             Ok(None) => Err(anyhow!(
@@ -3370,9 +3370,9 @@ pub unsafe extern "C" fn zcashlc_propose_shielding(
 /// The expiry height the transaction-building FFIs ask librustzcash for, as a rule over plain
 /// inputs so it tests without a wallet; `requested_expiry_height` derives the inputs from a
 /// proposal. `None` leaves it to the builder, as every proposal got before NU7: 40 blocks past the
-/// target, or the ZIP 318 rolling expiry for a canonical crossing, which refuses an explicit
-/// expiry. Once NU7 is active at the target height, 40 blocks are under 17 minutes, so the
-/// transaction gets the 120-block default.
+/// target (20 below Blossom), or the ZIP 318 rolling expiry for a canonical crossing, which refuses
+/// an explicit expiry. Once NU7 is active at the target height, 40 blocks are under 17 minutes, so
+/// the transaction gets the 120-block default, which is also the builder's own default from NU7.
 fn explicit_expiry_height<P: Parameters>(
     params: &P,
     target_height: BlockHeight,
@@ -3393,12 +3393,13 @@ fn explicit_expiry_height<P: Parameters>(
 /// `zcash_client_backend::data_api::wallet::step_is_canonical_crossing`, so nothing but this note
 /// ties the two together. Re-check it against that function on every librustzcash bump. If they
 /// disagree, a send either fails with `ExpiryHeightConflictsWithCanonicalCrossing` (an explicit
-/// expiry given to a crossing) or keeps the builder's 40-block expiry (an explicit expiry withheld
-/// from a transaction that could have had 120).
+/// expiry given to a crossing) or takes the builder's own default expiry (an explicit expiry
+/// withheld from a transaction that is not a crossing).
 ///
-/// The check, and the explicit expiry it guards (see `explicit_expiry_height`), exist only because
-/// the pinned builder's default expiry is a fixed 40 blocks. Once that default is NU7-aware
-/// upstream, the explicit expiry is redundant and both can go.
+/// The check, and the explicit expiry it guards (see `explicit_expiry_height`), date from a builder
+/// whose default expiry was a fixed 40 blocks. The builder's default is NU7-aware now
+/// (`zcash_primitives::transaction::builder::default_tx_expiry_delta`), so the explicit expiry
+/// repeats it and both can go.
 fn proposal_has_canonical_crossing<P, DbT, FeeRuleT, NoteRef>(
     params: &P,
     wallet_db: &DbT,
@@ -3408,7 +3409,7 @@ where
     P: Parameters,
     DbT: WalletRead,
 {
-    let pool_migration_params = wallet_db.pool_migration_params();
+    let pool_migration_params = wallet_db.pool_migration_params(params);
     canonical_crossing_fee(params, BlockHeight::from(proposal.min_target_height())).is_ok_and(
         |fee| {
             proposal
@@ -7229,13 +7230,13 @@ pub unsafe extern "C" fn zcashlc_slipstream_open(
             TestNetwork
         };
 
-        // [B6, second half] Persist the anchor-retention marks the engine's in-memory trees
-        // draw but its flush never writes: the open-time deep-history heal spares only ids
-        // present in the SQLITE store's retained set, so reconcile the marks BEFORE any
-        // engine session (and with it the heal) exists — including the E-3 snapshot seed's
-        // own `WalletSession::open` a few lines below, which already runs that heal on
-        // every open. Non-fatal by design — a wallet that cannot be marked must still open
-        // and sync.
+        // [B6, second half] Backfill the anchor-retention marks of a database an older engine
+        // wrote, whose flush never persisted the marks its in-memory trees drew: the open-time
+        // deep-history heal spares only ids present in the SQLITE store's retained set, so
+        // reconcile the marks BEFORE any engine session (and with it the heal) exists —
+        // including the E-3 snapshot seed's own `WalletSession::open` a few lines below, which
+        // already runs that heal on every open. Non-fatal by design — a wallet that cannot be
+        // marked must still open and sync.
         let network_params = NetworkParams::Standard(network);
         match unsafe { wallet_db(system_rng(), db_data, db_data_len, network_params) }.and_then(
             |mut wallet| {
@@ -7378,14 +7379,18 @@ pub unsafe extern "C" fn zcashlc_slipstream_set_alternate_servers(
 
 /// [B6] The anchor-retention floor for the slipstream engine: the NU6.3 activation
 /// height, exactly the floor upstream's own `WalletDb::put_blocks` caller passes
-/// (`zcash_client_sqlite`), so checkpoints on the 144-block anchor grid from
-/// activation onward survive the engine's checkpoint downgrade/dooming/pruning.
+/// (`zcash_client_sqlite`), so checkpoints on the anchor grid from activation
+/// onward survive the engine's checkpoint downgrade/dooming/pruning.
 /// The pool-migration engine pre-signs every transfer against a drawn boundary
 /// anchor on that grid and proves it hours later — without this floor the
 /// engine's persist path retains nothing (`EngineConfig.anchor_retention_height`
 /// defaults to `None`) and the boundary checkpoint is pruned ~100 blocks behind
 /// the tip, leaving `prove_transfer` in a permanent transient `AnchorNotFound`
 /// retry and the scheduled migration stalled until expiry.
+///
+/// The grid's interval counts ZIP 318 reference blocks (144 on mainnet), which from NU7
+/// activation span three blocks each; [`anchor_retention_policy`] builds the policy on this
+/// floor with the network's block spacing, which places the grid's boundaries accordingly.
 ///
 /// `None` (a network without NU6.3, e.g. a custom regtest without the upgrade)
 /// keeps retention off — there are no boundary anchors to retain for. Generic
@@ -7394,6 +7399,30 @@ fn slipstream_anchor_retention_floor<P: Parameters>(network: &P) -> Option<u32> 
     network
         .activation_height(NetworkUpgrade::Nu6_3)
         .map(u32::from)
+}
+
+/// The anchor-retention policy of a wallet on `network`: the checkpoints on the grid of
+/// [`anchor_retention_interval`], placed by the network's block spacing, from
+/// [`slipstream_anchor_retention_floor`] upward. `None` where the network has no floor, so retention
+/// stays off.
+///
+/// This is the one place the policy is built. The slipstream engine runs its own tree-update path
+/// and the wallet-open reconcile (`retained_marks`) backfills the marks an older engine's flush
+/// never persisted, so the grid they retain is the grid a migration anchors to only while both
+/// come from here.
+///
+/// The two inputs fail differently. A coarser interval drops anchors a migration draws: an engine
+/// on the ZIP 318 interval would drop most of a test network's. The spacing only places the
+/// boundaries, three times as far apart from NU7 activation; a uniform spacing would retain every
+/// multiple of the interval, a superset of them, which costs storage and loses no anchor.
+pub(crate) fn anchor_retention_policy(network: NetworkParams) -> Option<AnchorRetention> {
+    slipstream_anchor_retention_floor(&network).map(|floor| {
+        AnchorRetention::new(
+            BlockHeight::from(floor),
+            zcash_protocol::zip318::BlockSpacing::for_network(&network),
+            anchor_retention_interval(network),
+        )
+    })
 }
 
 /// Starts a Slipstream sync pass.
@@ -7512,18 +7541,16 @@ pub unsafe extern "C" fn zcashlc_slipstream_start(
         // without it the engine retains no anchor checkpoints and every scheduled
         // migration transfer's drawn boundary is pruned before proving time.
         //
-        // The grid is the one this crate configures on the wallet itself (see
-        // `anchor_retention_interval`), NOT a value chosen here. The engine runs its
-        // own tree-update path rather than calling `ll::wallet::put_blocks`, so it
-        // does not see the wallet's setting: passing the same interval is what keeps
-        // the two from retaining different grids, which on a test network would
-        // otherwise leave every transfer anchored to a boundary the engine drops.
-        cfg.anchor_retention = slipstream_anchor_retention_floor(&h.network).map(|floor| {
-            slipstream_core::AnchorRetention::new(
-                BlockHeight::from(floor),
-                anchor_retention_interval(NetworkParams::Standard(h.network)),
-            )
-        });
+        // The policy is the one this crate builds for the wallet itself (see
+        // `anchor_retention_policy`), NOT one chosen here. The engine runs its own
+        // tree-update path rather than calling `ll::wallet::put_blocks`, so it does
+        // not see the wallet's setting: building it from the same function is what
+        // keeps the two from retaining different grids. A coarser interval would
+        // drop anchors a transfer is drawn to; the spacing only places the
+        // boundaries (from NU7 activation each reference block spans three
+        // blocks), and a uniform one would retain a superset of them, costing
+        // storage and no anchor.
+        cfg.anchor_retention = anchor_retention_policy(NetworkParams::Standard(h.network));
 
         // v0.3 : GPU Orchard subtree offload. Compiled only with `--features gpu`;
         // opt in at runtime via the ZCASH_GPU_SUBTREE env var (the dev A/B for the device
@@ -9378,8 +9405,12 @@ mod block_spacing_ffi_tests {
 #[cfg(test)]
 mod explicit_expiry_height_tests {
     use super::explicit_expiry_height;
-    use zcash_protocol::consensus::{BlockHeight, Network};
+    use zcash_primitives::transaction::builder::{
+        BLOSSOM_DEFAULT_TX_EXPIRY_DELTA, default_tx_expiry_delta,
+    };
+    use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
 
+    const MAINNET_NU7: u32 = 3_543_405;
     const TESTNET_NU7: u32 = 4_465_026;
 
     fn h(height: u32) -> BlockHeight {
@@ -9393,6 +9424,10 @@ mod explicit_expiry_height_tests {
             None
         );
         assert_eq!(
+            explicit_expiry_height(&Network::MainNetwork, h(MAINNET_NU7 - 1), false),
+            None
+        );
+        assert_eq!(
             explicit_expiry_height(&Network::TestNetwork, h(TESTNET_NU7 - 1), false),
             None
         );
@@ -9401,6 +9436,10 @@ mod explicit_expiry_height_tests {
     #[test]
     fn from_nu7_a_transaction_expires_120_blocks_after_its_target() {
         assert_eq!(
+            explicit_expiry_height(&Network::MainNetwork, h(MAINNET_NU7), false),
+            Some(h(MAINNET_NU7 + 120))
+        );
+        assert_eq!(
             explicit_expiry_height(&Network::TestNetwork, h(TESTNET_NU7), false),
             Some(h(TESTNET_NU7 + 120))
         );
@@ -9408,6 +9447,31 @@ mod explicit_expiry_height_tests {
             explicit_expiry_height(&Network::TestNetwork, h(TESTNET_NU7 + 1_000), false),
             Some(h(TESTNET_NU7 + 1_120))
         );
+    }
+
+    /// The explicit expiry repeats the builder's own default, which is what makes it redundant and
+    /// what keeps a send unchanged if it goes: wherever the rule names a height, it is the one the
+    /// builder would have chosen, and where it names none the builder's delta is the 40 blocks that
+    /// apply from Blossom until NU7.
+    #[test]
+    fn the_explicit_expiry_is_the_builders_own_default() {
+        for (network, nu7) in [
+            (Network::MainNetwork, MAINNET_NU7),
+            (Network::TestNetwork, TESTNET_NU7),
+        ] {
+            for target in [nu7 - 1, nu7, nu7 + 1, nu7 + 1_000].map(h) {
+                let builder_delta = default_tx_expiry_delta(BranchId::for_height(&network, target));
+                match explicit_expiry_height(&network, target, false) {
+                    Some(expiry) => {
+                        assert_eq!(expiry, target + builder_delta, "{network:?} at {target}")
+                    }
+                    None => assert_eq!(
+                        builder_delta, BLOSSOM_DEFAULT_TX_EXPIRY_DELTA,
+                        "{network:?} at {target}"
+                    ),
+                }
+            }
+        }
     }
 
     /// librustzcash refuses an explicit expiry on a canonical crossing

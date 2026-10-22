@@ -99,7 +99,9 @@ use zcash_pool_migration::satisfiability::{
     Advance, AdvanceConfig, DuenessTargets, ReorgSettleDepth, ReplanThreshold, UnsatisfiableKind,
     advance_migration,
 };
-use zcash_pool_migration::scheduling::{WakeupParams, WakeupScheduleError};
+use zcash_pool_migration::scheduling::{
+    BlockSpacing, PROVABLE_ANCHOR_DEPTH, WakeupParams, WakeupScheduleError,
+};
 use zcash_pool_migration::signing_rounds::{
     NextFit, PREPARATION_ACTIONS, PlannedTx, SigningRoundBudget, SigningRoundStrategy,
     TRANSFER_ACTIONS, action_weight,
@@ -2474,6 +2476,23 @@ fn remaining_orchard(ctx: &mut CallCtx) -> anyhow::Result<Zatoshis> {
         .ok_or_else(|| anyhow!("spendable Orchard balance overflows"))
 }
 
+/// The drive-level policy for [`advance_migration`] on the network of `params`.
+///
+/// ZIP 318 states the schedule's durations in reference blocks, blocks at the 75-second target
+/// spacing. The block spacing is how the drive turns them into blocks: from the network's NU7
+/// activation height each reference block spans three blocks, so a duration keeps its length in
+/// time on either side of the activation.
+///
+/// The reorg settle depth is a fixed [`PROVABLE_ANCHOR_DEPTH`] blocks, 10, at every height. The
+/// release leaves it to the caller whether the depth should scale with the block spacing, which is
+/// an open question for this wallet; until it is answered, the depth does not scale at NU7.
+pub(crate) fn advance_config<P: Parameters>(params: &P) -> AdvanceConfig {
+    AdvanceConfig::new(
+        ReorgSettleDepth::new(PROVABLE_ANCHOR_DEPTH),
+        BlockSpacing::for_network(params),
+    )
+}
+
 /// One verified crank of the engine's drive: builds the store adapter, judges dueness at the
 /// scanned target plus the FFI's optional `estimated_tip` (`-1` = none), and returns the
 /// engine's `Advance` with every determination it made already persisted.
@@ -2504,9 +2523,7 @@ fn drive_advance(
         &mut store,
         state,
         targets,
-        &AdvanceConfig::new(ReorgSettleDepth::new(
-            zcash_pool_migration::scheduling::PROVABLE_ANCHOR_DEPTH,
-        )),
+        &advance_config(&ctx.network),
         // librustzcash #2910: re-spreading a missed broadcast schedule draws fresh
         // inter-broadcast gaps, so advancing needs entropy.
         rng,
@@ -5300,8 +5317,8 @@ mod tests {
         ));
     }
 
-    // ----- characterization at mainnet heights (75 s blocks since Blossom, no NU7): pinned before the
-    // duration and immediate-run window learn the target spacing; each goes through one helper. -----
+    // ----- characterization at mainnet heights (75 s blocks from Blossom until NU7 activates at
+    // 3,543,405, 25 s blocks from it); each goes through one helper. -----
 
     fn mainnet_immediate_run_pending(recorded_at: u32, tip: u32) -> bool {
         immediate_run_pending(
@@ -5315,6 +5332,14 @@ mod tests {
     fn mainnet_immediate_run_without_a_known_expiry_is_pending_for_40_blocks() {
         assert!(mainnet_immediate_run_pending(3_000_000, 3_000_040));
         assert!(!mainnet_immediate_run_pending(3_000_000, 3_000_041));
+    }
+
+    #[test]
+    fn mainnet_immediate_run_without_a_known_expiry_is_pending_for_120_blocks_from_nu7() {
+        // Recorded one block before mainnet's NU7 activation at 3,543,405: the transaction's target
+        // is the activation block, so it gets the 120-block default expiry delta.
+        assert!(mainnet_immediate_run_pending(3_543_404, 3_543_524));
+        assert!(!mainnet_immediate_run_pending(3_543_404, 3_543_525));
     }
 
     #[test]
@@ -5363,7 +5388,13 @@ mod tests {
     #[test]
     fn schedule_rows_sort_chronologically_with_prep_offset() {
         let mut rng = StdRng::seed_from_u64(7);
-        let schedule = scheduling::schedule(&SchedulingParams::ZIP_318, h(1_000), 5, &mut rng);
+        let schedule = scheduling::schedule(
+            &SchedulingParams::ZIP_318,
+            &BlockSpacing::UNIFORM,
+            h(1_000),
+            5,
+            &mut rng,
+        );
         // The engine hands the crossing values straight over; they are already net of the fee
         // buffer that pays each transfer's own fee.
         let crossing_values: Vec<Zatoshis> = (1..=5).map(|i| zat(i * 100_000_000)).collect();
@@ -5399,7 +5430,13 @@ mod tests {
         let expected_total: u64 = crossing_values.iter().map(|z| u64::from(*z)).sum();
 
         let mut rng_a = StdRng::seed_from_u64(1);
-        let schedule_a = scheduling::schedule(&SchedulingParams::ZIP_318, h(1_000), 5, &mut rng_a);
+        let schedule_a = scheduling::schedule(
+            &SchedulingParams::ZIP_318,
+            &BlockSpacing::UNIFORM,
+            h(1_000),
+            5,
+            &mut rng_a,
+        );
         let rows_a = schedule_rows(
             &planned_transfers(0, &schedule_a),
             &crossing_values,
@@ -5408,7 +5445,13 @@ mod tests {
         .unwrap();
 
         let mut rng_b = StdRng::seed_from_u64(99);
-        let schedule_b = scheduling::schedule(&SchedulingParams::ZIP_318, h(1_000), 5, &mut rng_b);
+        let schedule_b = scheduling::schedule(
+            &SchedulingParams::ZIP_318,
+            &BlockSpacing::UNIFORM,
+            h(1_000),
+            5,
+            &mut rng_b,
+        );
         let rows_b = schedule_rows(
             &planned_transfers(0, &schedule_b),
             &crossing_values,
@@ -5443,7 +5486,13 @@ mod tests {
     #[test]
     fn schedule_rows_reject_length_mismatch() {
         let mut rng = StdRng::seed_from_u64(7);
-        let schedule = scheduling::schedule(&SchedulingParams::ZIP_318, h(1_000), 3, &mut rng);
+        let schedule = scheduling::schedule(
+            &SchedulingParams::ZIP_318,
+            &BlockSpacing::UNIFORM,
+            h(1_000),
+            3,
+            &mut rng,
+        );
         let crossing_values = vec![zat(100)];
         assert!(
             schedule_rows(
@@ -5475,6 +5524,7 @@ mod tests {
         .unwrap();
         let schedule = scheduling::schedule(
             &SchedulingParams::ZIP_318,
+            &BlockSpacing::UNIFORM,
             h(1_000),
             crossing_values.len(),
             &mut rng,
@@ -11233,6 +11283,27 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    // ----- the drive's configuration (`advance_config`) -----
+
+    /// The drive converts the schedule's durations into blocks with the spacing of the network it
+    /// runs on, which changes at that network's NU7 activation, and settles reorgs after the same
+    /// number of blocks on either side of it.
+    #[test]
+    fn advance_config_spaces_blocks_by_the_networks_nu7_activation() {
+        assert_eq!(
+            advance_config(&Network::MainNetwork).block_spacing(),
+            BlockSpacing::with_nu7_activation(BlockHeight::from_u32(3_543_405))
+        );
+        assert_eq!(
+            advance_config(&Network::TestNetwork).block_spacing(),
+            BlockSpacing::with_nu7_activation(BlockHeight::from_u32(4_465_026))
+        );
+        assert_eq!(
+            advance_config(&Network::MainNetwork).reorg_settle_depth(),
+            ReorgSettleDepth::new(PROVABLE_ANCHOR_DEPTH)
+        );
+    }
+
     // ----- advance step (`zcashlc_migration_advance_step`, the verbatim next_step conduit) -----
 
     /// Sets the fixture chain tip to the file's usual 3,600,000.
@@ -12643,7 +12714,8 @@ mod tests {
     /// One advance over a three-transfer backlog: the released row lands at the SCANNED target
     /// (release means executable — a proof rests on scanned chain data), and it is the only row
     /// servable there afterwards; the other two moved later by the same lag, so the gap between
-    /// them survives unchanged.
+    /// them survives unchanged. The lag spans mainnet's NU7 activation, so "unchanged" is in
+    /// time: the gaps keep their reference blocks, and each of those now spans three blocks.
     ///
     /// The backlog is `Signed`, so the released row comes back as a schedule-due `Prove` target
     /// rather than a BROADCAST instruction. The trigger, the release and the deferral are the
@@ -12656,7 +12728,8 @@ mod tests {
         let (path, account) = init_delivery_fixture("zcashlc_next_due_respread");
         let path_bytes = path.to_str().unwrap().as_bytes();
         // Three transfers, all scheduled far below the scanned target (3,600,001) — the wallet
-        // slept through the whole window. Their drawn gaps are 100 and 200 blocks.
+        // slept through the whole window. Their drawn gaps are 100 and 200 blocks, which below
+        // mainnet's NU7 activation at 3,543,405 are also 100 and 200 reference blocks.
         let transfer = |id: u32, scheduled: u32| {
             provable_tx_row(
                 id,
@@ -12720,21 +12793,24 @@ mod tests {
             3_600_001,
             "the release lands at the scanned target, where the wallet can execute it"
         );
-        // The lag is 3,600,001 - 3,500,000 = 100,001 blocks; every deferred row moves by it.
+        // Every deferred row moves by the lag, the time from 3,500,000 to 3,600,001. NU7 activates
+        // inside that span, so the rows keep their gaps in time, not in blocks: the released row
+        // is followed after 100 and after 300 reference blocks, and each of those spans three
+        // blocks past the activation.
         assert_eq!(
             stored_scheduled_height(&stored, 1),
-            3_600_101,
+            3_600_301,
             "the first deferred row moves later by the full lag"
         );
         assert_eq!(
             stored_scheduled_height(&stored, 2),
-            3_600_301,
+            3_600_901,
             "the second deferred row moves later by the same lag"
         );
         assert_eq!(
             stored_scheduled_height(&stored, 2) - stored_scheduled_height(&stored, 1),
-            200,
-            "the drawn inter-broadcast gap survives the wallet's absence unchanged"
+            600,
+            "the drawn inter-broadcast gap, 200 reference blocks, survives the wallet's absence"
         );
         let _ = std::fs::remove_file(&path);
     }

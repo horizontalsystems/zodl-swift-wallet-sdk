@@ -20,6 +20,26 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registered it fails an assertion in debug builds and follows the 75-second schedule in release builds.
 - `ZcashSDK.nu7ConsensusBranchID` (`0x77190ad9`) is the consensus branch ID of NU7, next to `nu63ConsensusBranchID`.
 
+## Changed
+
+- On mainnet, NU7 activates at height 3,543,405, as it does on testnet at 4,465,026. From that height the
+  target block spacing is 25 seconds and the default expiry of SDK-built transactions is 120 blocks, so
+  everything the NU7 entries describe applies to mainnet from there.
+- A migration schedule keeps ZIP 318's delays and expiry windows, which the ZIP states in 75-second blocks,
+  the same length in time once NU7 shortens the block: from NU7 they are three times as many blocks. The
+  `nextExecutableAfterHeight` and `expiryHeight` of a `MigrationTransferProposal`, and the broadcast heights of
+  the preparation steps, of a schedule planned from NU7 lie accordingly further apart, and a wait that crosses
+  the activation keeps its length in time. Below the activation a reference block is one block, so heights
+  there are unchanged. Measure a span of heights with `TargetBlockSpacing`, not at 75 seconds a block.
+- From NU7, a transaction whose expiry height the wallet does not know is assumed to expire 120 blocks after
+  the height at which the wallet first observed it, not 40: the 50 minutes it was at 75-second blocks, where 40
+  blocks are about 17 minutes of 25-second ones. While such an unmined transaction stays inside that window,
+  the notes and transparent outputs it spends are left out of `PoolBalance.spendableValue` and
+  `AccountBalance.unshielded` and out of new proposals, so one that never mines holds its inputs 80 blocks
+  longer than before, and the SDK asks the server about it for as long. Nothing changes from Blossom until
+  NU7, and no caller changes are required.
+- Building `libzcashlc` from source now requires Rust 1.97 or newer (was 1.91).
+
 ## Deprecated
 
 - `ZcashSDK.expiryOffset` is deprecated. It is not the expiry delta of SDK-built transactions (40 blocks
@@ -32,9 +52,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Transactions created by `createProposedTransactions(proposal:spendingKey:)`,
   `createProposedTransactions(proposal:spendingKey:ovkPolicy:)` or `createPCZTFromProposal(accountUUID:proposal:)`
-  at a target height with NU7 active (testnet from 4,465,026) expired after 40 blocks, about 17 minutes
-  of 25-second blocks; they now expire after 120, the 50 minutes they have before NU7. ZIP 318
-  canonical crossings keep their ZIP 318 expiry, and nothing changes before NU7.
+  at a target height with NU7 active (mainnet from 3,543,405, testnet from 4,465,026) expired after 40
+  blocks, about 17 minutes of 25-second blocks; they now expire after 120, the 50 minutes they have
+  before NU7. ZIP 318 canonical crossings keep their ZIP 318 expiry, and nothing changes from Blossom
+  until NU7.
   From NU7 activation, a payment to a ZIP 316 revision 2 unified address whose expiry height falls
   before the new default expiry (target height + 120) but not before the old one (target height + 40),
   which used to succeed, is still proposed but fails at creation: `createProposedTransactions` throws
@@ -76,9 +97,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `migrationProgress(accountUUID:)` reports an unconfirmed immediate migration with no known expiry as pending
   for 120 blocks after it was recorded once NU7 is active, not 40, which ended the report while it could still
   mine. Nothing changes before NU7.
-- Server validation keeps checking for Ironwood tree state after NU7 activation (testnet from 4,465,026). It
-  stopped when the server's tip reached NU7, so a lightwalletd that serves no Ironwood data passed validation
-  there, and syncing against it detected nothing in the Ironwood pool. It now throws
+- Server validation keeps checking for Ironwood tree state after NU7 activation (mainnet from 3,543,405,
+  testnet from 4,465,026). It stopped when the server's tip reached NU7, so a lightwalletd that serves no
+  Ironwood data passed validation there, and syncing against it detected nothing in the Ironwood pool. It now throws
   `ZcashError.compactBlockProcessorServerMissingIronwoodSupport` (`ZCBPEO0024`) as it did from NU6.3 activation
   until NU7. No caller changes are required.
 

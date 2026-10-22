@@ -3,8 +3,8 @@
 //  OfflineTests
 //
 //  The target block spacing schedule through the real FFI, pinned at the real testnet NU7
-//  activation height. Mainnet is pinned only at heights up to 3,000,000, long behind its chain tip,
-//  so nothing here depends on the NU7 activation height mainnet is yet to get.
+//  activation height. Mainnet is pinned only at heights up to 3,000,000, below its NU7 activation at
+//  3,543,405, so its schedule here is the 150-second and 75-second eras alone.
 //
 
 import XCTest
@@ -14,8 +14,8 @@ final class TargetBlockSpacingTests: XCTestCase {
     private let nu7: BlockHeight = 4_465_026
     private let testnetBlossom: BlockHeight = 584_000
     private let mainnetBlossom: BlockHeight = 653_600
-    /// A mainnet height long behind its chain tip. Mainnet's NU7 activation lies beyond it whatever
-    /// height it is given, so every assertion on `mainnet` stays at or below it.
+    /// A mainnet height below its NU7 activation at 3,543,405, so every assertion on `mainnet` stays at
+    /// or below it and sees only the 150-second and 75-second eras.
     private let settledMainnetHeight: BlockHeight = 3_000_000
     private let testnet = TargetBlockSpacing(network: ZcashNetworkBuilder.network(for: .testnet))
     private let mainnet = TargetBlockSpacing(network: ZcashNetworkBuilder.network(for: .mainnet))
@@ -37,9 +37,9 @@ final class TargetBlockSpacingTests: XCTestCase {
         XCTAssertEqual(testnet.era(containing: 0), TargetBlockSpacing.Era(start: 0, end: testnetBlossom, spacing: 150))
         XCTAssertEqual(testnet.era(containing: nu7 - 1), TargetBlockSpacing.Era(start: testnetBlossom, end: nu7, spacing: 75))
         XCTAssertEqual(testnet.era(containing: nu7), TargetBlockSpacing.Era(start: nu7, end: nil, spacing: 25))
-        // Where mainnet's era ends depends on the NU7 height it is given, so only its start and spacing
-        // are pinned, and that it ends beyond the settled height. The custom network below covers an era
-        // that never ends.
+        // Mainnet's 75-second era ends at its NU7 activation, 3,543,405. Only its start and spacing are
+        // pinned, and that it ends beyond the settled height, so a change to the activation height does
+        // not touch this test. The custom network below covers an era that never ends.
         let mainnetEra = mainnet.era(containing: settledMainnetHeight)
         XCTAssertEqual(mainnetEra.start, mainnetBlossom)
         XCTAssertEqual(mainnetEra.spacing, 75)
