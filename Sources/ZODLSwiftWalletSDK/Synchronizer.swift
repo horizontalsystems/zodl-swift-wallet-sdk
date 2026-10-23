@@ -915,6 +915,14 @@ public protocol Synchronizer: AnyObject {
     // The ceremony/consent lane is deliberately untouched by this: `prepareNoteSplit` /
     // `submitNoteSplit` and the propose/sign/store family are pre-drive consent flows — a user
     // approving a plan that does not exist yet — so there is no instruction for them to carry.
+    //
+    // Before the NU7 network upgrade has activated, that lane starts nothing: each member that
+    // plans, builds, signs, stores or rebuilds a scheduled run (`prepareNoteSplit`,
+    // `submitNoteSplit`, `proposeMigrationTransfers`, `signAndStoreMigrationSchedule`,
+    // `refreshStaleMigrationTransfers`, and the PCZT create/store members) throws
+    // `ZcashError.migrationPausedUntilNetworkUpgrade(_:)`, and `restartCurrentMigrationStep`
+    // cancels the run without planning a new one. The reads and the instruction executors are not
+    // refused by it.
 
     /// The migration engine's next step to advance `accountUUID`'s stored run, paired with its
     /// advisory outlook — a verbatim conduit of the engine's own `advance_migration`: the
@@ -1001,9 +1009,11 @@ public protocol Synchronizer: AnyObject {
     /// migration it drives, from the next call on. With the bypass on,
     /// ``migrationAdvanceStep(accountUUID:)`` never answers
     /// ``MigrationAdvanceStep/pausedForNetworkUpgrade(activationHeight:)``: it hands out the
-    /// engine's own step at every height. A run committed that way is built for the consensus
-    /// branch of the block it is committed under, so one still unmined when the upgrade
-    /// activates is stranded by it.
+    /// engine's own step at every height. The calls that plan, build, sign, store or rebuild a
+    /// scheduled run are not refused with ``ZcashError/migrationPausedUntilNetworkUpgrade(_:)``,
+    /// and ``restartCurrentMigrationStep(accountUUID:)`` plans at every height. A run committed
+    /// that way is built for the consensus branch of the block it is committed under, so one still
+    /// unmined when the upgrade activates is stranded by it.
     ///
     /// The bypass does not lift the check that keeps a transaction the next block cannot include
     /// from being submitted, nor the detection of such a stranded run
@@ -1204,6 +1214,8 @@ public protocol Synchronizer: AnyObject {
     /// Any subsequent propose/prepare call for the same account supersedes previously returned
     /// proposal handles — commit calls carrying an older handle throw `ZcashError.migrationPlanStale`.
     /// - Parameter accountUUID: the account to prepare a note split for.
+    /// - Throws: ``ZcashError/migrationPausedUntilNetworkUpgrade(_:)`` before the NU7 network
+    ///   upgrade has activated: nothing is planned.
     func prepareNoteSplit(accountUUID: AccountUUID) async throws -> NoteSplitProposal
 
     /// Signs, extracts, broadcasts, and records `accountUUID`'s note-split transaction, returning the
@@ -1216,8 +1228,10 @@ public protocol Synchronizer: AnyObject {
     ///   - options: network-privacy options (Tor, submission endpoint) for this broadcast.
     /// - Throws: ``ZcashError/migrationBroadcastDuringSync`` if the synchronizer is actively syncing —
     ///   sync and migration broadcasts must never share a session; this is enforced by the SDK on
-    ///   this call, so stop sync first. Otherwise, a pre-broadcast failure throws untouched (nothing
-    ///   was broadcast); a failure to record a broadcast that did land throws
+    ///   this call, so stop sync first. ``ZcashError/migrationPausedUntilNetworkUpgrade(_:)``
+    ///   before the NU7 network upgrade has activated: nothing is signed or broadcast. Otherwise,
+    ///   a pre-broadcast failure throws untouched (nothing was broadcast); a failure to record a
+    ///   broadcast that did land throws
     ///   ``ZcashError/migrationRecordFailedAfterBroadcast(_:)`` — the broadcast is real and a
     ///   later attempt self-heals.
     /// - Note: A completed submission leaves no timed hold behind — the migration gate blocks
@@ -1244,6 +1258,8 @@ public protocol Synchronizer: AnyObject {
     /// `ZcashError.migrationPlanStale`. An EMPTY schedule means there is nothing to migrate; after a
     /// completed run this is the "does anything remain" answer of the sequential-runs contract.
     /// - Parameter accountUUID: the account to propose a migration schedule for.
+    /// - Throws: ``ZcashError/migrationPausedUntilNetworkUpgrade(_:)`` before the NU7 network
+    ///   upgrade has activated: nothing is planned or cached.
     /// - Note: The run is sized per account — see ``estimateMigrationRuns(accountUUID:)``.
     func proposeMigrationTransfers(accountUUID: AccountUUID) async throws -> MigrationSchedule
 
@@ -1356,9 +1372,11 @@ public protocol Synchronizer: AnyObject {
     ///     ``ImmediateMigrationProposal``, executed via ``createProposedTransactions(proposal:spendingKey:)``
     ///     / ``createPCZTFromProposal(accountUUID:proposal:)`` like any other transfer.
     ///   - usk: the account's unified spending key.
-    /// - Throws: `ZcashError.migrationPlanStale` when nothing is committed and the identified plan
-    ///   is missing (process restart between propose and confirm) or superseded by a later
-    ///   propose/prepare call — re-propose and re-display; rust-layer errors otherwise.
+    /// - Throws: ``ZcashError/migrationPausedUntilNetworkUpgrade(_:)`` before the NU7 network
+    ///   upgrade has activated: nothing is signed or stored. `ZcashError.migrationPlanStale` when
+    ///   nothing is committed and the identified plan is missing (process restart between propose
+    ///   and confirm) or superseded by a later propose/prepare call — re-propose and re-display;
+    ///   rust-layer errors otherwise.
     func signAndStoreMigrationSchedule(accountUUID: AccountUUID, _ schedule: MigrationSchedule, usk: UnifiedSpendingKey) async throws
 
     /// The broadcast executor: submits the already-proven migration transaction `instruction`
@@ -1463,14 +1481,23 @@ public protocol Synchronizer: AnyObject {
     /// - Parameter accountUUID: the account to check.
     func hasInvalidMigrationTransfers(accountUUID: AccountUUID) async throws -> Bool
 
-    /// Re-evaluates `accountUUID`'s remaining spendable Orchard balance and returns a fresh schedule.
+    /// Cancels `accountUUID`'s stored run and re-evaluates its remaining spendable Orchard balance
+    /// into a fresh schedule.
     ///
     /// The old plan is no longer valid: the engine discards it and derives a new one, which a
     /// follow-up ``signAndStoreMigrationSchedule(accountUUID:_:usk:)`` (or PCZT store) then signs and
     /// persists. The fresh plan is sized the way the account is sized NOW, which is also how a run
     /// committed under an earlier sizing moves onto the current one.
+    ///
+    /// Before the NU7 network upgrade has activated, judged at the wallet's own chain tip, no new
+    /// scheduled run is planned: the run is cancelled all the same and the call succeeds with
+    /// ``MigrationRestartOutcome/cancelledUntilNetworkUpgrade(activationHeight:)``, carrying the
+    /// activation height to wait for. A plan proposed before the restart can no longer be committed
+    /// then.
     /// - Parameter accountUUID: the account to restart.
-    func restartCurrentMigrationStep(accountUUID: AccountUUID) async throws -> MigrationSchedule
+    /// - Returns: ``MigrationRestartOutcome/replanned(_:)`` with the fresh schedule to re-confirm, or
+    ///   ``MigrationRestartOutcome/cancelledUntilNetworkUpgrade(activationHeight:)``.
+    func restartCurrentMigrationStep(accountUUID: AccountUUID) async throws -> MigrationRestartOutcome
 
     /// Rebuilds every EXPIRED transfer of `accountUUID`'s stored migration run in place through the
     /// engine and returns the run's FULL transfer schedule as stored AFTER the refresh.
@@ -1499,7 +1526,9 @@ public protocol Synchronizer: AnyObject {
     ///     ``createUnsignedMigrationTransferPCZTs(accountUUID:for:)`` /
     ///     ``storeSignedMigrationSchedulePCZTs(accountUUID:_:)`` ceremony re-serves and completes
     ///     them.
-    /// - Throws: notably, a `FundingNoteUnavailable`-class failure when an expired transfer's exact
+    /// - Throws: ``ZcashError/migrationPausedUntilNetworkUpgrade(_:)`` before the NU7 network
+    ///   upgrade has activated: nothing is rebuilt. Notably otherwise, a
+    ///   `FundingNoteUnavailable`-class failure when an expired transfer's exact
     ///   funding note was spent outside the migration — the underlying message names
     ///   ``restartCurrentMigrationStep(accountUUID:)`` (cancel and re-plan the remaining balance) as
     ///   the remedy. Rebuilds are persisted ALL-OR-NOTHING: a mid-refresh throw (including this one)
@@ -1520,9 +1549,11 @@ public protocol Synchronizer: AnyObject {
     ///     native side, and only when this call is the one creating the run (no stored run, or a
     ///     terminal one) — the display fields are never echoed back, and the ordinary resume case
     ///     does not consult the handle at all.
-    /// - Throws: `ZcashError.migrationPlanStale` when this call is creating the run and the
-    ///   identified plan is missing (process restart between propose and confirm) or superseded by
-    ///   a later propose/prepare call — re-propose and re-display before retrying.
+    /// - Throws: ``ZcashError/migrationPausedUntilNetworkUpgrade(_:)`` before the NU7 network
+    ///   upgrade has activated: nothing is built. `ZcashError.migrationPlanStale` when this call
+    ///   is creating the run and the identified plan is missing (process restart between propose
+    ///   and confirm) or superseded by a later propose/prepare call — re-propose and re-display
+    ///   before retrying.
     func createUnsignedNoteSplitPCZTs(accountUUID: AccountUUID, for schedule: MigrationSchedule) async throws -> [MigrationUnsignedTransferPczt]
 
     /// Applies the ceremony's signatures to `accountUUID`'s preparation (note-split) transactions,
@@ -1532,6 +1563,8 @@ public protocol Synchronizer: AnyObject {
     /// - Parameters:
     ///   - accountUUID: the account the PCZTs belong to.
     ///   - signed: the externally signed preparation PCZTs, each paired with its engine id.
+    /// - Throws: ``ZcashError/migrationPausedUntilNetworkUpgrade(_:)`` before the NU7 network
+    ///   upgrade has activated: nothing is stored.
     func storeSignedNoteSplitPCZTs(accountUUID: AccountUUID, _ signed: [MigrationSignedTransferPczt]) async throws -> PreparedMigrationTransfer
 
     /// Builds one unsigned, proven PCZT per transfer of `schedule` for `accountUUID`, for an external
@@ -1546,9 +1579,11 @@ public protocol Synchronizer: AnyObject {
     ///     case where this call is the one creating the run (no stored run, or a terminal one) —
     ///     the display fields are never echoed back, and the ordinary resume case does not consult
     ///     the handle at all.
-    /// - Throws: `ZcashError.migrationPlanStale` when this call is creating the run and the
-    ///   identified plan is missing (process restart) or superseded by a later propose/prepare
-    ///   call — re-propose and re-display; rust-layer errors otherwise.
+    /// - Throws: ``ZcashError/migrationPausedUntilNetworkUpgrade(_:)`` before the NU7 network
+    ///   upgrade has activated: nothing is built. `ZcashError.migrationPlanStale` when this call
+    ///   is creating the run and the identified plan is missing (process restart) or superseded
+    ///   by a later propose/prepare call — re-propose and re-display; rust-layer errors
+    ///   otherwise.
     func createUnsignedMigrationTransferPCZTs(accountUUID: AccountUUID, for schedule: MigrationSchedule) async throws -> [MigrationUnsignedTransferPczt]
 
     /// Accepts the full set of `accountUUID`'s externally signed transfer PCZTs (all-or-nothing),
@@ -1559,6 +1594,8 @@ public protocol Synchronizer: AnyObject {
     /// - Parameters:
     ///   - accountUUID: the account the PCZTs belong to.
     ///   - signed: the full set of externally signed transfer PCZTs.
+    /// - Throws: ``ZcashError/migrationPausedUntilNetworkUpgrade(_:)`` before the NU7 network
+    ///   upgrade has activated: nothing is stored.
     func storeSignedMigrationSchedulePCZTs(accountUUID: AccountUUID, _ signed: [MigrationSignedTransferPczt]) async throws
 
     // MARK: - Migration Keystone batch-signing (external signer ceremony)
@@ -2053,7 +2090,7 @@ public extension Synchronizer {
         throw MigrationUnimplemented(member: #function)
     }
 
-    func restartCurrentMigrationStep(accountUUID: AccountUUID) async throws -> MigrationSchedule {
+    func restartCurrentMigrationStep(accountUUID: AccountUUID) async throws -> MigrationRestartOutcome {
         throw MigrationUnimplemented(member: #function)
     }
 

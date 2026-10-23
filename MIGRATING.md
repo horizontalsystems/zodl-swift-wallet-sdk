@@ -1560,6 +1560,58 @@ case .replan, .reevaluate, .waiting, .complete, nil:
 `Synchronizer` also gained `setMigrationNetworkUpgradeGateBypass(_:)`, which has a default implementation, so a
 custom conformer needs no change.
 
+## `restartCurrentMigrationStep` returns `MigrationRestartOutcome`
+
+`Synchronizer.restartCurrentMigrationStep(accountUUID:)` now returns a `MigrationRestartOutcome` in place of
+the `MigrationSchedule`. A restart always cancels the account's stored run. Before the NU7 network upgrade has
+activated it plans nothing after that, because a scheduled run planned now would be built for the consensus
+branch the upgrade ends, so it succeeds with `.cancelledUntilNetworkUpgrade(activationHeight:)` and the height
+at which the upgrade activates. A call site that used the returned schedule stops compiling, and any
+`Synchronizer` conformer or test double must return the new type. A conformer without migration support is
+unaffected: its default still throws.
+
+```swift
+// Before
+let schedule = try await synchronizer.restartCurrentMigrationStep(accountUUID: account)
+// Re-confirm `schedule` with the user, then commit it.
+
+// After
+switch try await synchronizer.restartCurrentMigrationStep(accountUUID: account) {
+case .replanned(let schedule):
+    // What the call returned before: re-confirm `schedule` with the user, then commit it.
+    break
+case .cancelledUntilNetworkUpgrade(let activationHeight):
+    // The run is cancelled and nothing was planned. Show that a new migration waits for the upgrade,
+    // and offer one once the wallet has synced up to `activationHeight`.
+    break
+}
+```
+
+`.replanned` is the only outcome once the upgrade has activated. A plan proposed before a restart that answers
+`.cancelledUntilNetworkUpgrade` can no longer be committed. For internal builds,
+`setMigrationNetworkUpgradeGateBypass(_:)` makes the restart plan at every height.
+
+## `ZcashError` gained a case — `migrationPausedUntilNetworkUpgrade`
+
+`ZcashError` and `ZcashErrorCode` have a new case, `migrationPausedUntilNetworkUpgrade` (`ZRUST0159`), whose
+payload is the NU7 activation height of the wallet's network. Until the upgrade has activated, the calls that
+plan, build, sign, store or rebuild a scheduled migration run throw it, and nothing is planned, built, signed,
+stored or broadcast: `prepareNoteSplit`, `submitNoteSplit`, `proposeMigrationTransfers`,
+`signAndStoreMigrationSchedule`, `refreshStaleMigrationTransfers`, `createUnsignedNoteSplitPCZTs`,
+`storeSignedNoteSplitPCZTs`, `createUnsignedMigrationTransferPCZTs` and `storeSignedMigrationSchedulePCZTs`.
+The reads, the proving and broadcast executors and the immediate lane are not affected. It is judged at the
+wallet's own chain tip, and a network with no NU7 activation height never throws it. An exhaustive `switch`
+over either type stops compiling until it is handled.
+
+```swift
+case .migrationPausedUntilNetworkUpgrade(let activationHeight):
+    // Scheduled migration waits for the upgrade: show the pause rather than a failure, and offer the
+    // migration again once the wallet has synced up to `activationHeight`.
+    break
+```
+
+For internal builds, `setMigrationNetworkUpgradeGateBypass(_:)` turns the refusal off.
+
 ## The pool-migration surface rides the final engine
 
 The Orchard→Ironwood migration group (never in a released SDK) is rewired onto the final engine

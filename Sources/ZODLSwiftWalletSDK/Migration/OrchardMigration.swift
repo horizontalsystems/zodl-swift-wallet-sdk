@@ -754,7 +754,12 @@ actor OrchardMigration {
     /// plan is previewed for the re-confirm lane — the follow-up
     /// ``signAndStoreMigrationSchedule(_:usk:)`` / ``submitNoteSplit(proposal:usk:options:)`` (or
     /// PCZT store) then commits it.
-    func restartCurrentMigrationStep() async throws -> MigrationSchedule {
+    ///
+    /// Before the NU7 network upgrade has activated no new scheduled run is planned: the run is
+    /// still cancelled, and the outcome is
+    /// ``MigrationRestartOutcome/cancelledUntilNetworkUpgrade(activationHeight:)`` rather than a
+    /// schedule.
+    func restartCurrentMigrationStep() async throws -> MigrationRestartOutcome {
         try await welding.migrationRestartStep(for: accountUUID)
     }
 

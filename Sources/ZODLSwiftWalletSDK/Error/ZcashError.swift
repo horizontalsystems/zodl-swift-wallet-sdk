@@ -744,6 +744,11 @@ public enum ZcashError: Equatable, Error {
     /// Thrown by the estimated-chain-tip accessor when the wallet database has no scanned-block samples and no scanned height at all — sync at least once before asking for a wall-clock tip estimate.
     /// ZRUST0147
     case migrationChainTipUnavailable
+    /// Scheduled migration is paused until the network upgrade activates.
+    /// A scheduled migration spreads its transactions over many blocks, and each is built for the consensus branch of the block it is built under, so one built before the NU7 network upgrade is stranded by it. Until the upgrade has activated the SDK plans, builds, signs and stores no scheduled run, and refuses the call that would. Nothing was planned, built or stored: offer the migration again once the wallet has synced up to the activation height.
+    /// - `activationHeight` is the height at which the network upgrade activates.
+    /// ZRUST0159
+    case migrationPausedUntilNetworkUpgrade(_ activationHeight: BlockHeight)
     /// SQLite query failed when fetching all accounts from the database.
     /// - `sqliteError` is error produced by SQLite library.
     /// ZADAO0001
@@ -1383,6 +1388,7 @@ public enum ZcashError: Equatable, Error {
         case .rustMigrationReconcileUnrecordedBroadcasts: return "Error from rust layer when calling ZcashRustBackend.migrationReconcileUnrecordedBroadcasts"
         case .rustMigrationBatchPcztsByActions: return "Error from rust layer when calling ZcashRustBackend.migrationBatchPcztsByActions"
         case .migrationChainTipUnavailable: return "No chain tip is available to estimate from: the wallet has never scanned a block."
+        case .migrationPausedUntilNetworkUpgrade: return "Scheduled migration is paused until the network upgrade activates."
         case .accountDAOGetAll: return "SQLite query failed when fetching all accounts from the database."
         case .accountDAOGetAllCantDecode: return "Fetched accounts from SQLite but can't decode them."
         case .accountDAOFindBy: return "SQLite query failed when seaching for accounts in the database."
@@ -1731,6 +1737,7 @@ public enum ZcashError: Equatable, Error {
         case .rustMigrationReconcileUnrecordedBroadcasts: return .rustMigrationReconcileUnrecordedBroadcasts
         case .rustMigrationBatchPcztsByActions: return .rustMigrationBatchPcztsByActions
         case .migrationChainTipUnavailable: return .migrationChainTipUnavailable
+        case .migrationPausedUntilNetworkUpgrade: return .migrationPausedUntilNetworkUpgrade
         case .accountDAOGetAll: return .accountDAOGetAll
         case .accountDAOGetAllCantDecode: return .accountDAOGetAllCantDecode
         case .accountDAOFindBy: return .accountDAOFindBy

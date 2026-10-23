@@ -22,8 +22,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Synchronizer.setMigrationNetworkUpgradeGateBypass(_:)` turns the NU7 network-upgrade gate's bypass on or
   off for the synchronizer's migrations. It is for internal builds only: a production build must never turn it
   on. It is off by default. With it on, `migrationAdvanceStep(accountUUID:)` never answers
-  `pausedForNetworkUpgrade(activationHeight:)`; it does not disable the detection of an interrupted run. A
-  conformer that does not support migration gets a no-op default.
+  `pausedForNetworkUpgrade(activationHeight:)`, the calls that plan, build, sign, store or rebuild a scheduled
+  run are not refused with `migrationPausedUntilNetworkUpgrade(_:)`, and `restartCurrentMigrationStep(accountUUID:)`
+  plans at every height; it does not disable the detection of an interrupted run. A conformer that does not
+  support migration gets a no-op default.
 
 ## Changed
 
@@ -67,6 +69,23 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     block before it and every unmined transaction built for the old branch may already have been sent: sync and
     ask again, and the answer becomes `interruptedByNetworkUpgrade` once the scan has passed that block without
     finding them.
+- `ZcashError` and `ZcashErrorCode` gain `migrationPausedUntilNetworkUpgrade(_:)` (`ZRUST0159`), whose payload is
+  the NU7 activation height of the wallet's network. Until the upgrade has activated, the calls that plan, build,
+  sign, store or rebuild a scheduled migration run throw it: `prepareNoteSplit`, `submitNoteSplit`,
+  `proposeMigrationTransfers`, `signAndStoreMigrationSchedule`, `refreshStaleMigrationTransfers`,
+  `createUnsignedNoteSplitPCZTs`, `storeSignedNoteSplitPCZTs`, `createUnsignedMigrationTransferPCZTs` and
+  `storeSignedMigrationSchedulePCZTs`. Nothing is planned, built, signed, stored or broadcast, and the reads, the
+  proving and broadcast executors and the immediate lane are not affected. It is judged at the wallet's own chain
+  tip, and a network with no NU7 activation height is never gated. An exhaustive `switch` over either type stops
+  compiling until the new case is handled; see `MIGRATING.md`.
+- `Synchronizer.restartCurrentMigrationStep(accountUUID:)` returns a `MigrationRestartOutcome` in place of a
+  `MigrationSchedule`, so a call site that used the schedule stops compiling, and any conformer or test double
+  must return the new type; see `MIGRATING.md`. It still cancels the stored run.
+  - `replanned(_:)` carries the fresh schedule to re-confirm, as the call returned before.
+  - `cancelledUntilNetworkUpgrade(activationHeight:)` is the answer until the NU7 network upgrade has activated:
+    the run is cancelled and nothing is planned, and `activationHeight` is the height at which the upgrade
+    activates. The call succeeds, and a plan proposed before it can no longer be committed. Offer the user a new
+    migration once the wallet has synced up to that height.
 
 ## Deprecated
 

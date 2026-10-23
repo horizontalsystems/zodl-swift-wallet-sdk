@@ -2007,12 +2007,14 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
             dbData.0,
             dbData.1,
             account.id,
-            networkType.networkId
+            networkType.networkId,
+            migrationUpgradeGateBypass.isBypassed
         )
 
         guard let proposalPtr else {
-            throw ZcashError.rustMigrationPrepareNoteSplit(
-                lastErrorMessage(fallback: "`migrationPrepareNoteSplit` failed with unknown error")
+            throw migrationRoutedError(
+                lastErrorMessage(fallback: "`migrationPrepareNoteSplit` failed with unknown error"),
+                fallback: ZcashError.rustMigrationPrepareNoteSplit
             )
         }
 
@@ -2024,9 +2026,12 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
     /// Routes the rust layer's stable error prefixes to their dedicated `ZcashError` cases:
     /// `MIGRATION_PLAN_STALE` -> `.migrationPlanStale` (re-propose),
     /// `MIGRATION_PROVING_UNAVAILABLE` -> `.migrationProvingUnavailable` (proving failed hard),
-    /// and `MIGRATION_WAKEUP_INFEASIBLE:<id>` -> `.migrationWakeupInfeasible(id)` (an
-    /// inconsistent stored schedule; the id names the offending transfer). Anything else —
-    /// including a `MIGRATION_WAKEUP_INFEASIBLE` whose id does not parse — falls back to the
+    /// `MIGRATION_WAKEUP_INFEASIBLE:<id>` -> `.migrationWakeupInfeasible(id)` (an
+    /// inconsistent stored schedule; the id names the offending transfer), and
+    /// `MIGRATION_PAUSED_UNTIL_UPGRADE:<activation height>` ->
+    /// `.migrationPausedUntilNetworkUpgrade(height)` (the scheduled lane is closed until the NU7
+    /// network upgrade activates). Anything else — including a `MIGRATION_WAKEUP_INFEASIBLE` whose
+    /// id or a `MIGRATION_PAUSED_UNTIL_UPGRADE` whose height does not parse — falls back to the
     /// member's own case.
     ///
     /// Internal (not `private`) so the parse/degrade branches are pinned by unit tests directly —
@@ -2046,6 +2051,14 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
                 return .migrationWakeupInfeasible(transferId)
             }
         }
+        if message.hasPrefix("MIGRATION_PAUSED_UNTIL_UPGRADE:") {
+            // The rust side emits exactly `MIGRATION_PAUSED_UNTIL_UPGRADE:<activation height>`; as
+            // above, a height that does not parse degrades to the generic fallback.
+            let rawHeight = message.dropFirst("MIGRATION_PAUSED_UNTIL_UPGRADE:".count)
+            if let activationHeight = UInt32(rawHeight) {
+                return .migrationPausedUntilNetworkUpgrade(BlockHeight(activationHeight))
+            }
+        }
         return fallback(message)
     }
 
@@ -2062,7 +2075,8 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
             networkType.networkId,
             proposal.proposalHandle,
             usk.bytes,
-            UInt(usk.bytes.count)
+            UInt(usk.bytes.count),
+            migrationUpgradeGateBypass.isBypassed
         )
 
         guard let preparedPtr else {
@@ -2181,12 +2195,14 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
             dbData.0,
             dbData.1,
             account.id,
-            networkType.networkId
+            networkType.networkId,
+            migrationUpgradeGateBypass.isBypassed
         )
 
         guard let schedulePtr else {
-            throw ZcashError.rustMigrationProposeTransfers(
-                lastErrorMessage(fallback: "`migrationProposeTransfers` failed with unknown error")
+            throw migrationRoutedError(
+                lastErrorMessage(fallback: "`migrationProposeTransfers` failed with unknown error"),
+                fallback: ZcashError.rustMigrationProposeTransfers
             )
         }
 
@@ -2231,7 +2247,8 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
             networkType.networkId,
             schedule.proposalHandle,
             usk.bytes,
-            UInt(usk.bytes.count)
+            UInt(usk.bytes.count),
+            migrationUpgradeGateBypass.isBypassed
         )
 
         guard success else {
@@ -2464,25 +2481,33 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
     }
 
     @DBActor
-    func migrationRestartStep(for account: AccountUUID) async throws -> MigrationSchedule {
-        let schedulePtr = zcashlc_migration_restart_step(
+    func migrationRestartStep(for account: AccountUUID) async throws -> MigrationRestartOutcome {
+        let outcomePtr = zcashlc_migration_restart_step(
             dbData.0,
             dbData.1,
             account.id,
-            networkType.networkId
+            networkType.networkId,
+            migrationUpgradeGateBypass.isBypassed
         )
 
-        guard let schedulePtr else {
-            throw ZcashError.rustMigrationRestartStep(lastErrorMessage(fallback: "`migrationRestartStep` failed with unknown error"))
+        // NULL is the error sentinel: a restart that waits for the network upgrade is a success
+        // whose outcome carries no schedule.
+        guard let outcomePtr else {
+            throw migrationRoutedError(
+                lastErrorMessage(fallback: "`migrationRestartStep` failed with unknown error"),
+                fallback: ZcashError.rustMigrationRestartStep
+            )
         }
 
-        defer { zcashlc_free_migration_schedule(schedulePtr) }
+        defer { zcashlc_free_migration_restart_outcome(outcomePtr) }
 
-        guard let schedule = schedulePtr.pointee.unsafeToMigrationSchedule() else {
-            throw ZcashError.rustMigrationRestartStep(lastErrorMessage(fallback: "`migrationRestartStep` returned a malformed schedule"))
+        guard let outcome = outcomePtr.pointee.unsafeToMigrationRestartOutcome() else {
+            throw ZcashError.rustMigrationRestartStep(
+                lastErrorMessage(fallback: "`migrationRestartStep` returned a malformed outcome")
+            )
         }
 
-        return schedule
+        return outcome
     }
 
     @DBActor
@@ -2500,7 +2525,8 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
                 account.id,
                 networkType.networkId,
                 usk.bytes,
-                UInt(usk.bytes.count)
+                UInt(usk.bytes.count),
+                migrationUpgradeGateBypass.isBypassed
             )
         } else {
             schedulePtr = zcashlc_migration_refresh_stale_transfers(
@@ -2509,7 +2535,8 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
                 account.id,
                 networkType.networkId,
                 nil,
-                0
+                0,
+                migrationUpgradeGateBypass.isBypassed
             )
         }
 
@@ -2517,8 +2544,9 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
         // a terminal run, nothing expired, or a completed rebuild — returns a schedule (possibly
         // empty), mirroring `migrationRestartStep`.
         guard let schedulePtr else {
-            throw ZcashError.rustMigrationRefreshStaleTransfers(
-                lastErrorMessage(fallback: "`migrationRefreshStaleTransfers` failed with unknown error")
+            throw migrationRoutedError(
+                lastErrorMessage(fallback: "`migrationRefreshStaleTransfers` failed with unknown error"),
+                fallback: ZcashError.rustMigrationRefreshStaleTransfers
             )
         }
 
@@ -2543,7 +2571,8 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
             dbData.1,
             account.id,
             networkType.networkId,
-            schedule.proposalHandle
+            schedule.proposalHandle,
+            migrationUpgradeGateBypass.isBypassed
         )
 
         guard let pcztsPtr else {
@@ -2600,15 +2629,17 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
                         idsPtr.baseAddress,
                         UInt(idsPtr.count),
                         pcztsPtr.baseAddress,
-                        lensPtr.baseAddress
+                        lensPtr.baseAddress,
+                        migrationUpgradeGateBypass.isBypassed
                     )
                 }
             }
         }
 
         guard let preparedPtr else {
-            throw ZcashError.rustMigrationStoreSignedNoteSplitPczt(
-                lastErrorMessage(fallback: "`migrationStoreSignedNoteSplitPczts` failed with unknown error")
+            throw migrationRoutedError(
+                lastErrorMessage(fallback: "`migrationStoreSignedNoteSplitPczts` failed with unknown error"),
+                fallback: ZcashError.rustMigrationStoreSignedNoteSplitPczt
             )
         }
 
@@ -2633,7 +2664,8 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
             dbData.1,
             account.id,
             networkType.networkId,
-            schedule.proposalHandle
+            schedule.proposalHandle,
+            migrationUpgradeGateBypass.isBypassed
         )
 
         guard let pcztsPtr else {
@@ -2691,15 +2723,17 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
                         idsPtr.baseAddress,
                         UInt(idsPtr.count),
                         pcztsPtr.baseAddress,
-                        lensPtr.baseAddress
+                        lensPtr.baseAddress,
+                        migrationUpgradeGateBypass.isBypassed
                     )
                 }
             }
         }
 
         guard success else {
-            throw ZcashError.rustMigrationStoreSignedSchedulePczts(
-                lastErrorMessage(fallback: "`migrationStoreSignedSchedulePczts` failed with unknown error")
+            throw migrationRoutedError(
+                lastErrorMessage(fallback: "`migrationStoreSignedSchedulePczts` failed with unknown error"),
+                fallback: ZcashError.rustMigrationStoreSignedSchedulePczts
             )
         }
     }
@@ -3576,6 +3610,25 @@ extension FfiMigrationSchedule {
             proposalHandle: proposal_handle,
             preparations: preparationSteps
         )
+    }
+}
+
+extension FfiMigrationRestartOutcome {
+    /// Converts an [`FfiMigrationRestartOutcome`] into a [`MigrationRestartOutcome`]: a schedule is
+    /// the fresh plan to re-confirm, and no schedule is the restart that waits for the NU7 network
+    /// upgrade, whose activation height `replan_after_height` carries. `nil` when it carries
+    /// neither a schedule that decodes nor an activation height (should not happen; defensive
+    /// only). The caller still frees the outcome, which owns the schedule.
+    func unsafeToMigrationRestartOutcome() -> MigrationRestartOutcome? {
+        if let schedule {
+            return schedule.pointee.unsafeToMigrationSchedule().map(MigrationRestartOutcome.replanned)
+        }
+
+        guard replan_after_height >= 0 else {
+            return nil
+        }
+
+        return .cancelledUntilNetworkUpgrade(activationHeight: BlockHeight(replan_after_height))
     }
 }
 

@@ -1016,6 +1016,72 @@ final class OrchardMigrationCompositionTests: ZcashTestCase {
         XCTAssertNil(retainedAfterSecond, "a crank with no outlook must clear the previous one, not preserve it")
     }
 
+    // MARK: - Restart and the NU7 network upgrade
+
+    /// `restartCurrentMigrationStep` hands the welding's outcome back untouched, whichever it is,
+    /// having asked for the actor's own account.
+    func testRestartCurrentMigrationStepReturnsTheWeldingsOutcome() async throws {
+        let migration = makeMigration(broadcaster: ScriptedBroadcaster(script: .throwing(StubEngineError())))
+        let schedule = MigrationSchedule(transfers: [], estimatedDurationHours: 2, proposalHandle: 9, preparations: [])
+        let outcomes: [MigrationRestartOutcome] = [
+            .replanned(schedule),
+            .cancelledUntilNetworkUpgrade(activationHeight: 3_543_405)
+        ]
+
+        for expected in outcomes {
+            welding.migrationRestartStepForReturnValue = expected
+
+            let outcome = try await migration.restartCurrentMigrationStep()
+
+            XCTAssertEqual(outcome, expected)
+            XCTAssertEqual(welding.migrationRestartStepForReceivedAccount, accountA)
+        }
+    }
+
+    /// A restart failure reaches the caller as the welding threw it: the outcome type carries the
+    /// upgrade case, so nothing about it is turned into an error on the way.
+    func testRestartCurrentMigrationStepPropagatesTheWeldingError() async throws {
+        welding.migrationRestartStepForThrowableError = ZcashError.rustMigrationRestartStep("boom")
+        let migration = makeMigration(broadcaster: ScriptedBroadcaster(script: .throwing(StubEngineError())))
+
+        do {
+            _ = try await migration.restartCurrentMigrationStep()
+            XCTFail("Expected rustMigrationRestartStep to be thrown")
+        } catch ZcashError.rustMigrationRestartStep(let message) {
+            XCTAssertEqual(message, "boom")
+        } catch {
+            XCTFail("Expected rustMigrationRestartStep but got \(error)")
+        }
+    }
+
+    /// Before the upgrade the signing step refuses, and the refusal reaches the caller of
+    /// `submitNoteSplit` as it was thrown. The composition goes no further: nothing is broadcast,
+    /// nothing is recorded, and the sync gate's in-flight marker is never armed.
+    func testSubmitNoteSplitSurfacesTheNetworkUpgradeRefusalWithoutBroadcastingOrRecording() async throws {
+        let proposal = NoteSplitProposal(outputNotes: [Zatoshi(100_000)], fee: Zatoshi(5_000), proposalHandle: 1)
+        welding.migrationSignNoteSplitProposalUskForThrowableError = ZcashError.migrationPausedUntilNetworkUpgrade(3_543_405)
+        let broadcaster = ScriptedBroadcaster(script: .outcome(.submitted))
+        let migration = makeMigration(broadcaster: broadcaster)
+
+        do {
+            _ = try await migration.submitNoteSplit(
+                proposal: proposal,
+                usk: usk,
+                options: MigrationNetworkPrivacyOptions(useTor: false, submissionEndpoint: defaultEndpoint)
+            )
+            XCTFail("Expected migrationPausedUntilNetworkUpgrade to be thrown")
+        } catch ZcashError.migrationPausedUntilNetworkUpgrade(let activationHeight) {
+            XCTAssertEqual(activationHeight, 3_543_405)
+        } catch {
+            XCTFail("Expected migrationPausedUntilNetworkUpgrade but got \(error)")
+        }
+
+        XCTAssertTrue(broadcaster.receivedCalls.isEmpty, "a refused signing step broadcasts nothing")
+        XCTAssertFalse(welding.migrationRecordTransferResultTransferIdResultForCalled)
+        XCTAssertNil(gate.currentInFlightUntil(), "a refusal before the submit leaves no marker behind")
+        XCTAssertFalse(gate.currentlyBlocked())
+    }
+
     // MARK: - Helpers
 
     private func makeMigration(broadcaster: any MigrationBroadcasting) -> OrchardMigration {

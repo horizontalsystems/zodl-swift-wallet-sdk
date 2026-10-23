@@ -2474,7 +2474,7 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         try await migrationHost.migration(for: accountUUID).hasInvalidTransfers()
     }
 
-    public func restartCurrentMigrationStep(accountUUID: AccountUUID) async throws -> MigrationSchedule {
+    public func restartCurrentMigrationStep(accountUUID: AccountUUID) async throws -> MigrationRestartOutcome {
         try await migrationHost.migration(for: accountUUID).restartCurrentMigrationStep()
     }
 

@@ -3594,10 +3594,10 @@ class SynchronizerMock: Synchronizer {
         return restartCurrentMigrationStepAccountUUIDCallsCount > 0
     }
     var restartCurrentMigrationStepAccountUUIDReceivedAccountUUID: AccountUUID?
-    var restartCurrentMigrationStepAccountUUIDReturnValue: MigrationSchedule!
-    var restartCurrentMigrationStepAccountUUIDClosure: ((AccountUUID) async throws -> MigrationSchedule)?
+    var restartCurrentMigrationStepAccountUUIDReturnValue: MigrationRestartOutcome!
+    var restartCurrentMigrationStepAccountUUIDClosure: ((AccountUUID) async throws -> MigrationRestartOutcome)?
 
-    func restartCurrentMigrationStep(accountUUID: AccountUUID) async throws -> MigrationSchedule {
+    func restartCurrentMigrationStep(accountUUID: AccountUUID) async throws -> MigrationRestartOutcome {
         if let error = restartCurrentMigrationStepAccountUUIDThrowableError {
             throw error
         }
@@ -6106,10 +6106,10 @@ class ZcashRustBackendWeldingMock: ZcashRustBackendWelding {
         return migrationRestartStepForCallsCount > 0
     }
     var migrationRestartStepForReceivedAccount: AccountUUID?
-    var migrationRestartStepForReturnValue: MigrationSchedule!
-    var migrationRestartStepForClosure: ((AccountUUID) async throws -> MigrationSchedule)?
+    var migrationRestartStepForReturnValue: MigrationRestartOutcome!
+    var migrationRestartStepForClosure: ((AccountUUID) async throws -> MigrationRestartOutcome)?
 
-    func migrationRestartStep(for account: AccountUUID) async throws -> MigrationSchedule {
+    func migrationRestartStep(for account: AccountUUID) async throws -> MigrationRestartOutcome {
         if let error = migrationRestartStepForThrowableError {
             throw error
         }

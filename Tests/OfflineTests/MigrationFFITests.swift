@@ -263,6 +263,200 @@ final class MigrationFFITests: XCTestCase {
         }
     }
 
+    // MARK: - The scheduled lane before NU7 (real FFI)
+    //
+    // `rustBackend` is born at the bundled testnet checkpoint at 4,500,000, past testnet's NU7
+    // activation at 4,465,026, so the gate is open for it. These tests use a second, unfunded wallet
+    // born at the bundled checkpoint at 4,000,000, for which the scheduled lane is closed until
+    // 4,465,026 unless the backend's bypass holder is set.
+
+    /// A call the NU7 gate guards, by the welding member it goes through, and the error code it
+    /// fails with once it is through the gate on an unfunded wallet with no stored run (`nil` when
+    /// it succeeds).
+    private struct GatedWeldingCall {
+        let name: String
+        let codePastTheGate: ZcashErrorCode?
+        let run: () async throws -> Void
+    }
+
+    /// A testnet wallet that holds nothing and was born at the bundled checkpoint at height
+    /// 4,000,000, with the bypass holder its backend reads on every gated call.
+    private struct PreActivationWallet {
+        let backend: ZcashRustBackend
+        let bypass: MigrationUpgradeGateBypass
+        let account: AccountUUID
+        let usk: UnifiedSpendingKey
+    }
+
+    /// Thrown when the wallet could not be set up; the failure itself was already reported.
+    private struct PreActivationWalletUnavailable: Error {}
+
+    private func makePreActivationTestnetWallet(in directory: URL) async throws -> PreActivationWallet {
+        let bypass = MigrationUpgradeGateBypass()
+        let backend = ZcashRustBackend.makeForTests(
+            dbData: directory.appendingPathComponent("data.db"),
+            fsBlockDbRoot: directory.appendingPathComponent("fs_cache", isDirectory: true),
+            networkType: .testnet,
+            migrationUpgradeGateBypass: bypass
+        )
+        let dbInit = try await backend.initDataDb(seed: nil)
+        guard case .success = dbInit else {
+            XCTFail("Failed to initDataDb. Expected `.success`, got \(String(describing: dbInit))")
+            throw PreActivationWalletUnavailable()
+        }
+
+        let treeState = CheckpointSourceFactory.fromBundle(for: .testnet).birthday(for: 4_000_000).treeState()
+        let usk = try await backend.createAccount(
+            seed: Environment.seedBytes,
+            treeState: treeState,
+            recoverUntil: nil,
+            name: "",
+            keySource: nil
+        )
+        let accounts = try await backend.listAccounts()
+        let account = try XCTUnwrap(accounts.first?.id)
+        return PreActivationWallet(backend: backend, bypass: bypass, account: account, usk: usk)
+    }
+
+    /// The nine welding members that plan, build, sign, store or rebuild a scheduled run, called with
+    /// arguments that make each fail wherever it goes past the gate: a proposal handle no plan was
+    /// cached under, and no signed PCZTs. `migrationRefreshStaleTransfers` has a call site for each
+    /// of its two lanes (a spending key, and none for an external signer), so it appears twice.
+    private func gatedWeldingCalls(for wallet: PreActivationWallet) -> [GatedWeldingCall] {
+        let backend = wallet.backend
+        let account = wallet.account
+        let usk = wallet.usk
+        let noSchedule = MigrationSchedule(transfers: [], estimatedDurationHours: 0, proposalHandle: 0, preparations: [])
+        let noSplit = NoteSplitProposal(outputNotes: [], fee: Zatoshi(0), proposalHandle: 0)
+        return [
+            GatedWeldingCall(name: "migrationProposeTransfers", codePastTheGate: nil) {
+                _ = try await backend.migrationProposeTransfers(for: account)
+            },
+            GatedWeldingCall(name: "migrationPrepareNoteSplit", codePastTheGate: nil) {
+                _ = try await backend.migrationPrepareNoteSplit(for: account)
+            },
+            GatedWeldingCall(name: "migrationSignNoteSplit", codePastTheGate: .migrationPlanStale) {
+                _ = try await backend.migrationSignNoteSplit(proposal: noSplit, usk: usk, for: account)
+            },
+            GatedWeldingCall(name: "migrationSignAndStoreSchedule", codePastTheGate: .migrationPlanStale) {
+                try await backend.migrationSignAndStoreSchedule(noSchedule, usk: usk, for: account)
+            },
+            GatedWeldingCall(name: "migrationCreateUnsignedNoteSplitPczts", codePastTheGate: .migrationPlanStale) {
+                _ = try await backend.migrationCreateUnsignedNoteSplitPczts(for: noSchedule, for: account)
+            },
+            GatedWeldingCall(name: "migrationCreateUnsignedTransferPczts", codePastTheGate: .migrationPlanStale) {
+                _ = try await backend.migrationCreateUnsignedTransferPczts(for: noSchedule, for: account)
+            },
+            GatedWeldingCall(name: "migrationStoreSignedNoteSplitPczts", codePastTheGate: .rustMigrationStoreSignedNoteSplitPczt) {
+                _ = try await backend.migrationStoreSignedNoteSplitPczts([], for: account)
+            },
+            GatedWeldingCall(name: "migrationStoreSignedSchedulePczts", codePastTheGate: .rustMigrationStoreSignedSchedulePczts) {
+                try await backend.migrationStoreSignedSchedulePczts([], for: account)
+            },
+            GatedWeldingCall(name: "migrationRefreshStaleTransfers with a spending key", codePastTheGate: nil) {
+                _ = try await backend.migrationRefreshStaleTransfers(usk: usk, for: account)
+            },
+            GatedWeldingCall(name: "migrationRefreshStaleTransfers without a spending key", codePastTheGate: nil) {
+                _ = try await backend.migrationRefreshStaleTransfers(usk: nil, for: account)
+            }
+        ]
+    }
+
+    /// Before testnet's NU7 activation the scheduled lane starts nothing: a proposal is refused with
+    /// the typed error that names the activation height. With the bypass the same call goes through.
+    func testProposeIsRefusedBeforeTestnetActivationUnlessBypassed() async throws {
+        let directory = try makeUniqueStorageDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let wallet = try await makePreActivationTestnetWallet(in: directory)
+
+        do {
+            _ = try await wallet.backend.migrationProposeTransfers(for: wallet.account)
+            XCTFail("a proposal before NU7 activates must be refused")
+        } catch ZcashError.migrationPausedUntilNetworkUpgrade(let activationHeight) {
+            XCTAssertEqual(activationHeight, 4_465_026)
+        } catch {
+            XCTFail("Expected migrationPausedUntilNetworkUpgrade but got \(error)")
+        }
+
+        wallet.bypass.setBypassed(true)
+        let schedule = try await wallet.backend.migrationProposeTransfers(for: wallet.account)
+        XCTAssertTrue(schedule.transfers.isEmpty, "an unfunded wallet has nothing to migrate")
+        XCTAssertEqual(schedule.proposalHandle, 0, "an empty schedule carries no plan handle")
+    }
+
+    /// Every gated welding member passes the bypass holder's current value on to the FFI and routes
+    /// the refusal to the typed error: each is refused while the holder is off, and each goes through
+    /// the gate to its own answer once it is on, then is refused again when it is turned back off.
+    func testEveryGatedCallIsRefusedBeforeTestnetActivationUnlessBypassed() async throws {
+        let directory = try makeUniqueStorageDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let wallet = try await makePreActivationTestnetWallet(in: directory)
+        let calls = gatedWeldingCalls(for: wallet)
+
+        func assertRefused() async {
+            for call in calls {
+                do {
+                    try await call.run()
+                    XCTFail("\(call.name) must be refused before NU7 activates")
+                } catch ZcashError.migrationPausedUntilNetworkUpgrade(let activationHeight) {
+                    XCTAssertEqual(activationHeight, 4_465_026, call.name)
+                } catch {
+                    XCTFail("\(call.name) failed with \(error) instead of the refusal")
+                }
+            }
+        }
+
+        await assertRefused()
+
+        wallet.bypass.setBypassed(true)
+        for call in calls {
+            do {
+                try await call.run()
+                XCTAssertNil(call.codePastTheGate, "\(call.name) was expected to fail past the gate")
+            } catch let error as ZcashError {
+                XCTAssertNotEqual(
+                    error.code,
+                    ZcashErrorCode.migrationPausedUntilNetworkUpgrade,
+                    "\(call.name) was refused with the bypass on"
+                )
+                XCTAssertEqual(error.code, call.codePastTheGate, "\(call.name) failed with \(error)")
+            }
+        }
+
+        wallet.bypass.setBypassed(false)
+        await assertRefused()
+    }
+
+    /// A restart before the activation is a success, not a failure: it reports the activation height
+    /// a new scheduled plan waits for instead of planning. With the bypass it plans, as it always did.
+    func testRestartBeforeTestnetActivationReportsTheUpgradeUnlessBypassed() async throws {
+        let directory = try makeUniqueStorageDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let wallet = try await makePreActivationTestnetWallet(in: directory)
+
+        let waiting = try await wallet.backend.migrationRestartStep(for: wallet.account)
+        XCTAssertEqual(waiting, .cancelledUntilNetworkUpgrade(activationHeight: 4_465_026))
+
+        wallet.bypass.setBypassed(true)
+        let replanned = try await wallet.backend.migrationRestartStep(for: wallet.account)
+        XCTAssertEqual(
+            replanned,
+            .replanned(MigrationSchedule(transfers: [], estimatedDurationHours: 0, proposalHandle: 0, preparations: [])),
+            "an unfunded wallet plans the empty schedule"
+        )
+    }
+
+    /// Past the activation the gate is open without the bypass: the fixture wallet is born at the
+    /// 4,500,000 checkpoint, so its restart plans.
+    func testRestartAfterTestnetActivationReplansWithoutTheBypass() async throws {
+        let outcome = try await rustBackend.migrationRestartStep(for: account)
+
+        XCTAssertEqual(
+            outcome,
+            .replanned(MigrationSchedule(transfers: [], estimatedDurationHours: 0, proposalHandle: 0, preparations: []))
+        )
+    }
+
     /// Recording a SUCCESS against a transfer id with no active migration run throws: that path
     /// must load the stored run to mark the transfer broadcast, and there is none. A deterministic,
     /// sync-independent throw — it never touches the wallet schema.
@@ -887,6 +1081,43 @@ final class MigrationFFITests: XCTestCase {
         )
     }
 
+    // MARK: - Restart outcome decode mapping
+
+    /// A restart that planned carries the schedule and `-1`; one that waited for the upgrade carries
+    /// no schedule and the activation height. Constructed directly like the rows above: the first
+    /// shape needs a funded wallet over the real FFI, and the second a wallet before NU7.
+    func testRestartOutcomeDecode() throws {
+        let waiting = FfiMigrationRestartOutcome(schedule: nil, replan_after_height: 3_543_405)
+        XCTAssertEqual(
+            waiting.unsafeToMigrationRestartOutcome(),
+            .cancelledUntilNetworkUpgrade(activationHeight: 3_543_405)
+        )
+
+        let schedule = UnsafeMutablePointer<FfiMigrationSchedule>.allocate(capacity: 1)
+        schedule.initialize(
+            to: FfiMigrationSchedule(
+                transfers: nil,
+                transfers_len: 0,
+                estimated_duration_hours: 3,
+                proposal_handle: 7,
+                preparations: nil,
+                preparations_len: 0
+            )
+        )
+        defer { schedule.deallocate() }
+        let planned = FfiMigrationRestartOutcome(schedule: schedule, replan_after_height: -1)
+        XCTAssertEqual(
+            planned.unsafeToMigrationRestartOutcome(),
+            .replanned(MigrationSchedule(transfers: [], estimatedDurationHours: 3, proposalHandle: 7, preparations: []))
+        )
+    }
+
+    /// An outcome with neither a plan nor an activation height to wait for is malformed, and
+    /// decodes to `nil` like any other defensive failure.
+    func testRestartOutcomeDecodeRejectsAnOutcomeWithNeitherAPlanNorAHeight() {
+        XCTAssertNil(FfiMigrationRestartOutcome(schedule: nil, replan_after_height: -1).unsafeToMigrationRestartOutcome())
+    }
+
     // MARK: - Prove outcome decode mapping (the txid seam)
     //
     // `FfiMigrationProveOutcome`'s marshal into `MigrationProveOutcome`, constructed directly like
@@ -1073,12 +1304,53 @@ final class MigrationFFITests: XCTestCase {
         XCTAssertTrue(message.hasPrefix("MIGRATION_PROVING_UNAVAILABLE"))
     }
 
+    /// `MIGRATION_PAUSED_UNTIL_UPGRADE:<activation height>` parses the height into
+    /// `.migrationPausedUntilNetworkUpgrade(height)`, whichever member the failure came from; a
+    /// height that does not parse (contract drift) degrades to the member's own fallback rather
+    /// than fabricating one.
+    func testPausedPrefixRoutesToTheTypedError() throws {
+        let backend = try XCTUnwrap(rustBackend as? ZcashRustBackend)
+
+        let routed = backend.migrationRoutedError(
+            "MIGRATION_PAUSED_UNTIL_UPGRADE:4465026",
+            fallback: ZcashError.rustMigrationProposeTransfers
+        )
+        guard case .migrationPausedUntilNetworkUpgrade(let activationHeight) = routed else {
+            XCTFail("expected migrationPausedUntilNetworkUpgrade, got \(routed)")
+            return
+        }
+        XCTAssertEqual(activationHeight, 4_465_026)
+        XCTAssertEqual(routed.code.rawValue, "ZRUST0159")
+
+        let malformedMessages = [
+            "MIGRATION_PAUSED_UNTIL_UPGRADE:",
+            "MIGRATION_PAUSED_UNTIL_UPGRADE:abc",
+            "MIGRATION_PAUSED_UNTIL_UPGRADE:-3",
+            "MIGRATION_PAUSED_UNTIL_UPGRADE:4465026 and more",
+            "MIGRATION_PAUSED_UNTIL_UPGRADE"
+        ]
+        for malformed in malformedMessages {
+            let degraded = backend.migrationRoutedError(malformed, fallback: ZcashError.rustMigrationProposeTransfers)
+
+            guard case .rustMigrationProposeTransfers(let message) = degraded else {
+                XCTFail("expected the rustMigrationProposeTransfers fallback for \(malformed), got \(degraded)")
+                return
+            }
+            XCTAssertEqual(message, malformed, "the fallback must carry the raw message untouched")
+        }
+    }
+
     /// An unrelated message — including one merely CONTAINING a known prefix mid-string — falls
     /// through to the member's own case untouched.
     func testMigrationRoutedErrorLeavesUnrelatedMessagesToTheFallback() throws {
         let backend = try XCTUnwrap(rustBackend as? ZcashRustBackend)
 
-        for unrelated in ["sqlite disk I/O error", "saw MIGRATION_PLAN_STALE downstream"] {
+        let unrelatedMessages = [
+            "sqlite disk I/O error",
+            "saw MIGRATION_PLAN_STALE downstream",
+            "saw MIGRATION_PAUSED_UNTIL_UPGRADE:3543405 downstream"
+        ]
+        for unrelated in unrelatedMessages {
             let routed = backend.migrationRoutedError(unrelated, fallback: ZcashError.rustMigrationRestartStep)
 
             guard case .rustMigrationRestartStep(let message) = routed else {

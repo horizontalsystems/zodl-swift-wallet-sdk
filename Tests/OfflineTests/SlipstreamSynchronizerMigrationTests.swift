@@ -238,6 +238,94 @@ final class SlipstreamSynchronizerMigrationTests: ZcashTestCase {
         XCTAssertEqual(received?.usk, usk)
     }
 
+    /// `restartCurrentMigrationStep` hands back the actor's outcome unchanged, whichever it is: the
+    /// fresh plan to re-confirm, or the activation height a new plan waits for. The account reaches
+    /// the welding call.
+    func testRestartCurrentMigrationStepForwardsTheOutcomeToTheAccountsActor() async throws {
+        let welding = ZcashRustBackendWeldingMock()
+        let synchronizer = try makeSynchronizer(migrationHost: makeHost(welding: welding))
+        let schedule = MigrationSchedule(transfers: [], estimatedDurationHours: 3, proposalHandle: 5, preparations: [])
+        let outcomes: [MigrationRestartOutcome] = [
+            .replanned(schedule),
+            .cancelledUntilNetworkUpgrade(activationHeight: 4_465_026)
+        ]
+
+        for expected in outcomes {
+            welding.migrationRestartStepForReturnValue = expected
+
+            let outcome = try await synchronizer.restartCurrentMigrationStep(accountUUID: accountUUID)
+
+            XCTAssertEqual(outcome, expected)
+            XCTAssertEqual(welding.migrationRestartStepForReceivedAccount, accountUUID)
+        }
+    }
+
+    /// Before the NU7 network upgrade, every member that plans, builds, signs, stores or rebuilds a
+    /// scheduled run throws the welding's refusal as it was thrown, activation height included.
+    func testGatedMigrationCallsPropagateTheNetworkUpgradeRefusal() async throws {
+        let welding = ZcashRustBackendWeldingMock()
+        let refusal = ZcashError.migrationPausedUntilNetworkUpgrade(4_465_026)
+        welding.migrationPrepareNoteSplitForThrowableError = refusal
+        welding.migrationSignNoteSplitProposalUskForThrowableError = refusal
+        welding.migrationProposeTransfersForThrowableError = refusal
+        welding.migrationSignAndStoreScheduleUskForThrowableError = refusal
+        welding.migrationRefreshStaleTransfersUskForThrowableError = refusal
+        welding.migrationCreateUnsignedNoteSplitPcztsForForThrowableError = refusal
+        welding.migrationStoreSignedNoteSplitPcztsForThrowableError = refusal
+        welding.migrationCreateUnsignedTransferPcztsForForThrowableError = refusal
+        welding.migrationStoreSignedSchedulePcztsForThrowableError = refusal
+        let synchronizer = try makeSynchronizer(migrationHost: makeHost(welding: welding))
+        let accountUUID = accountUUID
+        let usk = TestsData(networkType: .testnet).spendingKey
+        let schedule = MigrationSchedule(transfers: [], estimatedDurationHours: 0, proposalHandle: 0, preparations: [])
+        let proposal = NoteSplitProposal(outputNotes: [Zatoshi(100_000)], fee: Zatoshi(5_000), proposalHandle: 1)
+        let signed = [MigrationSignedTransferPczt(id: 0, pczt: Data([0x01]))]
+        let options = MigrationNetworkPrivacyOptions(useTor: false, submissionEndpoint: submissionEndpoint)
+        let calls: [(name: String, run: () async throws -> Void)] = [
+            ("prepareNoteSplit", { _ = try await synchronizer.prepareNoteSplit(accountUUID: accountUUID) }),
+            (
+                "submitNoteSplit",
+                { _ = try await synchronizer.submitNoteSplit(accountUUID: accountUUID, proposal: proposal, usk: usk, options: options) }
+            ),
+            ("proposeMigrationTransfers", { _ = try await synchronizer.proposeMigrationTransfers(accountUUID: accountUUID) }),
+            (
+                "signAndStoreMigrationSchedule",
+                { try await synchronizer.signAndStoreMigrationSchedule(accountUUID: accountUUID, schedule, usk: usk) }
+            ),
+            (
+                "refreshStaleMigrationTransfers",
+                { _ = try await synchronizer.refreshStaleMigrationTransfers(accountUUID: accountUUID, usk: usk) }
+            ),
+            (
+                "createUnsignedNoteSplitPCZTs",
+                { _ = try await synchronizer.createUnsignedNoteSplitPCZTs(accountUUID: accountUUID, for: schedule) }
+            ),
+            (
+                "storeSignedNoteSplitPCZTs",
+                { _ = try await synchronizer.storeSignedNoteSplitPCZTs(accountUUID: accountUUID, signed) }
+            ),
+            (
+                "createUnsignedMigrationTransferPCZTs",
+                { _ = try await synchronizer.createUnsignedMigrationTransferPCZTs(accountUUID: accountUUID, for: schedule) }
+            ),
+            (
+                "storeSignedMigrationSchedulePCZTs",
+                { try await synchronizer.storeSignedMigrationSchedulePCZTs(accountUUID: accountUUID, signed) }
+            )
+        ]
+
+        for call in calls {
+            do {
+                try await call.run()
+                XCTFail("\(call.name) must surface the refusal")
+            } catch ZcashError.migrationPausedUntilNetworkUpgrade(let activationHeight) {
+                XCTAssertEqual(activationHeight, 4_465_026, call.name)
+            } catch {
+                XCTFail("\(call.name) threw \(error) instead of the refusal")
+            }
+        }
+    }
+
     /// #1806: `createUnsignedNoteSplitPCZTs` gained a required `schedule` parameter with the
     /// opaque-handle reshape (the welding call now needs it to identify which cached plan a
     /// fresh-build should be built from -- see `MigrationSchedule.proposalHandle`). Both the

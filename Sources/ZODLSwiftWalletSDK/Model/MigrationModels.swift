@@ -712,6 +712,26 @@ public struct MigrationSchedule: Equatable, Sendable, Codable {
     }
 }
 
+/// What `Synchronizer.restartCurrentMigrationStep(accountUUID:)` came to.
+///
+/// A restart always cancels the account's stored run. Whether it then plans a new one depends on
+/// the NU7 network upgrade: a scheduled run spreads its transactions over many blocks and each is
+/// built for the consensus branch of the block it is built under, so before the upgrade has
+/// activated no new scheduled run is planned, built, signed or stored.
+public enum MigrationRestartOutcome: Equatable, Sendable {
+    /// The run was cancelled and a fresh plan was previewed against the live balance. Re-confirm
+    /// it with the user and commit it as for any other proposal; its
+    /// ``MigrationSchedule/proposalHandle`` identifies it. An empty schedule means nothing is
+    /// left to migrate.
+    case replanned(MigrationSchedule)
+    /// The run was cancelled and no new plan was made, because the NU7 network upgrade has not
+    /// activated yet. The upgrade activates at `activationHeight`: offer the user a new migration
+    /// once the wallet has synced up to it. Until then the calls that plan, build, sign or store a
+    /// scheduled run throw ``ZcashError/migrationPausedUntilNetworkUpgrade(_:)``, and a plan
+    /// proposed before the restart can no longer be committed.
+    case cancelledUntilNetworkUpgrade(activationHeight: BlockHeight)
+}
+
 /// An estimate of migrating the account's whole spendable Orchard balance across successive
 /// migration RUNS ("rounds"), as returned by
 /// `ZcashRustBackendWelding.estimateMigrationRuns(accountUUID:)`.

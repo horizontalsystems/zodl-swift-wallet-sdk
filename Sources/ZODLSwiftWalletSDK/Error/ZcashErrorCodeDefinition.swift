@@ -798,6 +798,12 @@ enum ZcashErrorDefinition {
     // the sync gate's forward-looking clause, its only consumer, leaving the probe with none. Do
     // not reuse the code.
 
+    /// Scheduled migration is paused until the network upgrade activates.
+    /// A scheduled migration spreads its transactions over many blocks, and each is built for the consensus branch of the block it is built under, so one built before the NU7 network upgrade is stranded by it. Until the upgrade has activated the SDK plans, builds, signs and stores no scheduled run, and refuses the call that would. Nothing was planned, built or stored: offer the migration again once the wallet has synced up to the activation height.
+    /// - `activationHeight` is the height at which the network upgrade activates.
+    // sourcery: code="ZRUST0159"
+    case migrationPausedUntilNetworkUpgrade(_ activationHeight: BlockHeight)
+
     // MARK: - Account DAO
 
     /// SQLite query failed when fetching all accounts from the database.

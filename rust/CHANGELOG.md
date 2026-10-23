@@ -795,6 +795,34 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `upgrade_gate_bypass` is for internal builds: `true` lifts the pause and the 48-block window, so
     the engine's own step is returned at every height, and never lifts the interruption. Pass `false`
     to enforce the gate.
+- Until the NU7 network upgrade has activated, the calls that plan, build, sign, store or rebuild a
+  scheduled migration run are refused: `zcashlc_migration_propose_transfers`,
+  `zcashlc_migration_prepare_note_split`, `zcashlc_migration_sign_note_split`,
+  `zcashlc_migration_sign_and_store_schedule`, `zcashlc_migration_create_unsigned_note_split_pczts`,
+  `zcashlc_migration_create_unsigned_transfer_pczts`,
+  `zcashlc_migration_store_signed_note_split_pczts`,
+  `zcashlc_migration_store_signed_schedule_pczts` and `zcashlc_migration_refresh_stale_transfers`
+  return their failure value (NULL, or `false`) with the last error
+  `MIGRATION_PAUSED_UNTIL_UPGRADE:<activation height>`, the height following the colon directly (for
+  example `MIGRATION_PAUSED_UNTIL_UPGRADE:3543405`). Nothing is planned, cached, built, signed or
+  stored by a refused call. The gate is judged at the height after the wallet's own chain tip, so a
+  wallet with no chain tip fails with the usual "sync first" error instead, and a network with no NU7
+  activation height is never gated. Each of the nine, and `zcashlc_migration_restart_step`, takes a
+  trailing `upgrade_gate_bypass: bool`, which every existing call site must now pass. It is for
+  internal builds: `true` lets the call through at every height. Pass `false` to enforce the gate. The
+  read-only calls, `zcashlc_migration_prove_transactions`,
+  `zcashlc_migration_take_broadcast_transaction`, `zcashlc_migration_take_preparation_by_txid`,
+  `zcashlc_migration_record_transfer_result`, `zcashlc_migration_record_immediate_run`, the residual
+  locks and the Keystone helpers are not gated.
+- `zcashlc_migration_restart_step` returns a `*mut FfiMigrationRestartOutcome`,
+  `{ schedule: *mut FfiMigrationSchedule, replan_after_height: i64 }`, in place of the
+  `*mut FfiMigrationSchedule`. Free it with the new `zcashlc_free_migration_restart_outcome`, which
+  also frees the schedule, and no longer with `zcashlc_free_migration_schedule`. The call still cancels
+  the stored run first. From the NU7 activation on, or with `upgrade_gate_bypass`, it then plans as
+  before: `schedule` is the fresh plan and `replan_after_height` is `-1`. Before the activation it
+  plans nothing and succeeds with no last error: `schedule` is NULL, `replan_after_height` is the NU7
+  activation height a new scheduled plan waits for, and a plan proposed earlier can no longer be
+  committed (`MIGRATION_PLAN_STALE`).
 
 ### Removed
 - The step-by-step coinholder-voting C surface is gone: `zcash_voting` absorbed the
