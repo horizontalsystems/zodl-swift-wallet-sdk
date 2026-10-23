@@ -110,6 +110,31 @@ protocol ZcashRustBackendWelding {
     /// - Throws: `rustDecryptAndStoreTransaction`.
     func decryptAndStoreTransaction(txBytes: [UInt8], minedHeight: UInt32?) async throws -> Data
 
+    /// Checks whether a raw transaction can be valid in the next block, so that nothing is submitted that no block can
+    /// include.
+    ///
+    /// A block accepts only a transaction built for the consensus branch its own height is under, and only one that has
+    /// not expired by then. The transaction is judged against the next block, the one after the higher of the wallet's
+    /// chain tip and `submissionServerHeight`, the latest block height of the server the transaction is about to be
+    /// submitted to: the wallet lags every block it has not synced yet, and the server may lag the wallet. A wallet that
+    /// has no chain tip yet is judged by the server's height alone. The branch is compared only for a transaction whose
+    /// encoding commits to one (v5 and later). Unlike the migration's own check, this one knows no cutoff window before a
+    /// network upgrade: a normal send is never cut off.
+    ///
+    /// The wallet is opened read-only. Nothing is written to it.
+    /// - Parameters:
+    ///   - rawTransaction: the serialized transaction, as it would be submitted.
+    ///   - submissionServerHeight: the latest block height the submission server reported, read on the service and in
+    ///     the mode the transaction will be submitted over, just before this call.
+    /// - Returns: `nil` when the transaction can be valid in the next block, otherwise why it cannot.
+    /// - Throws: `rustCheckTransactionSubmittable` when the transaction cannot be judged: the server height is not a
+    ///   height, the wallet database cannot be read, or `rawTransaction` is no transaction. Such a transaction must not
+    ///   be submitted.
+    func checkTransactionSubmittable(
+        _ rawTransaction: Data,
+        submissionServerHeight: BlockHeight
+    ) async throws -> TransactionSubmissionRefusal?
+
     /// Returns the most-recently-generated unified payment address for the specified account.
     /// - parameter account: index of the given account
     /// - Throws:

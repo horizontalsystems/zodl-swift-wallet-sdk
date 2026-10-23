@@ -55,8 +55,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is when the chain reaches it. `expired` means its expiry height is below the next block's. `networkUpgradeCutoff`
   means the next block is one of the 48 before the NU7 activation, in which a migration transaction is not
   submitted. `code` is the stable local code the refusal is reported under, `-9101`, `-9102` and `-9103`
-  respectively, which no server sends, and `description` a stable text that carries no transaction data. See
-  `ZcashError.migrationSubmissionRefused(_:)`.
+  respectively, which no server sends, and `description` a stable text that carries no transaction data. A
+  migration transaction is refused with `ZcashError.migrationSubmissionRefused(_:)`; any other transaction with
+  `TransactionSubmitResult.submitFailure(txId:code:description:)` or `TransactionSubmissionOutcome.rejected(code:message:)`,
+  never for `networkUpgradeCutoff`, which only the migration is subject to.
 
 ## Changed
 
@@ -150,6 +152,32 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TransactionSubmissionRefusal` that says why. `performMigrationBroadcast`, `submitNoteSplit` and
   `takeMigrationPreparation` throw it. An exhaustive `switch` over either type stops compiling until it is
   handled; see `MIGRATING.md`.
+- Every transaction the SDK submits is checked against the next block first, not only a migration's: the transactions
+  of the streams `createProposedTransactions(proposal:spendingKey:)`, `createProposedTransactions(proposal:spendingKey:ovkPolicy:)`
+  and `createTransactionFromPCZT(pcztWithProofs:pcztWithSigs:)` return, those of `Broadcaster.submit(transaction:to:)` and
+  `Broadcaster.submit(transactions:to:)` (with or without `timing:`), and the background resubmission of a transaction that
+  has not been mined. Before it submits a transaction, the SDK reads the latest block height of the server the
+  transaction is about to go to, on the very connection it submits over (with Tor, the circuit of that submission), and
+  refuses a transaction that cannot be valid in the next block, the one after the higher of that height and the wallet's chain
+  tip: one built for another consensus branch than that block's, which a network upgrade does to a transaction created before it,
+  or one that has expired by then. The branch is compared for a v5 or later transaction, the only kind that carries one.
+  The check costs one extra request per submission, and one per endpoint when a transaction goes to several, each judged at its
+  own endpoint's height. Normal sends are never cut off: unlike a migration transaction, one is not held back in the 48 blocks
+  before the NU7 activation, and a transaction that can be valid is submitted exactly as before.
+  - A refusal is reported as the failure of the call that submitted the transaction, under the local `code` and the stable
+    `description` of its `TransactionSubmissionRefusal` (`-9101` for the wrong branch, `-9102` for expiry), and nothing is
+    submitted. The streams report `TransactionSubmitResult.submitFailure(txId:code:description:)`, without asking the server
+    whether it knows the transaction, and the transactions after it `.notAttempted`. `Broadcaster.submit(transaction:to:)` reports
+    `TransactionSubmissionOutcome.rejected(code:message:)` when no endpoint accepted and at least one refused or rejected the
+    transaction. No block can include a refused transaction as it is: create it again.
+  - When the server's height cannot be read, or the transaction cannot be judged, nothing is submitted. A stream throws the
+    error of the height read (`ZcashError.serviceLatestBlockHeightFailed(_:)`, for instance) or
+    `ZcashError.rustCheckTransactionSubmittable(_:)`. An endpoint whose height cannot be read counts as unreachable, like one
+    that cannot be connected to. Background resubmission skips the transaction and tries it again in a later pass.
+- `ZcashError` and `ZcashErrorCode` gain `rustCheckTransactionSubmittable(_:)` (`ZRUST0163`), whose payload is the rust layer's
+  message, and `TransactionEncoderError` gains `notSubmittable(_:)`, whose payload is the `TransactionSubmissionRefusal`. An
+  exhaustive `switch` over any of the three types stops compiling until the new case is handled; see `MIGRATING.md`. The
+  synchronizers and the broadcaster report a refusal as above, so `notSubmittable(_:)` is not one a consumer meets from them.
 
 ## Deprecated
 

@@ -4616,6 +4616,30 @@ class ZcashRustBackendWeldingMock: ZcashRustBackendWelding {
         }
     }
 
+    // MARK: - checkTransactionSubmittable
+
+    var checkTransactionSubmittableSubmissionServerHeightThrowableError: Error?
+    var checkTransactionSubmittableSubmissionServerHeightCallsCount = 0
+    var checkTransactionSubmittableSubmissionServerHeightCalled: Bool {
+        return checkTransactionSubmittableSubmissionServerHeightCallsCount > 0
+    }
+    var checkTransactionSubmittableSubmissionServerHeightReceivedArguments: (rawTransaction: Data, submissionServerHeight: BlockHeight)?
+    var checkTransactionSubmittableSubmissionServerHeightReturnValue: TransactionSubmissionRefusal?
+    var checkTransactionSubmittableSubmissionServerHeightClosure: ((Data, BlockHeight) async throws -> TransactionSubmissionRefusal?)?
+
+    func checkTransactionSubmittable(_ rawTransaction: Data, submissionServerHeight: BlockHeight) async throws -> TransactionSubmissionRefusal? {
+        if let error = checkTransactionSubmittableSubmissionServerHeightThrowableError {
+            throw error
+        }
+        checkTransactionSubmittableSubmissionServerHeightCallsCount += 1
+        checkTransactionSubmittableSubmissionServerHeightReceivedArguments = (rawTransaction: rawTransaction, submissionServerHeight: submissionServerHeight)
+        if let closure = checkTransactionSubmittableSubmissionServerHeightClosure {
+            return try await closure(rawTransaction, submissionServerHeight)
+        } else {
+            return checkTransactionSubmittableSubmissionServerHeightReturnValue
+        }
+    }
+
     // MARK: - getCurrentAddress
 
     var getCurrentAddressAccountUUIDThrowableError: Error?

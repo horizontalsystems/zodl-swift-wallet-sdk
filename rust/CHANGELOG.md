@@ -14,6 +14,17 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `zcashlc_slipstream_stop` does and returns the same `FfiSlipstreamStopReport`. Refuse the change
   unless `settled` and `drained` are both 1. `zcashlc_slipstream_stop` lets a scan call in progress
   run to the end of its chunk first, which can outlast its ten-second budget.
+- `zcashlc_check_transaction_submittable(db_data, db_data_len, network_id, tx, tx_len,
+  submission_server_height)` reports whether a raw transaction can be valid in the next block, so that nothing is
+  submitted that no block can include. The next block is the one after the higher of the wallet's chain tip and
+  `submission_server_height`, the latest block height of the server the transaction is about to be submitted to (a wallet
+  that has no chain tip yet is judged by the server's height alone). It returns `0` when the transaction can be valid
+  there, `1` when it is built for another consensus branch than that block's, `2` when it has expired by then (an expiry
+  height of 0 never expires), and `-1` with the last error set when it cannot judge: `submission_server_height` is negative or
+  no block height, which fails closed, no block can follow it, the network is unknown, the wallet database does not exist
+  or cannot be read, or `tx` is no transaction. The branch is compared only for a v5 or later encoding, the only one that
+  commits to a consensus branch; an earlier one has just its expiry judged. The wallet database is opened read-only, and
+  nothing is written to it. Unlike the migration's own submission check, it knows no cutoff window before a network upgrade.
 - `zcashlc_payment_uri_parse` validates supported cross-chain payment request URIs and returns an
   internal JSON envelope for SDK bindings.
 - `zcashlc_parse_gift_card_link(link, error_out)` reads a gift card link — any `https` URL whose

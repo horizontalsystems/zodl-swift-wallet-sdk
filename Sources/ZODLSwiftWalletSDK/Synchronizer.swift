@@ -2474,8 +2474,15 @@ public enum RewindPolicy {
 ///
 /// - success: the transaction was successfully submitted to the mempool.
 /// - grpcFailure: the transaction failed to reach the lightwalletd server.
-/// - submitFailure: the transaction reached the lightwalletd server but failed to enter the mempool.
+/// - submitFailure: the transaction reached the lightwalletd server but failed to enter the mempool, or the SDK refused to
+///   submit it because it cannot be valid in the next block (see ``TransactionSubmissionRefusal``). A refusal is reported
+///   under the local `code` of the refusal, `-9101` for a transaction built for another consensus branch than the next
+///   block's and `-9102` for an expired one, with its stable `description`. No server sends these codes, and nothing reached
+///   the network: create the transaction again.
 /// - notAttempted: the transaction was created and is in the local wallet, but was not submitted to the network.
+///
+/// Before it submits a transaction, the SDK reads the latest block height of the server the transaction goes to. If that
+/// height cannot be read, nothing is submitted and the stream throws the error of the read.
 public enum TransactionSubmitResult: Equatable {
     case success(txId: Data)
     case grpcFailure(txId: Data, error: LightWalletServiceError)

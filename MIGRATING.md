@@ -1664,6 +1664,54 @@ throws the request's error when it fails. With Tor enabled that request uses the
 transaction in (named after its txid), not the circuit the sync uses; no change is needed in the app. See
 `CHANGELOG.md`.
 
+## Every submission is checked against the next block
+
+Every transaction the SDK submits is checked before it reaches a server, not only a migration's. That covers the
+streams of `createProposedTransactions(proposal:spendingKey:)`, `createProposedTransactions(proposal:spendingKey:ovkPolicy:)`
+and `createTransactionFromPCZT(pcztWithProofs:pcztWithSigs:)`, `Broadcaster.submit`, and the background resubmission
+of a transaction that has not been mined. The SDK reads the latest block height of the server the transaction is about to go
+to, on the connection it submits over, and refuses a transaction that cannot be valid in the next block, the one after the
+higher of that height and the wallet's chain tip: one built for another consensus branch than that block's, which is what the NU7
+activation does to a transaction created before it and not yet sent, or one that has expired by then. Nothing else changes for a
+transaction that can be valid, apart from the extra request, and a normal send is never held back in the blocks before the
+activation.
+
+A refusal is reported as the failure of the call, under the local code and the stable description of its
+`TransactionSubmissionRefusal`, which no server sends. Nothing was submitted, and no block can include the transaction as it
+is, so the caller creates it again:
+
+```swift
+// Before
+case .submitFailure(let txId, let code, let description):
+    // A server rejected the transaction. Show `description`.
+    break
+
+// After
+case .submitFailure(let txId, let code, let description):
+    if code == TransactionSubmissionRefusal.wrongConsensusBranch.code || code == TransactionSubmissionRefusal.expired.code {
+        // The SDK did not submit it: it cannot be valid in the next block. Create the transaction again.
+    } else {
+        // A server rejected the transaction. Show `description`.
+    }
+```
+
+`Broadcaster.submit` reports the same refusal as `TransactionSubmissionOutcome.rejected(code:message:)` when no endpoint accepted
+the transaction, so the check above applies to its `code` as well. When the server's height cannot be read, or the transaction cannot be
+judged, nothing is submitted either: an endpoint of `Broadcaster.submit` whose height cannot be read counts as unreachable, and a
+stream throws the error of the read, such as `ZcashError.serviceLatestBlockHeightFailed(_:)`, instead of reporting a result for the
+transaction.
+
+Two enums gained a case, so an exhaustive `switch` over either stops compiling until it is handled. `ZcashError` and `ZcashErrorCode` have
+`rustCheckTransactionSubmittable` (`ZRUST0163`), whose payload is the rust layer's message: the transaction could not be judged, so it was
+not submitted. `TransactionEncoderError` has `notSubmittable(_:)`, whose payload is the `TransactionSubmissionRefusal`; the
+synchronizers and the broadcaster report a refusal as above, so it is not one a consumer meets from them.
+
+```swift
+case .rustCheckTransactionSubmittable:
+    // The transaction was not submitted because it could not be judged. Log it, and try again.
+    break
+```
+
 ## The pool-migration surface rides the final engine
 
 The Orchard→Ironwood migration group (never in a released SDK) is rewired onto the final engine

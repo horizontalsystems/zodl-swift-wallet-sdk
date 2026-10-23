@@ -740,6 +740,43 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
         return Data(contiguousTxidBytes)
     }
 
+    // DB-READ (audited 2026-10-23): zcashlc_check_transaction_submittable — the FFI opens the wallet
+    // through `wallet_db_read_only` (SQLITE_OPEN_READ_ONLY on its one connection), so the only thing
+    // it can do to the database is read the chain tip (`SELECT MAX(block_range_end) FROM
+    // scan_queue`); the transaction is parsed in memory, and a write anywhere down the path would
+    // fail SQLITE_READONLY.
+    func checkTransactionSubmittable(
+        _ rawTransaction: Data,
+        submissionServerHeight: BlockHeight
+    ) async throws -> TransactionSubmissionRefusal? {
+        let txBytes = [UInt8](rawTransaction)
+
+        // The FFI answers 0 for a transaction that can be valid in the next block, 1 for one built
+        // for another consensus branch, 2 for an expired one and -1 for an error. Anything else is
+        // as little to be trusted as an error: the transaction stays unsubmitted.
+        let result = zcashlc_check_transaction_submittable(
+            dbData.0,
+            dbData.1,
+            networkType.networkId,
+            txBytes,
+            UInt(txBytes.count),
+            Int64(submissionServerHeight)
+        )
+
+        switch result {
+        case 0:
+            return nil
+        case 1:
+            return TransactionSubmissionRefusal.wrongConsensusBranch
+        case 2:
+            return TransactionSubmissionRefusal.expired
+        default:
+            throw ZcashError.rustCheckTransactionSubmittable(
+                lastErrorMessage(fallback: "`checkTransactionSubmittable` failed with unknown error")
+            )
+        }
+    }
+
     // DB-READ (audited 2026-08-03): get_last_generated_address_matching — SELECT on
     // addresses; generates nothing.
     func getCurrentAddress(accountUUID: AccountUUID) async throws -> UnifiedAddress {

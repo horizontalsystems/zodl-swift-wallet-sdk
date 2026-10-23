@@ -375,14 +375,20 @@ unsafe fn open_read(
     })
 }
 
+/// The wallet's current chain tip, or `None` when it has none yet. A lookup that fails is worded the
+/// same for the migration surface ([`wallet_chain_tip`]) and for the submission check of a raw
+/// transaction, which can do without a tip.
+pub(crate) fn known_chain_tip(wallet: &MigrationWallet) -> anyhow::Result<Option<BlockHeight>> {
+    wallet
+        .chain_height()
+        .map_err(|e| anyhow!("chain height lookup failed: {e}"))
+}
+
 /// The wallet's current chain tip, or an error telling the caller to sync first when it has none.
 /// The one place the migration surface reads the tip, so every call that needs one fails the same
 /// way on a wallet that has not synced.
 fn wallet_chain_tip(wallet: &MigrationWallet) -> anyhow::Result<BlockHeight> {
-    wallet
-        .chain_height()
-        .map_err(|e| anyhow!("chain height lookup failed: {e}"))?
-        .ok_or_else(|| anyhow!("the wallet has no chain tip yet; sync first"))
+    known_chain_tip(wallet)?.ok_or_else(|| anyhow!("the wallet has no chain tip yet; sync first"))
 }
 
 impl CallCtx {
@@ -475,7 +481,7 @@ fn refuse_while_upgrade_gate_closed(ctx: &CallCtx, bypass: bool) -> anyhow::Resu
 /// The height the submission server reported, from the FFI's `i64`. A negative value is the FFI's
 /// "unknown" (the caller could not read it), and a value no block height can have is as unusable:
 /// the submission check fails closed on either rather than judge a transaction against a guess.
-fn known_submission_server_height(height: i64) -> anyhow::Result<BlockHeight> {
+pub(crate) fn known_submission_server_height(height: i64) -> anyhow::Result<BlockHeight> {
     u32::try_from(height)
         .map(BlockHeight::from_u32)
         .map_err(|_| anyhow!("the submission server's height is unknown"))
@@ -486,7 +492,10 @@ fn known_submission_server_height(height: i64) -> anyhow::Result<BlockHeight> {
 /// can lead. The wallet may lag the server by every block it has not synced, and the server may lag
 /// the wallet, so the block a transaction would be mined in is never earlier than the later of the
 /// two.
-fn submission_target(tip: BlockHeight, server_height: BlockHeight) -> anyhow::Result<BlockHeight> {
+pub(crate) fn submission_target(
+    tip: BlockHeight,
+    server_height: BlockHeight,
+) -> anyhow::Result<BlockHeight> {
     u32::from(tip.max(server_height))
         .checked_add(1)
         .map(BlockHeight::from_u32)

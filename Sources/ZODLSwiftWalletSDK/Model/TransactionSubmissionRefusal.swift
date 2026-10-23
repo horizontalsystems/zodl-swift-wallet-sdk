@@ -17,6 +17,13 @@ import Foundation
 /// The server's height counts because the wallet's own chain tip can lag it by every block the
 /// wallet has not synced yet, and a transaction is mined by the chain as the server sees it. When
 /// that height cannot be read, nothing is submitted.
+///
+/// A refusal is reported where the submission is. A migration transaction throws
+/// ``ZcashError/migrationSubmissionRefused(_:)``. Any other transaction is reported as
+/// ``TransactionSubmitResult/submitFailure(txId:code:description:)`` when the synchronizer submits it, and
+/// as ``TransactionSubmissionOutcome/rejected(code:message:)`` when it is submitted to several endpoints,
+/// with the refusal's ``code`` and ``description``. ``networkUpgradeCutoff`` is the migration's alone:
+/// a normal send is never cut off.
 public enum TransactionSubmissionRefusal: Equatable, Sendable, CustomStringConvertible {
     /// The transaction is built for another consensus branch than the next block is under. This is
     /// what a network upgrade does to a transaction created before it and not yet sent: no block

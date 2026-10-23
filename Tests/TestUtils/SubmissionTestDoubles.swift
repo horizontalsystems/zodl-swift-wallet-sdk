@@ -152,6 +152,9 @@ final class EndpointSubmitterMock: EndpointSubmitter {
         case succeed
         case succeedAfter(TimeInterval)
         case reject(code: Int, message: String)
+        /// Refuses the transaction as one that cannot be valid in the next block, which is what the real
+        /// submitter does before it submits, when its check says so.
+        case refuse(TransactionSubmissionRefusal)
         /// Rejects after the delay; an early cancellation shortens the delay
         /// but the rejection is still thrown (a response already in flight).
         case rejectAfter(TimeInterval, code: Int, message: String)
@@ -233,6 +236,9 @@ final class EndpointSubmitterMock: EndpointSubmitter {
 
         case let .reject(code, message):
             throw TransactionEncoderError.submitError(code: code, message: message)
+
+        case let .refuse(refusal):
+            throw TransactionEncoderError.notSubmittable(refusal)
 
         case let .rejectAfter(delay, code, message):
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))

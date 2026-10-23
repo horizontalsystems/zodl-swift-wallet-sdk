@@ -3105,6 +3105,11 @@ private extension SlipstreamSynchronizer {
                     }
                     submitFailed = true
                     return TransactionSubmitResult.submitFailure(txId: transaction.txId, code: code, description: message)
+                } catch TransactionEncoderError.notSubmittable(let refusal) {
+                    // The SDK refused to submit the transaction because it cannot be valid in the next block. Nothing reached the
+                    // network, so there is no server to ask whether it knows the transaction.
+                    submitFailed = true
+                    return TransactionSubmitResult.submitFailure(txId: transaction.txId, code: refusal.code, description: refusal.description)
                 }
             }
         })
