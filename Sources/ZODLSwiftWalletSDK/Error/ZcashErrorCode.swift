@@ -387,6 +387,10 @@ public enum ZcashErrorCode: String {
     case migrationChainTipUnavailable = "ZRUST0147"
     /// Scheduled migration is paused until the network upgrade activates.
     case migrationPausedUntilNetworkUpgrade = "ZRUST0159"
+    /// Error from rust layer when calling ZcashRustBackend.migrationAvailability
+    case rustMigrationAvailability = "ZRUST0160"
+    /// Error from rust layer when calling ZcashRustBackend.migrationCancelRun
+    case rustMigrationCancelRun = "ZRUST0161"
     /// SQLite query failed when fetching all accounts from the database.
     case accountDAOGetAll = "ZADAO0001"
     /// Fetched accounts from SQLite but can't decode them.

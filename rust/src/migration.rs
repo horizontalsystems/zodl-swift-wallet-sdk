@@ -33,7 +33,11 @@
 //!   store or rebuild one refuse with `MIGRATION_PAUSED_UNTIL_UPGRADE:<activation height>`
 //!   ([`refuse_while_upgrade_gate_closed`]), and [`zcashlc_migration_restart_step`] cancels the
 //!   run but plans nothing, reporting the activation height in its outcome. Each of them takes
-//!   the host's `upgrade_gate_bypass`, for internal builds only.
+//!   the host's `upgrade_gate_bypass`, for internal builds only. Two more entry points are never
+//!   refused by the gate: [`zcashlc_migration_cancel_run`] ends a run, the interrupted one
+//!   included, without planning a new one, and [`zcashlc_migration_availability`] reports the
+//!   gate's phase at the wallet's next height (with the same bypass), so that the platform can
+//!   choose what to offer before it calls anything the gate would refuse.
 //! - Mined-ness is DERIVED, never reported: this layer never marks a transaction mined. The
 //!   engine promotes every in-flight transaction its scan has seen mine, inside
 //!   `advance_migration` — including one whose broadcast THIS process failed to record, which it
@@ -347,13 +351,20 @@ unsafe fn open_read(
     })
 }
 
+/// The wallet's current chain tip, or an error telling the caller to sync first when it has none.
+/// The one place the migration surface reads the tip, so every call that needs one fails the same
+/// way on a wallet that has not synced.
+fn wallet_chain_tip(wallet: &MigrationWallet) -> anyhow::Result<BlockHeight> {
+    wallet
+        .chain_height()
+        .map_err(|e| anyhow!("chain height lookup failed: {e}"))?
+        .ok_or_else(|| anyhow!("the wallet has no chain tip yet; sync first"))
+}
+
 impl CallCtx {
     /// The wallet's current chain tip.
     fn tip(&self) -> anyhow::Result<BlockHeight> {
-        self.wallet
-            .chain_height()
-            .map_err(|e| anyhow!("chain height lookup failed: {e}"))?
-            .ok_or_else(|| anyhow!("the wallet has no chain tip yet; sync first"))
+        wallet_chain_tip(&self.wallet)
     }
 
     /// The height the wallet has scanned every block up to, or `None` before it has scanned
@@ -381,24 +392,41 @@ impl CallCtx {
     }
 }
 
-/// The NU7 activation height the scheduled lane is closed until at the wallet's next height, or
-/// `None` when the network-upgrade gate ([`crate::migration_gate`]) lets it through.
+/// The phase of the network-upgrade gate ([`crate::migration_gate`]) at the wallet's next height,
+/// `tip + 1`, with the tip read through `tip` only when the answer needs it.
 ///
-/// The gate is judged at the wallet's own next height, `tip + 1`, and never at a server's or a
-/// wall-clock estimate. It lets everything through, without reading the tip, when `bypass` is set
-/// (internal builds only) or the network has no NU7 activation height.
-fn upgrade_gate_closed_until(ctx: &CallCtx, bypass: bool) -> anyhow::Result<Option<BlockHeight>> {
-    if bypass || nu7_activation(&ctx.network).is_none() {
-        return Ok(None);
+/// The gate is judged at the wallet's own next height and never at a server's or a wall-clock
+/// estimate. It is open at every height, without reading the tip, when `bypass` is set (internal
+/// builds only) or the network has no NU7 activation height, so a wallet that has no chain tip yet
+/// still answers for those. This is the one judgment both the calls the gate refuses
+/// ([`upgrade_gate_closed_until`]) and the availability read
+/// ([`zcashlc_migration_availability`]) make, so the platform is never offered what the gate then
+/// refuses.
+fn current_gate_phase(
+    params: &impl Parameters,
+    bypass: bool,
+    tip: impl FnOnce() -> anyhow::Result<BlockHeight>,
+) -> anyhow::Result<GatePhase> {
+    if bypass || nu7_activation(params).is_none() {
+        return Ok(GatePhase::Open);
     }
-    Ok(match gate_phase(&ctx.network, ctx.target()?, false) {
-        GatePhase::Open => None,
-        // Both stop the scheduled lane: the pause while the activation is far off, and the cutoff
-        // window in the 48 blocks before it, in which the immediate lane stops as well.
-        GatePhase::PausedUntil { activation } | GatePhase::Cutoff { activation } => {
-            Some(activation)
-        }
-    })
+    Ok(gate_phase(params, target_from_tip(tip()?), false))
+}
+
+/// The NU7 activation height the scheduled lane is closed until at the wallet's next height, or
+/// `None` when the network-upgrade gate ([`crate::migration_gate`]) lets it through. See
+/// [`current_gate_phase`] for how the gate is judged.
+fn upgrade_gate_closed_until(ctx: &CallCtx, bypass: bool) -> anyhow::Result<Option<BlockHeight>> {
+    Ok(
+        match current_gate_phase(&ctx.network, bypass, || ctx.tip())? {
+            GatePhase::Open => None,
+            // Both stop the scheduled lane: the pause while the activation is far off, and the cutoff
+            // window in the 48 blocks before it, in which the immediate lane stops as well.
+            GatePhase::PausedUntil { activation } | GatePhase::Cutoff { activation } => {
+                Some(activation)
+            }
+        },
+    )
 }
 
 /// Refuses a call that would plan, build, sign, store or rebuild a scheduled run while the
@@ -2108,6 +2136,53 @@ pub struct FfiMigrationRestartOutcome {
     pub replan_after_height: i64,
 }
 
+/// The phase discriminants of [`FfiMigrationAvailability::phase`], exported into the generated
+/// header so the Swift layer and the marshal share one set of names. They are the phases of the
+/// NU7 network-upgrade gate ([`GatePhase`]) from the platform's side.
+///
+/// Phase 0: both the scheduled and the immediate lane may start. The network has no NU7 activation
+/// height, the wallet's next block is under NU7, or the host's bypass is on.
+pub const ZCASHLC_MIGRATION_AVAILABLE: u32 = 0;
+/// The scheduled lane is paused until the NU7 upgrade has activated and the immediate lane is open:
+/// the wallet's next height is more than 48 blocks before the activation.
+pub const ZCASHLC_MIGRATION_PAUSED_UNTIL_UPGRADE: u32 = 1;
+/// Both lanes are stopped: the wallet's next height is one of the 48 blocks before the NU7
+/// activation.
+pub const ZCASHLC_MIGRATION_UPGRADE_CUTOFF: u32 = 2;
+
+/// What the migration may start at the wallet's next height (returned by
+/// [`zcashlc_migration_availability`]): the NU7 network-upgrade gate's phase, for the platform to
+/// decide which options to offer.
+#[repr(C)]
+pub struct FfiMigrationAvailability {
+    /// The gate's phase (see the `ZCASHLC_MIGRATION_*` constants).
+    pub phase: u32,
+    /// The NU7 activation height of the wallet's network, in every phase; `-1` when the network
+    /// has none, and then the phase is always [`ZCASHLC_MIGRATION_AVAILABLE`].
+    pub activation_height: i64,
+    /// Whether the immediate lane (one transaction that migrates the whole balance) is open:
+    /// `false` only in the cutoff window, [`ZCASHLC_MIGRATION_UPGRADE_CUTOFF`].
+    pub immediate_available: bool,
+}
+
+impl FfiMigrationAvailability {
+    /// The availability for the gate's `phase` on a network whose NU7 activation height is
+    /// `activation`. Exhaustive over the phases (no wildcard arm): a new phase must be assigned an
+    /// explicit number and an answer for the immediate lane here, not fall into the last arm.
+    fn new(phase: GatePhase, activation: Option<BlockHeight>) -> Self {
+        let (phase, immediate_available) = match phase {
+            GatePhase::Open => (ZCASHLC_MIGRATION_AVAILABLE, true),
+            GatePhase::PausedUntil { .. } => (ZCASHLC_MIGRATION_PAUSED_UNTIL_UPGRADE, true),
+            GatePhase::Cutoff { .. } => (ZCASHLC_MIGRATION_UPGRADE_CUTOFF, false),
+        };
+        FfiMigrationAvailability {
+            phase,
+            activation_height: height_opt_to_i64(activation),
+            immediate_available,
+        }
+    }
+}
+
 /// A single run's estimate (element of [`FfiMigrationRunEstimate`]): what one migration run
 /// migrates (the note-split side) and what preparing it costs (the note-preparation side), so
 /// the two can be compared.
@@ -2502,6 +2577,17 @@ pub unsafe extern "C" fn zcashlc_free_migration_restart_outcome(
         // function accepts.
         unsafe { zcashlc_free_migration_schedule(boxed.schedule) };
         drop(boxed);
+    }
+}
+
+/// Frees a [`FfiMigrationAvailability`].
+///
+/// # Safety
+/// `ptr` must be null or point to a [`FfiMigrationAvailability`] handed out by this module.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zcashlc_free_migration_availability(ptr: *mut FfiMigrationAvailability) {
+    if !ptr.is_null() {
+        drop(unsafe { Box::from_raw(ptr) });
     }
 }
 
@@ -3113,6 +3199,51 @@ pub unsafe extern "C" fn zcashlc_migration_block_rate_samples(
             });
         let (rows, len) = ptr_from_vec(samples);
         Ok(Box::into_raw(Box::new(FfiBlockRateSamples { rows, len })))
+    });
+    unwrap_exc_or_null(res)
+}
+
+/// What the migration may start at the wallet's next height, for the platform to decide which
+/// options to offer before anything is planned: the phase of the NU7 network-upgrade gate
+/// ([`crate::migration_gate`]) as [`FfiMigrationAvailability::phase`], the network's NU7 activation
+/// height, and whether the immediate lane is open.
+///
+/// The read is judged at the wallet's own next height, `tip + 1`, exactly as the calls the gate
+/// refuses are, and never at a server's height or a wall-clock estimate. It opens the wallet
+/// read-only, the way the read entry points do, and takes no account: the gate depends on the chain
+/// alone. A wallet with no chain tip, on a network that has an NU7 activation height, fails with the
+/// usual "sync first" error and returns NULL: the gate cannot be judged. The answer needs no tip
+/// when `upgrade_gate_bypass` is set or the network has no NU7 height, and then the phase is
+/// [`ZCASHLC_MIGRATION_AVAILABLE`] at every height.
+///
+/// `upgrade_gate_bypass` is for internal builds: it opens the gate at every height, as it does for
+/// the calls the gate refuses.
+///
+/// # Safety
+/// - `db_data` must be valid for reads of `db_data_len` bytes and encode a filesystem path.
+///
+/// Free the returned pointer with [`zcashlc_free_migration_availability`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zcashlc_migration_availability(
+    db_data: *const u8,
+    db_data_len: usize,
+    network_id: u32,
+    upgrade_gate_bypass: bool,
+) -> *mut FfiMigrationAvailability {
+    let res = catch_panic(|| {
+        let network = parse_network(network_id)?;
+        let db_path = PathBuf::from(OsStr::from_bytes(unsafe {
+            slice::from_raw_parts(db_data, db_data_len)
+        }));
+        crate::require_wallet_db(&db_path, "using the migration surface")?;
+        let wallet =
+            unsafe { crate::wallet_db_read_only(system_rng(), db_data, db_data_len, network)? };
+        let phase =
+            current_gate_phase(&network, upgrade_gate_bypass, || wallet_chain_tip(&wallet))?;
+        Ok(Box::into_raw(Box::new(FfiMigrationAvailability::new(
+            phase,
+            nu7_activation(&network),
+        ))))
     });
     unwrap_exc_or_null(res)
 }
@@ -4321,6 +4452,20 @@ pub unsafe extern "C" fn zcashlc_migration_record_immediate_run(
     unwrap_exc_or(res, false)
 }
 
+/// Cancels the account's pending run through the store's own cancel: it releases every note
+/// reservation the run's never-broadcast transactions hold and records the terminal `Cancelled`
+/// status, in one store transaction. Hand-writing `Failed` (the pre-locking behavior) would leave
+/// those reservations standing. With no run pending it only repairs the reservations a terminal run
+/// still holds, so it succeeds. The restart ([`zcashlc_migration_restart_step`]) and the
+/// cancel-only entry point ([`zcashlc_migration_cancel_run`]) both end a run with this.
+fn cancel_pending_run(ctx: &mut CallCtx) -> anyhow::Result<()> {
+    let mut store = account_store(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
+    store
+        .cancel_migration()
+        .map(|_outcome| ())
+        .map_err(|e| anyhow!("cancelling the migration failed: {e}"))
+}
+
 /// Cancels the stored run through the engine's own cancel (persisting it as `Cancelled` and
 /// releasing every note reservation its never-broadcast transactions hold — its pre-signed
 /// transactions are abandoned; already-broadcast ones are unaffected on-chain) and, where the
@@ -4367,18 +4512,9 @@ pub unsafe extern "C" fn zcashlc_migration_restart_step(
                 network_id,
             )?
         };
-        {
-            let mut store = account_store(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
-            // The engine's own cancel: releases every note reservation the pending run's
-            // never-broadcast transactions hold and records the terminal `Cancelled` status, in
-            // one store transaction. Hand-writing `Failed` (the pre-locking behavior) would
-            // leave those reservations standing, and the fresh plan below would select around
-            // notes the abandoned run still holds.
-            store
-                .cancel_migration()
-                .map(|_outcome| ())
-                .map_err(|e| anyhow!("cancelling the migration failed: {e}"))?;
-        }
+        // The fresh plan below would select around notes the abandoned run still holds, so the
+        // run is cancelled the engine's way first.
+        cancel_pending_run(&mut ctx)?;
         // Judged after the cancel, which stands whatever the gate says: a restart is how a run the
         // upgrade is about to strand is retired, so it may not fail where only the new plan has to
         // wait.
@@ -4401,6 +4537,51 @@ pub unsafe extern "C" fn zcashlc_migration_restart_step(
         })))
     });
     unwrap_exc_or_null(res)
+}
+
+/// Cancels the account's pending run and nothing more: the engine's own cancel persists it as
+/// `Cancelled` and releases every note reservation and advisory lock its never-broadcast
+/// transactions hold, so those notes are spendable again at once. The run's pre-signed
+/// transactions are abandoned; already-broadcast ones are unaffected on-chain and may still mine.
+/// The cached proposal is dropped, so a plan previewed before the cancel cannot be committed
+/// after it. Unlike [`zcashlc_migration_restart_step`], which cancels the same way, nothing is
+/// planned afterwards.
+///
+/// This is how the platform ends a run the NU7 upgrade interrupted
+/// ([`ZCASHLC_ADVANCE_STEP_INTERRUPTED_BY_NETWORK_UPGRADE`]) before it offers the user a new
+/// migration. The stored run is terminal afterwards, so [`zcashlc_migration_advance_step`] answers
+/// [`ZCASHLC_ADVANCE_STEP_COMPLETE`] for it, and a later restart or commit starts over. With no run
+/// pending the call is a no-op success; with only a terminal run it repairs any reservation that
+/// run still holds, and leaves its status as it was.
+///
+/// The call is never gated: the network-upgrade gate stops what starts a run, not what ends one,
+/// so it takes no `upgrade_gate_bypass`, and it needs no chain tip. Returns `true` on success and
+/// `false` with the last error set otherwise.
+///
+/// # Safety
+/// See [`open`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zcashlc_migration_cancel_run(
+    db_data: *const u8,
+    db_data_len: usize,
+    account_uuid_bytes: *const u8,
+    network_id: u32,
+) -> bool {
+    let res = catch_panic(|| {
+        let mut ctx = unsafe {
+            open(
+                system_rng(),
+                db_data,
+                db_data_len,
+                account_uuid_bytes,
+                network_id,
+            )?
+        };
+        cancel_pending_run(&mut ctx)?;
+        migration_plan_cache::clear(&ctx.db_path, ctx.account_bytes);
+        Ok(true)
+    });
+    unwrap_exc_or(res, false)
 }
 
 /// Rebuilds every EXPIRED migration transfer of the stored run in place through the engine
@@ -9218,6 +9399,11 @@ mod tests {
     /// Initializes a wallet database at a unique temp path (removing any leftover), returning the
     /// path. The refresh fixtures all start here, mirroring a real caller's `init_data_db`.
     fn init_fixture_db(prefix: &str) -> PathBuf {
+        init_fixture_db_on(prefix, NETWORK_ID_MAINNET)
+    }
+
+    /// [`init_fixture_db`] for the network `network_id` names.
+    fn init_fixture_db_on(prefix: &str, network_id: u32) -> PathBuf {
         let path = std::env::temp_dir().join(format!("{prefix}_{}.sqlite", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let path_bytes = path.to_str().unwrap().as_bytes();
@@ -9227,7 +9413,7 @@ mod tests {
                 path_bytes.len(),
                 std::ptr::null(),
                 0,
-                NETWORK_ID_MAINNET,
+                network_id,
             )
         };
         assert!(init >= 0, "wallet-db initialization must succeed");
@@ -12456,6 +12642,17 @@ mod tests {
     /// `commit_or_resume` directly and so passes through no gate. Every transaction of the run is
     /// built for the consensus branch of the block after `commit_tip`.
     fn committed_run_fixture(tag: &str, commit_tip: u32) -> (PathBuf, [u8; 16]) {
+        let (path, account, _plan) = committed_run_and_plan_fixture(tag, commit_tip);
+        (path, account)
+    }
+
+    /// [`committed_run_fixture`], and the plan the run was committed from. Committing drops the
+    /// plan from the cache, so a test that wants a proposal under review beside the run puts the
+    /// plan back with [`migration_plan_cache::set`].
+    fn committed_run_and_plan_fixture(
+        tag: &str,
+        commit_tip: u32,
+    ) -> (PathBuf, [u8; 16], MigrationPlan) {
         let path = init_fixture_db(&format!("zcashlc_gate_run_{tag}"));
         let (account, usk_bytes) = create_fixture_account_with_usk(&path);
         fund_fixture_account_with_orchard_note(&path, &usk_bytes, GATE_FIXTURE_FUNDING);
@@ -12472,7 +12669,7 @@ mod tests {
             )
         }
         .expect("the fixture context opens");
-        let (_plan, _reference_height, handle) = plan_and_cache(&mut system_rng(), &mut ctx, false)
+        let (plan, _reference_height, handle) = plan_and_cache(&mut system_rng(), &mut ctx, false)
             .expect("planning must succeed")
             .expect("the funded account has a real migration plan");
         let usk = unsafe { crate::decode_usk(usk_bytes.as_ptr(), usk_bytes.len()) }
@@ -12485,7 +12682,7 @@ mod tests {
             handle,
         )
         .expect("the fixture run commits");
-        (path, account)
+        (path, account, plan)
     }
 
     /// The step discriminants are an ABI hosts may match on by number: 8 and 9 are new, and 5 is
@@ -13297,14 +13494,36 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// A custom network on which every upgrade up to NU6.3 activates at height 1 and NU7 never
+    /// does.
+    fn network_without_nu7() -> NetworkParams {
+        use zcash_protocol::consensus::NetworkType;
+        use zcash_protocol::local_consensus::LocalNetwork;
+
+        let one = Some(h(1));
+        NetworkParams::Custom {
+            base: NetworkType::Main,
+            local: LocalNetwork {
+                overwinter: one,
+                sapling: one,
+                blossom: one,
+                heartwood: one,
+                canopy: one,
+                nu5: one,
+                nu6: one,
+                nu6_1: one,
+                nu6_2: one,
+                nu6_3: one,
+                nu7: None,
+            },
+        }
+    }
+
     /// Without the bypass, and on a network that has an NU7 height, the gate needs the wallet's
     /// tip, and fails the way every tip read does when there is none. The bypass, and a network
     /// with no NU7 height, are answered without reading it.
     #[test]
     fn the_gate_reads_no_tip_with_the_bypass_or_on_a_network_without_nu7() {
-        use zcash_protocol::consensus::NetworkType;
-        use zcash_protocol::local_consensus::LocalNetwork;
-
         let path = init_fixture_db("zcashlc_gate_entry_no_tip");
         let account = create_fixture_account(&path);
         let path_bytes = path.to_str().unwrap().as_bytes();
@@ -13328,24 +13547,7 @@ mod tests {
             "unexpected error: {error}"
         );
 
-        // Every upgrade up to NU6.3 at height 1, and no NU7.
-        let one = Some(h(1));
-        ctx.network = NetworkParams::Custom {
-            base: NetworkType::Main,
-            local: LocalNetwork {
-                overwinter: one,
-                sapling: one,
-                blossom: one,
-                heartwood: one,
-                canopy: one,
-                nu5: one,
-                nu6: one,
-                nu6_1: one,
-                nu6_2: one,
-                nu6_3: one,
-                nu7: None,
-            },
-        };
+        ctx.network = network_without_nu7();
         refuse_while_upgrade_gate_closed(&ctx, false)
             .expect("a network with no NU7 height is never gated");
         let _ = std::fs::remove_file(&path);
@@ -13449,6 +13651,522 @@ mod tests {
                 "{tag}"
             );
             let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    // ----- the cancel-only entry point -----
+    //
+    // `zcashlc_migration_cancel_run` ends the account's pending run and nothing more: where a
+    // restart goes on to plan a fresh one, it plans none, and it is never refused by the NU7
+    // network-upgrade gate, which stops what starts a run, not what ends one. Mainnet fixtures.
+
+    /// Cancels the fixture wallet's run over the FFI and answers what the call returned. The last
+    /// error is cleared first and left for the caller to read.
+    fn cancel_fixture_run(path: &std::path::Path, account: &[u8; 16]) -> bool {
+        let path_bytes = path.to_str().unwrap().as_bytes();
+        crate::zcashlc_clear_last_error();
+        unsafe {
+            zcashlc_migration_cancel_run(
+                path_bytes.as_ptr(),
+                path_bytes.len(),
+                account.as_ptr(),
+                NETWORK_ID_MAINNET,
+            )
+        }
+    }
+
+    /// How many runs the account has stored, a cancelled one included.
+    fn fixture_run_count(path: &std::path::Path, account: &[u8; 16]) -> usize {
+        let mut conn = Connection::open(path).expect("the verification connection opens");
+        let account_id = account_uuid_from_bytes(account.as_ptr()).expect("16 uuid bytes");
+        PoolMigrations::for_account(
+            NetworkParams::Standard(Network::TestNetwork),
+            SystemClock,
+            &mut conn,
+            account_id,
+        )
+        .expect("the account-keyed store resolves the fixture account")
+        .list_migrations()
+        .expect("the store lists the account's runs")
+        .len()
+    }
+
+    /// Models what proving does to a committed run, without the proofs: the notes its transactions
+    /// spend are locked under a token, and every transaction of the stored run becomes `Proved`
+    /// and records that token, which is how a cancel finds the locks to release. Committing alone
+    /// reserves nothing; the prover takes the locks.
+    fn reserve_fixture_funding_for_the_run(path: &std::path::Path, account: &[u8; 16]) {
+        let token = [0x5A; 32];
+        let path_bytes = path.to_str().unwrap().as_bytes();
+        let mut ctx = unsafe {
+            open(
+                system_rng(),
+                path_bytes.as_ptr(),
+                path_bytes.len(),
+                account.as_ptr(),
+                NETWORK_ID_MAINNET,
+            )
+        }
+        .expect("the fixture context opens");
+
+        let target = TargetHeight::from(u32::from(ctx.tip().expect("the fixture has a tip")) + 1);
+        let received = ctx
+            .wallet
+            .select_unspent_notes(
+                ctx.account,
+                &[ShieldedPool::Orchard],
+                target,
+                &[],
+                LockFilter::Policy(&LockedInputPolicy::Exclude),
+            )
+            .expect("the funded note selects");
+        let refs: Vec<OutputRef> = received
+            .orchard()
+            .iter()
+            .map(|rn| {
+                OutputRef::new(
+                    *rn.txid(),
+                    PoolType::Shielded(ShieldedPool::Orchard),
+                    u32::from(rn.output_index()),
+                )
+            })
+            .collect();
+        assert!(!refs.is_empty(), "the fixture holds a spendable note");
+        ctx.wallet
+            .lock_outputs(&refs, LockOwner::new(token), BlockHeight::from(u32::MAX))
+            .expect("the funded note locks");
+
+        let mut store = account_store(&ctx.wallet, ctx.account, &mut ctx.store_conn)
+            .expect("the account-keyed store resolves the fixture account");
+        let mut state = store
+            .latest_migration()
+            .expect("the store reads")
+            .expect("the fixture run is stored");
+        let pczts: Vec<(MigrationTransferId, Vec<u8>)> = state
+            .transactions()
+            .iter()
+            .map(|tx| (tx.id(), tx.pczt().clone()))
+            .collect();
+        for (id, pczt) in pczts {
+            state.set_transaction_proved(id, pczt, Some(MigrationLockOwner::from_bytes(token)));
+        }
+        store
+            .replace_migration(&state)
+            .expect("the proved run stores");
+    }
+
+    /// A cancel ends the run and hands back everything it held: the notes its never-broadcast
+    /// transactions reserved are spendable at once, with no replacement run planned, so the stored
+    /// run is the cancelled one, and the proposal under review is dropped with it (a restart that
+    /// planned would have replaced it with a new one). A second cancel finds nothing pending and
+    /// changes nothing, which is what lets a host retry.
+    #[test]
+    fn cancel_run_releases_never_broadcast_transactions_without_replanning() {
+        let (path, account, plan) = committed_run_and_plan_fixture("cancel_run", 3_600_000);
+        reserve_fixture_funding_for_the_run(&path, &account);
+        assert!(
+            !stored_fixture_run(&path, &account)
+                .expect("the committed run is stored")
+                .is_terminal(),
+            "the fixture run is pending"
+        );
+        assert_eq!(
+            spendable_fixture_orchard(&path, &account),
+            0,
+            "the run holds the funded note"
+        );
+        // A proposal under review beside the run: the commit emptied the cache, so put it back.
+        let handle =
+            migration_plan_cache::set(&mut system_rng(), path.clone(), account, plan, false);
+        assert!(
+            migration_plan_cache::get(&path, account, handle).is_ok(),
+            "the proposal is cached"
+        );
+
+        assert!(
+            cancel_fixture_run(&path, &account),
+            "a cancel must succeed: {:?}",
+            ffi_helpers::error_handling::error_message()
+        );
+
+        assert_eq!(crate::zcashlc_last_error_length(), 0);
+        assert_eq!(
+            stored_fixture_run(&path, &account)
+                .expect("the cancelled run stays stored")
+                .status(),
+            MigrationStatus::Cancelled
+        );
+        assert_eq!(
+            fixture_run_count(&path, &account),
+            1,
+            "a cancel plans and stores no new run"
+        );
+        assert_eq!(
+            spendable_fixture_orchard(&path, &account),
+            GATE_FIXTURE_FUNDING,
+            "the cancelled run gives the funded note back"
+        );
+        assert!(
+            matches!(
+                migration_plan_cache::get(&path, account, handle),
+                Err(migration_plan_cache::PlanLookupError::Missing)
+            ),
+            "a cancel drops the cached proposal and caches no new one"
+        );
+
+        assert!(
+            cancel_fixture_run(&path, &account),
+            "a second cancel is a no-op"
+        );
+        assert_eq!(crate::zcashlc_last_error_length(), 0);
+        assert_eq!(
+            stored_fixture_run(&path, &account)
+                .expect("the cancelled run stays stored")
+                .status(),
+            MigrationStatus::Cancelled
+        );
+        assert_eq!(fixture_run_count(&path, &account), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// With no run pending there is nothing to end: the call succeeds, records no error, and
+    /// stores nothing.
+    #[test]
+    fn cancel_run_without_a_pending_run_is_a_no_op_success() {
+        let (path, account, _usk) = pre_activation_fixture("cancel_no_run", 3_600_000);
+
+        assert!(
+            cancel_fixture_run(&path, &account),
+            "cancelling nothing must succeed: {:?}",
+            ffi_helpers::error_handling::error_message()
+        );
+
+        assert_eq!(crate::zcashlc_last_error_length(), 0);
+        assert!(
+            stored_fixture_run(&path, &account).is_none(),
+            "cancelling nothing stores nothing"
+        );
+        assert_eq!(
+            spendable_fixture_orchard(&path, &account),
+            GATE_FIXTURE_FUNDING
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The upgrade gate stops what starts a run, never what ends one, so a cancel works under the
+    /// pause (the next height is 3,543,001) and inside the cutoff window (3,543,357) alike, with
+    /// no bypass to lift it.
+    #[test]
+    fn cancel_run_is_not_gated_by_the_network_upgrade() {
+        for tip in [3_543_000, 3_543_356] {
+            let (path, account) = committed_run_fixture(&format!("cancel_gate_{tip}"), tip);
+
+            assert!(
+                cancel_fixture_run(&path, &account),
+                "tip {tip}: a cancel must not be refused: {:?}",
+                ffi_helpers::error_handling::error_message()
+            );
+
+            assert_eq!(crate::zcashlc_last_error_length(), 0, "tip {tip}");
+            assert_eq!(
+                stored_fixture_run(&path, &account)
+                    .expect("the cancelled run stays stored")
+                    .status(),
+                MigrationStatus::Cancelled,
+                "tip {tip}"
+            );
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    /// The host's flow for a run the upgrade interrupted is to cancel it and crank again. The
+    /// cancelled run is terminal, and the terminal check comes before the upgrade's verdict, so the
+    /// crank after the cancel answers COMPLETE and not INTERRUPTED once more: a host that cancelled
+    /// has nothing left to be told, and the bypass changes neither answer. The run is REAL,
+    /// committed at 3,543,000 and so built for NU6.3, with every transaction of it unmined.
+    #[test]
+    fn advance_step_reports_complete_for_a_run_cancelled_after_activation() {
+        let (path, account) = committed_run_fixture("cancelled_after_activation", 3_543_000);
+        let path_bytes = path.to_str().unwrap().as_bytes();
+
+        // The next block is the activation block, which the run was not built for.
+        set_fixture_tip_at(path_bytes, 3_543_404);
+        let interrupted = read_gated_step(path_bytes, &account, -1, false);
+        assert_eq!(
+            interrupted.step, ZCASHLC_ADVANCE_STEP_INTERRUPTED_BY_NETWORK_UPGRADE,
+            "{interrupted:?}"
+        );
+
+        assert!(
+            cancel_fixture_run(&path, &account),
+            "the interrupted run cancels: {:?}",
+            ffi_helpers::error_handling::error_message()
+        );
+
+        for bypass in [false, true] {
+            let cancelled = read_gated_step(path_bytes, &account, -1, bypass);
+            assert_eq!(
+                cancelled.step, ZCASHLC_ADVANCE_STEP_COMPLETE,
+                "bypass {bypass}: {cancelled:?}"
+            );
+            assert_eq!(cancelled.network_upgrade_height, -1, "bypass {bypass}");
+            assert_eq!(cancelled.next_height, -1, "bypass {bypass}");
+            assert_eq!(cancelled.id, 0, "bypass {bypass}");
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ----- the availability read -----
+    //
+    // `zcashlc_migration_availability` reports the NU7 gate's phase at the wallet's next height to
+    // the platform, which decides from it what to offer. It takes no account, opens the wallet
+    // read-only, and judges the wallet's own chain tip alone. Mainnet fixtures: NU7 activates at
+    // 3,543,405, so the pause holds the tips through 3,543,355, the cutoff window the tips from
+    // 3,543,356 through 3,543,403, and the tip 3,543,404, whose next block is the activation
+    // block, opens the gate. Testnet activates NU7 at 4,465,026.
+
+    /// What one availability read hands back, copied out of the DTO before it is freed.
+    #[derive(Debug, PartialEq, Eq)]
+    struct ReadAvailability {
+        phase: u32,
+        activation_height: i64,
+        immediate_available: bool,
+    }
+
+    /// Reads the availability over the FFI, and answers the last error it recorded when it
+    /// returned NULL. Frees the DTO after copying it out.
+    fn read_availability(
+        path_bytes: &[u8],
+        network_id: u32,
+        bypass: bool,
+    ) -> Result<ReadAvailability, String> {
+        crate::zcashlc_clear_last_error();
+        let ptr = unsafe {
+            zcashlc_migration_availability(
+                path_bytes.as_ptr(),
+                path_bytes.len(),
+                network_id,
+                bypass,
+            )
+        };
+        if ptr.is_null() {
+            return Err(ffi_helpers::error_handling::error_message()
+                .expect("a read that returns NULL records an error"));
+        }
+        let dto = unsafe { &*ptr };
+        let read = ReadAvailability {
+            phase: dto.phase,
+            activation_height: dto.activation_height,
+            immediate_available: dto.immediate_available,
+        };
+        unsafe { zcashlc_free_migration_availability(ptr) };
+        Ok(read)
+    }
+
+    /// The availability follows the wallet's tip through the gate's phases, on a wallet that has
+    /// no account at all: the pause leaves the immediate lane open, the cutoff window closes it,
+    /// and the activation block opens everything. The activation height is the network's, in every
+    /// phase.
+    #[test]
+    fn availability_reports_each_phase_at_the_wallet_tip() {
+        let path = init_fixture_db("zcashlc_availability_phases");
+        let path_bytes = path.to_str().unwrap().as_bytes();
+
+        for (tip, phase, immediate_available) in [
+            (3_543_000, ZCASHLC_MIGRATION_PAUSED_UNTIL_UPGRADE, true),
+            (3_543_355, ZCASHLC_MIGRATION_PAUSED_UNTIL_UPGRADE, true),
+            (3_543_356, ZCASHLC_MIGRATION_UPGRADE_CUTOFF, false),
+            (3_543_403, ZCASHLC_MIGRATION_UPGRADE_CUTOFF, false),
+            (3_543_404, ZCASHLC_MIGRATION_AVAILABLE, true),
+            (3_600_000, ZCASHLC_MIGRATION_AVAILABLE, true),
+        ] {
+            set_fixture_tip_at(path_bytes, tip);
+
+            let availability = read_availability(path_bytes, NETWORK_ID_MAINNET, false)
+                .unwrap_or_else(|e| panic!("tip {tip}: the read must succeed: {e}"));
+
+            assert_eq!(
+                availability,
+                ReadAvailability {
+                    phase,
+                    activation_height: 3_543_405,
+                    immediate_available,
+                },
+                "tip {tip}"
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The host's bypass opens the gate at the heights it would close: the same wallet that reports
+    /// the cutoff window, and the pause, reports an open gate when the bypass is on.
+    #[test]
+    fn availability_is_open_with_the_bypass() {
+        let path = init_fixture_db("zcashlc_availability_bypass");
+        let path_bytes = path.to_str().unwrap().as_bytes();
+
+        for (tip, phase_without_the_bypass) in [
+            (3_543_000, ZCASHLC_MIGRATION_PAUSED_UNTIL_UPGRADE),
+            (3_543_356, ZCASHLC_MIGRATION_UPGRADE_CUTOFF),
+        ] {
+            set_fixture_tip_at(path_bytes, tip);
+
+            assert_eq!(
+                read_availability(path_bytes, NETWORK_ID_MAINNET, false)
+                    .expect("the read must succeed")
+                    .phase,
+                phase_without_the_bypass,
+                "tip {tip}"
+            );
+            assert_eq!(
+                read_availability(path_bytes, NETWORK_ID_MAINNET, true),
+                Ok(ReadAvailability {
+                    phase: ZCASHLC_MIGRATION_AVAILABLE,
+                    activation_height: 3_543_405,
+                    immediate_available: true,
+                }),
+                "tip {tip}"
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The gate takes the network's own activation height: testnet is past its NU7 at 4,500,000,
+    /// so everything is open there, and the height reported is testnet's.
+    #[test]
+    fn availability_is_open_on_testnet_after_activation() {
+        let path = init_fixture_db_on("zcashlc_availability_testnet", NETWORK_ID_TESTNET);
+        let path_bytes = path.to_str().unwrap().as_bytes();
+        assert!(
+            unsafe {
+                crate::zcashlc_update_chain_tip(
+                    path_bytes.as_ptr(),
+                    path_bytes.len(),
+                    4_500_000,
+                    NETWORK_ID_TESTNET,
+                )
+            },
+            "chain-tip update must succeed"
+        );
+
+        assert_eq!(
+            read_availability(path_bytes, NETWORK_ID_TESTNET, false),
+            Ok(ReadAvailability {
+                phase: ZCASHLC_MIGRATION_AVAILABLE,
+                activation_height: 4_465_026,
+                immediate_available: true,
+            })
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The gate cannot be judged without a chain tip, so a wallet that has none fails the way
+    /// every tip read does. With the bypass the gate is open at every height and the answer needs
+    /// no tip.
+    #[test]
+    fn availability_without_a_chain_tip_is_an_error() {
+        let path = init_fixture_db("zcashlc_availability_no_tip");
+        let path_bytes = path.to_str().unwrap().as_bytes();
+
+        let error = read_availability(path_bytes, NETWORK_ID_MAINNET, false)
+            .expect_err("a wallet with no chain tip has no phase");
+        assert!(error.contains("sync first"), "unexpected error: {error}");
+
+        assert_eq!(
+            read_availability(path_bytes, NETWORK_ID_MAINNET, true),
+            Ok(ReadAvailability {
+                phase: ZCASHLC_MIGRATION_AVAILABLE,
+                activation_height: 3_543_405,
+                immediate_available: true,
+            })
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The read opens the wallet database itself, so it keeps the refusals every migration call
+    /// has: a path with no database is an error that neither creates the file nor carries the
+    /// path, and a `file:` URI, the form the Swift SDK passes, names a wallet like any other.
+    #[test]
+    fn availability_refuses_a_missing_wallet_database_and_reads_one_named_by_a_file_uri() {
+        let missing = std::env::temp_dir().join(format!(
+            "zcashlc_availability_missing_{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&missing);
+        let error = read_availability(
+            missing.to_str().unwrap().as_bytes(),
+            NETWORK_ID_MAINNET,
+            false,
+        )
+        .expect_err("a missing wallet database has no availability");
+        assert!(
+            error.contains("does not exist"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !error.contains(missing.to_str().unwrap()),
+            "the refusal must not leak the database path: {error}"
+        );
+        assert!(!missing.exists(), "the read must not create the database");
+
+        let path = init_fixture_db("zcashlc_availability_file_uri");
+        set_fixture_tip_at(path.to_str().unwrap().as_bytes(), 3_543_000);
+        // The temp path is absolute, so this is `file:///...`.
+        let uri = format!("file://{}", path.display());
+        assert_eq!(
+            read_availability(uri.as_bytes(), NETWORK_ID_MAINNET, false)
+                .expect("a wallet named by a file URI reads")
+                .phase,
+            ZCASHLC_MIGRATION_PAUSED_UNTIL_UPGRADE
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A network with no NU7 activation height is never gated, so its availability needs no chain
+    /// tip, is open, and reports `-1` where it would name the activation height. No network id the
+    /// FFI takes names such a network without registering a custom one process-wide, so this is
+    /// asserted on the two pieces the read is made of.
+    #[test]
+    fn availability_of_a_network_without_nu7_needs_no_tip_and_names_no_activation() {
+        let network = network_without_nu7();
+
+        let phase = current_gate_phase(&network, false, || Err(anyhow!("the wallet has no tip")))
+            .expect("a network with no NU7 height needs no tip");
+        let availability = FfiMigrationAvailability::new(phase, nu7_activation(&network));
+
+        assert_eq!(availability.phase, ZCASHLC_MIGRATION_AVAILABLE);
+        assert_eq!(availability.activation_height, -1);
+        assert!(availability.immediate_available);
+    }
+
+    /// The tip is read only when the phase needs it, and the phase is the gate's at the height
+    /// after it: the same answer the calls the gate refuses are judged by.
+    #[test]
+    fn current_gate_phase_reads_the_tip_only_when_it_has_to() {
+        use zcash_protocol::consensus::MAIN_NETWORK;
+
+        let activation = h(3_543_405);
+        let no_tip = || -> anyhow::Result<BlockHeight> { Err(anyhow!("the wallet has no tip")) };
+
+        assert_eq!(
+            current_gate_phase(&MAIN_NETWORK, true, no_tip).expect("the bypass needs no tip"),
+            GatePhase::Open
+        );
+        assert!(
+            current_gate_phase(&MAIN_NETWORK, false, no_tip).is_err(),
+            "without the bypass a network with an NU7 height needs the tip"
+        );
+        for (tip, expected) in [
+            (3_543_355, GatePhase::PausedUntil { activation }),
+            (3_543_356, GatePhase::Cutoff { activation }),
+            (3_543_403, GatePhase::Cutoff { activation }),
+            (3_543_404, GatePhase::Open),
+        ] {
+            assert_eq!(
+                current_gate_phase(&MAIN_NETWORK, false, || Ok(h(tip))).expect("the tip reads"),
+                expected,
+                "tip {tip}"
+            );
         }
     }
 

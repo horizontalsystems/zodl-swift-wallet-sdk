@@ -1525,7 +1525,7 @@ are answered from the wallet's own chain tip, in front of the engine's step:
   execute, and there is no outlook.
 - `.interruptedByNetworkUpgrade(activationHeight:)` — the wallet is past the activation and a transaction of
   the run that is not mined was built for the branch before it, so the run cannot complete. Cancel the run
-  and offer the user a new migration.
+  with `cancelMigrationRun(accountUUID:)` and offer the user a new migration.
 
 `.reevaluate` has a second meaning around the activation: the wallet's scan has not reached the last block
 before it, so it cannot yet tell a stranded run from a finished one. Sync and ask again, as for a rejected
@@ -1551,14 +1551,14 @@ case .pausedForNetworkUpgrade(let activationHeight):
     break
 case .interruptedByNetworkUpgrade(let activationHeight):
     // The run cannot complete: cancel it and offer a new migration.
-    break
+    try await synchronizer.cancelMigrationRun(accountUUID: account)
 case .replan, .reevaluate, .waiting, .complete, nil:
     break
 }
 ```
 
-`Synchronizer` also gained `setMigrationNetworkUpgradeGateBypass(_:)`, which has a default implementation, so a
-custom conformer needs no change.
+`Synchronizer` also gained `setMigrationNetworkUpgradeGateBypass(_:)`, `migrationAvailability()` and
+`cancelMigrationRun(accountUUID:)`, which have default implementations, so a custom conformer needs no change.
 
 ## `restartCurrentMigrationStep` returns `MigrationRestartOutcome`
 
@@ -1611,6 +1611,26 @@ case .migrationPausedUntilNetworkUpgrade(let activationHeight):
 ```
 
 For internal builds, `setMigrationNetworkUpgradeGateBypass(_:)` turns the refusal off.
+
+## `ZcashError` gained two cases — `rustMigrationAvailability` and `rustMigrationCancelRun`
+
+`ZcashError` and `ZcashErrorCode` have two new cases, `rustMigrationAvailability` (`ZRUST0160`) and
+`rustMigrationCancelRun` (`ZRUST0161`), each with the rust layer's message as its payload. `migrationAvailability()`
+throws the first, notably for a wallet that has no chain tip yet on a network with an NU7 activation height, and
+`cancelMigrationRun(accountUUID:)` throws the second. An exhaustive `switch` over either type stops compiling
+until they are handled.
+
+```swift
+case .rustMigrationAvailability:
+    // The wallet has not synced yet, so the migration's options cannot be judged: sync, then ask again.
+    break
+case .rustMigrationCancelRun:
+    // The run could not be cancelled and is still stored: log it, and try again.
+    break
+```
+
+Both calls are new requirements of `Synchronizer` with default implementations that throw, so a custom
+conformer needs no change.
 
 ## The pool-migration surface rides the final engine
 

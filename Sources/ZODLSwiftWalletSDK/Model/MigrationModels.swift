@@ -732,6 +732,50 @@ public enum MigrationRestartOutcome: Equatable, Sendable {
     case cancelledUntilNetworkUpgrade(activationHeight: BlockHeight)
 }
 
+/// What the migration may start at the wallet's next height, as
+/// `Synchronizer.migrationAvailability()` reports it, for deciding which options to offer before
+/// anything is planned.
+///
+/// A transaction commits to the consensus branch it was built for, and a block accepts only
+/// transactions of the branch its own height is under. The scheduled lane builds a whole run ahead
+/// of time and sends it over many blocks, so a run started before the NU7 network upgrade activates
+/// would be stranded by it. The immediate lane is one transaction, sent at once. The phase follows
+/// from that, judged at the wallet's own chain tip alone.
+public struct MigrationAvailability: Equatable, Sendable {
+    /// Where the wallet's next height stands against the NU7 network upgrade.
+    public enum Phase: Equatable, Sendable {
+        /// Both lanes may start: the network has no NU7 activation height, the wallet's next block
+        /// is under NU7 already, or the host turned the upgrade gate's bypass on (internal builds
+        /// only).
+        case available
+        /// The upgrade is more than 48 blocks away. The scheduled lane may not start, and the calls
+        /// that plan, build, sign, store or rebuild a scheduled run throw
+        /// ``ZcashError/migrationPausedUntilNetworkUpgrade(_:)``. The immediate lane is open.
+        case pausedUntilNetworkUpgrade
+        /// The wallet's next height is one of the 48 blocks (about an hour) before the upgrade
+        /// activates. Neither lane may start, so that nothing is still in flight when the
+        /// consensus branch changes. Offer a migration again once the wallet has synced up to the
+        /// activation height.
+        case networkUpgradeCutoff
+    }
+
+    /// Where the wallet's next height stands against the NU7 network upgrade.
+    public let phase: Phase
+    /// The NU7 activation height of the wallet's network, in every phase, or `nil` when the
+    /// network has none (and then the phase is always ``Phase/available``).
+    public let activationHeight: BlockHeight?
+    /// Whether the immediate lane, one transaction that migrates the whole balance, may start:
+    /// `false` only in ``Phase/networkUpgradeCutoff``.
+    public let isImmediateLaneAvailable: Bool
+
+    /// Creates an availability.
+    public init(phase: Phase, activationHeight: BlockHeight?, isImmediateLaneAvailable: Bool) {
+        self.phase = phase
+        self.activationHeight = activationHeight
+        self.isImmediateLaneAvailable = isImmediateLaneAvailable
+    }
+}
+
 /// An estimate of migrating the account's whole spendable Orchard balance across successive
 /// migration RUNS ("rounds"), as returned by
 /// `ZcashRustBackendWelding.estimateMigrationRuns(accountUUID:)`.

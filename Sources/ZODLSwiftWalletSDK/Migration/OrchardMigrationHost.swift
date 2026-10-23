@@ -18,9 +18,10 @@ import Foundation
 /// (see ``OrchardMigration``); the host itself borrows the synchronizer's welding
 /// (`Initializer.rustBackend`) only for the WALLET-scope members — the sync-blocked predicate
 /// (enumerating every account and reading each account's persisted gate file directly, so a
-/// dormant account whose actor has never been created this launch still counts) and the
+/// dormant account whose actor has never been created this launch still counts), the
 /// account-free chain-tip estimation pair (``estimatedChainTip()`` /
-/// ``estimatedSecondsPerBlock()``, which read the shared blocks table).
+/// ``estimatedSecondsPerBlock()``, which read the shared blocks table) and the account-free
+/// ``migrationAvailability()`` (which reads the wallet's chain tip).
 actor OrchardMigrationHost {
     private let welding: ZcashRustBackendWelding
     private let sharedBroadcaster: any MigrationBroadcasting
@@ -172,6 +173,20 @@ actor OrchardMigrationHost {
     /// never turns it on. See ``MigrationUpgradeGateBypass``.
     func setUpgradeGateBypass(_ isBypassed: Bool) {
         upgradeGateBypass.setBypassed(isBypassed)
+    }
+
+    /// What the migration may start at the wallet's next height. WALLET-scoped, like the
+    /// chain-tip estimation pair: the NU7 network-upgrade gate depends on the chain alone, so the
+    /// read takes no account and is served by the host's own welding (`Initializer.rustBackend`)
+    /// rather than by a per-account actor.
+    ///
+    /// The host's bypass holder is read here and passed to the welding explicitly. The welding the
+    /// host borrows is the synchronizer's own backend, whose holder is a default one that nothing
+    /// sets, not the one the host shares with the per-account backends. Passing the host's value is
+    /// what keeps this answer in step with the calls the gate refuses, which those backends judge
+    /// with it.
+    func migrationAvailability() async throws -> MigrationAvailability {
+        try await welding.migrationAvailability(upgradeGateBypass: upgradeGateBypass.isBypassed)
     }
 
     /// Whether ordinary wallet sync should currently be paused for *any* migrating account.

@@ -457,6 +457,178 @@ final class MigrationFFITests: XCTestCase {
         )
     }
 
+    // MARK: - The availability read and the cancel-only call (real FFI)
+
+    /// The availability follows the wallet's own chain tip through the gate's phases, with no
+    /// account involved. On testnet, whose NU7 activates at 4,465,026, the cutoff window holds the
+    /// next heights from 4,464,978, so the tip 4,464,977 is its first and 4,465,025, whose next
+    /// block is the activation block, is the first that is open. The activation height is
+    /// testnet's in every phase.
+    func testAvailabilityDecodesEachPhase() async throws {
+        let directory = try makeUniqueStorageDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let wallet = try await makePreActivationTestnetWallet(in: directory)
+
+        let expectations: [(tip: Int32, expected: MigrationAvailability)] = [
+            (
+                4_000_000,
+                MigrationAvailability(phase: .pausedUntilNetworkUpgrade, activationHeight: 4_465_026, isImmediateLaneAvailable: true)
+            ),
+            (
+                4_464_977,
+                MigrationAvailability(phase: .networkUpgradeCutoff, activationHeight: 4_465_026, isImmediateLaneAvailable: false)
+            ),
+            (
+                4_465_025,
+                MigrationAvailability(phase: .available, activationHeight: 4_465_026, isImmediateLaneAvailable: true)
+            )
+        ]
+        for (tip, expected) in expectations {
+            try await wallet.backend.updateChainTip(height: tip)
+
+            let availability = try await wallet.backend.migrationAvailability(upgradeGateBypass: false)
+
+            XCTAssertEqual(availability, expected, "tip \(tip)")
+        }
+    }
+
+    /// The bypass the caller passes opens the gate at the heights that would close it, and the
+    /// answer is the one the argument decides: a holder the backend carries for its own gated calls
+    /// plays no part, because the availability read belongs to no account's backend and takes the
+    /// host's value explicitly.
+    func testAvailabilityFollowsTheBypass() async throws {
+        let directory = try makeUniqueStorageDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let wallet = try await makePreActivationTestnetWallet(in: directory)
+        let open = MigrationAvailability(phase: .available, activationHeight: 4_465_026, isImmediateLaneAvailable: true)
+
+        for (tip, closed) in [
+            (
+                Int32(4_000_000),
+                MigrationAvailability(phase: .pausedUntilNetworkUpgrade, activationHeight: 4_465_026, isImmediateLaneAvailable: true)
+            ),
+            (
+                Int32(4_464_977),
+                MigrationAvailability(phase: .networkUpgradeCutoff, activationHeight: 4_465_026, isImmediateLaneAvailable: false)
+            )
+        ] {
+            try await wallet.backend.updateChainTip(height: tip)
+
+            let withTheBypass = try await wallet.backend.migrationAvailability(upgradeGateBypass: true)
+            let withoutTheBypass = try await wallet.backend.migrationAvailability(upgradeGateBypass: false)
+            XCTAssertEqual(withTheBypass, open, "tip \(tip)")
+            XCTAssertEqual(withoutTheBypass, closed, "tip \(tip)")
+
+            wallet.bypass.setBypassed(true)
+            let heldByTheBackend = try await wallet.backend.migrationAvailability(upgradeGateBypass: false)
+            wallet.bypass.setBypassed(false)
+            XCTAssertEqual(heldByTheBackend, closed, "tip \(tip): the argument decides, not the backend's own holder")
+        }
+    }
+
+    /// Past testnet's activation the gate is open without any bypass: the fixture wallet is born
+    /// at the 4,500,000 checkpoint.
+    func testAvailabilityIsOpenOnTestnetAfterActivation() async throws {
+        let availability = try await rustBackend.migrationAvailability(upgradeGateBypass: false)
+
+        XCTAssertEqual(
+            availability,
+            MigrationAvailability(phase: .available, activationHeight: 4_465_026, isImmediateLaneAvailable: true)
+        )
+    }
+
+    /// A wallet that has never learned a chain tip cannot be judged, so the read fails with the
+    /// availability error. With the bypass the gate is open at every height, and no tip is needed.
+    func testAvailabilityWithoutAChainTipThrowsUnlessBypassed() async throws {
+        let directory = try makeUniqueStorageDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let backend = ZcashRustBackend.makeForTests(
+            dbData: directory.appendingPathComponent("data.db"),
+            fsBlockDbRoot: directory.appendingPathComponent("fs_cache", isDirectory: true),
+            networkType: .testnet
+        )
+        let dbInit = try await backend.initDataDb(seed: nil)
+        guard case .success = dbInit else {
+            return XCTFail("Failed to initDataDb. Expected `.success`, got \(String(describing: dbInit))")
+        }
+
+        do {
+            _ = try await backend.migrationAvailability(upgradeGateBypass: false)
+            XCTFail("a wallet with no chain tip has no phase")
+        } catch ZcashError.rustMigrationAvailability(let message) {
+            XCTAssertTrue(message.contains("sync first"), "unexpected message: \(message)")
+        } catch {
+            XCTFail("Expected rustMigrationAvailability but got \(error)")
+        }
+
+        let bypassed = try await backend.migrationAvailability(upgradeGateBypass: true)
+        XCTAssertEqual(bypassed, MigrationAvailability(phase: .available, activationHeight: 4_465_026, isImmediateLaneAvailable: true))
+    }
+
+    /// The FFI struct decodes to the model: each phase constant to its case, and the `-1` sentinel
+    /// of a network with no NU7 activation height to a `nil` height. A phase the header does not
+    /// name is a malformed answer, not a guess.
+    func testAvailabilityMappingDecodesEachPhaseAndTheNoActivationSentinel() throws {
+        let cases: [(phase: Int32, expected: MigrationAvailability.Phase)] = [
+            (ZCASHLC_MIGRATION_AVAILABLE, .available),
+            (ZCASHLC_MIGRATION_PAUSED_UNTIL_UPGRADE, .pausedUntilNetworkUpgrade),
+            (ZCASHLC_MIGRATION_UPGRADE_CUTOFF, .networkUpgradeCutoff)
+        ]
+        for (phase, expected) in cases {
+            let ffi = FfiMigrationAvailability(phase: UInt32(phase), activation_height: 3_543_405, immediate_available: false)
+
+            let decoded = try XCTUnwrap(ffi.unsafeToMigrationAvailability())
+
+            XCTAssertEqual(decoded.phase, expected)
+            XCTAssertEqual(decoded.activationHeight, 3_543_405)
+            XCTAssertFalse(decoded.isImmediateLaneAvailable, "the flag is the FFI's, not derived from the phase")
+        }
+
+        let noNU7 = FfiMigrationAvailability(phase: UInt32(ZCASHLC_MIGRATION_AVAILABLE), activation_height: -1, immediate_available: true)
+        XCTAssertEqual(
+            noNU7.unsafeToMigrationAvailability(),
+            MigrationAvailability(phase: .available, activationHeight: nil, isImmediateLaneAvailable: true)
+        )
+
+        XCTAssertNil(FfiMigrationAvailability(phase: 99, activation_height: 3_543_405, immediate_available: true).unsafeToMigrationAvailability())
+    }
+
+    /// With no run stored there is nothing to end: the cancel succeeds and stores nothing, so there
+    /// is still no run to advance. The upgrade gate stops what starts a run, never what ends one,
+    /// so it succeeds on a wallet whose gate is closed, under the pause and inside the cutoff
+    /// window, with no bypass.
+    func testCancelRunWithoutARunSucceeds() async throws {
+        try await rustBackend.migrationCancelRun(for: account)
+        let pastActivationStep = try await rustBackend.migrationAdvanceStep(for: account)
+        XCTAssertNil(pastActivationStep, "cancelling nothing stores nothing")
+
+        let directory = try makeUniqueStorageDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let wallet = try await makePreActivationTestnetWallet(in: directory)
+        for tip in [Int32(4_000_000), Int32(4_464_977)] {
+            try await wallet.backend.updateChainTip(height: tip)
+
+            try await wallet.backend.migrationCancelRun(for: wallet.account)
+
+            let step = try await wallet.backend.migrationAdvanceStep(for: wallet.account)
+            XCTAssertNil(step, "tip \(tip): cancelling nothing stores nothing")
+        }
+    }
+
+    /// A cancel that fails reaches the caller as the cancel's own error, with the rust layer's
+    /// message: an account the wallet does not know has no run store to open.
+    func testCancelRunForAnUnknownAccountThrowsTheCancelError() async throws {
+        let stranger = AccountUUID(id: [UInt8](repeating: 0x07, count: 16))
+
+        do {
+            try await rustBackend.migrationCancelRun(for: stranger)
+            XCTFail("an unknown account has no run to cancel")
+        } catch let error as ZcashError {
+            XCTAssertEqual(error.code, ZcashErrorCode.rustMigrationCancelRun)
+            XCTAssertEqual(error.code.rawValue, "ZRUST0161")
+        }
+    }
+
     /// Recording a SUCCESS against a transfer id with no active migration run throws: that path
     /// must load the stored run to mark the transfer broadcast, and there is none. A deterministic,
     /// sync-independent throw — it never touches the wallet schema.

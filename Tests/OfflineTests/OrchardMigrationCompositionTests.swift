@@ -1054,6 +1054,35 @@ final class OrchardMigrationCompositionTests: ZcashTestCase {
         }
     }
 
+    /// `cancelMigrationRun` asks the welding to cancel the run of the actor's own account, and does
+    /// nothing else: no fresh plan is asked for, which is what sets it apart from a restart.
+    func testCancelMigrationRunCancelsTheActorsAccountAndPlansNothing() async throws {
+        var cancelled: [AccountUUID] = []
+        welding.migrationCancelRunForClosure = { cancelled.append($0) }
+        let migration = makeMigration(broadcaster: ScriptedBroadcaster(script: .throwing(StubEngineError())))
+
+        try await migration.cancelMigrationRun()
+
+        XCTAssertEqual(cancelled, [accountA])
+        XCTAssertFalse(welding.migrationRestartStepForCalled, "a cancel plans nothing")
+        XCTAssertFalse(welding.migrationProposeTransfersForCalled, "a cancel plans nothing")
+    }
+
+    /// A cancel failure reaches the caller as the welding threw it.
+    func testCancelMigrationRunPropagatesTheWeldingError() async throws {
+        welding.migrationCancelRunForThrowableError = ZcashError.rustMigrationCancelRun("boom")
+        let migration = makeMigration(broadcaster: ScriptedBroadcaster(script: .throwing(StubEngineError())))
+
+        do {
+            try await migration.cancelMigrationRun()
+            XCTFail("Expected rustMigrationCancelRun to be thrown")
+        } catch ZcashError.rustMigrationCancelRun(let message) {
+            XCTAssertEqual(message, "boom")
+        } catch {
+            XCTFail("Expected rustMigrationCancelRun but got \(error)")
+        }
+    }
+
     /// Before the upgrade the signing step refuses, and the refusal reaches the caller of
     /// `submitNoteSplit` as it was thrown. The composition goes no further: nothing is broadcast,
     /// nothing is recorded, and the sync gate's in-flight marker is never armed.

@@ -162,7 +162,11 @@ private func performDictate(
     case .rebuild:
         // The third executor, unchanged by this task: it already discharged the `.rebuild` dictate.
         _ = try await synchronizer.refreshStaleMigrationTransfers(accountUUID: accountUUID, usk: nil)
-    case .replan, .reevaluate, .waiting, .complete, .pausedForNetworkUpgrade, .interruptedByNetworkUpgrade, .none:
+    case .interruptedByNetworkUpgrade:
+        // The run cannot complete: end it, then the host offers the user a new migration. No
+        // instruction is involved, only the account.
+        try await synchronizer.cancelMigrationRun(accountUUID: accountUUID)
+    case .replan, .reevaluate, .waiting, .complete, .pausedForNetworkUpgrade, .none:
         break
     }
 }

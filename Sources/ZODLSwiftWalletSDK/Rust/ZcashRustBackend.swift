@@ -1824,6 +1824,35 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
         return samples
     }
 
+    // DB-READ (audited 2026-10-23): zcashlc_migration_availability — account-free; it opens the
+    // wallet through the FFI's read-only context (SQLITE_OPEN_READ_ONLY on its one connection), so
+    // the only thing it can do to the database is read the chain tip, and a write anywhere down the
+    // path would fail SQLITE_READONLY.
+    func migrationAvailability(upgradeGateBypass: Bool) async throws -> MigrationAvailability {
+        let availabilityPtr = zcashlc_migration_availability(
+            dbData.0,
+            dbData.1,
+            networkType.networkId,
+            upgradeGateBypass
+        )
+
+        guard let availabilityPtr else {
+            throw ZcashError.rustMigrationAvailability(
+                lastErrorMessage(fallback: "`migrationAvailability` failed with unknown error")
+            )
+        }
+
+        defer { zcashlc_free_migration_availability(availabilityPtr) }
+
+        guard let availability = availabilityPtr.pointee.unsafeToMigrationAvailability() else {
+            throw ZcashError.rustMigrationAvailability(
+                lastErrorMessage(fallback: "`migrationAvailability` returned a malformed answer")
+            )
+        }
+
+        return availability
+    }
+
 
     // DB-free: a pure split over the caller's action weights (mirrors the Keystone UR bridge
     // below), so unlike the wallet-db migration methods this is not `@DBActor`.
@@ -2508,6 +2537,24 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
         }
 
         return outcome
+    }
+
+    @DBActor
+    func migrationCancelRun(for account: AccountUUID) async throws {
+        // Never gated, so no bypass is passed; `false` is an unambiguous error here, since a
+        // cancel with no run pending succeeds.
+        let success = zcashlc_migration_cancel_run(
+            dbData.0,
+            dbData.1,
+            account.id,
+            networkType.networkId
+        )
+
+        guard success else {
+            throw ZcashError.rustMigrationCancelRun(
+                lastErrorMessage(fallback: "`migrationCancelRun` failed with unknown error")
+            )
+        }
     }
 
     @DBActor
@@ -3629,6 +3676,33 @@ extension FfiMigrationRestartOutcome {
         }
 
         return .cancelledUntilNetworkUpgrade(activationHeight: BlockHeight(replan_after_height))
+    }
+}
+
+extension FfiMigrationAvailability {
+    /// Converts an [`FfiMigrationAvailability`] into a [`MigrationAvailability`], or `nil` for an
+    /// unrecognized phase (should not happen; defensive only). The phase is matched against the
+    /// header's exported `ZCASHLC_MIGRATION_*` constants, so this marshal and the rust side share one
+    /// set of names; the `-1` "none" sentinel of `activation_height` is a network with no NU7
+    /// activation height.
+    func unsafeToMigrationAvailability() -> MigrationAvailability? {
+        let migrationPhase: MigrationAvailability.Phase
+        switch Int32(bitPattern: phase) {
+        case ZCASHLC_MIGRATION_AVAILABLE:
+            migrationPhase = .available
+        case ZCASHLC_MIGRATION_PAUSED_UNTIL_UPGRADE:
+            migrationPhase = .pausedUntilNetworkUpgrade
+        case ZCASHLC_MIGRATION_UPGRADE_CUTOFF:
+            migrationPhase = .networkUpgradeCutoff
+        default:
+            return nil
+        }
+
+        return MigrationAvailability(
+            phase: migrationPhase,
+            activationHeight: activation_height >= 0 ? BlockHeight(activation_height) : nil,
+            isImmediateLaneAvailable: immediate_available
+        )
     }
 }
 

@@ -3039,6 +3039,28 @@ class SynchronizerMock: Synchronizer {
         await setMigrationNetworkUpgradeGateBypassClosure!(isBypassed)
     }
 
+    // MARK: - migrationAvailability
+
+    var migrationAvailabilityThrowableError: Error?
+    var migrationAvailabilityCallsCount = 0
+    var migrationAvailabilityCalled: Bool {
+        return migrationAvailabilityCallsCount > 0
+    }
+    var migrationAvailabilityReturnValue: MigrationAvailability!
+    var migrationAvailabilityClosure: (() async throws -> MigrationAvailability)?
+
+    func migrationAvailability() async throws -> MigrationAvailability {
+        if let error = migrationAvailabilityThrowableError {
+            throw error
+        }
+        migrationAvailabilityCallsCount += 1
+        if let closure = migrationAvailabilityClosure {
+            return try await closure()
+        } else {
+            return migrationAvailabilityReturnValue
+        }
+    }
+
     // MARK: - migrationProgress
 
     var migrationProgressAccountUUIDThrowableError: Error?
@@ -3608,6 +3630,25 @@ class SynchronizerMock: Synchronizer {
         } else {
             return restartCurrentMigrationStepAccountUUIDReturnValue
         }
+    }
+
+    // MARK: - cancelMigrationRun
+
+    var cancelMigrationRunAccountUUIDThrowableError: Error?
+    var cancelMigrationRunAccountUUIDCallsCount = 0
+    var cancelMigrationRunAccountUUIDCalled: Bool {
+        return cancelMigrationRunAccountUUIDCallsCount > 0
+    }
+    var cancelMigrationRunAccountUUIDReceivedAccountUUID: AccountUUID?
+    var cancelMigrationRunAccountUUIDClosure: ((AccountUUID) async throws -> Void)?
+
+    func cancelMigrationRun(accountUUID: AccountUUID) async throws {
+        if let error = cancelMigrationRunAccountUUIDThrowableError {
+            throw error
+        }
+        cancelMigrationRunAccountUUIDCallsCount += 1
+        cancelMigrationRunAccountUUIDReceivedAccountUUID = accountUUID
+        try await cancelMigrationRunAccountUUIDClosure!(accountUUID)
     }
 
     // MARK: - refreshStaleMigrationTransfers
@@ -5657,6 +5698,30 @@ class ZcashRustBackendWeldingMock: ZcashRustBackendWelding {
         }
     }
 
+    // MARK: - migrationAvailability
+
+    var migrationAvailabilityUpgradeGateBypassThrowableError: Error?
+    var migrationAvailabilityUpgradeGateBypassCallsCount = 0
+    var migrationAvailabilityUpgradeGateBypassCalled: Bool {
+        return migrationAvailabilityUpgradeGateBypassCallsCount > 0
+    }
+    var migrationAvailabilityUpgradeGateBypassReceivedUpgradeGateBypass: Bool?
+    var migrationAvailabilityUpgradeGateBypassReturnValue: MigrationAvailability!
+    var migrationAvailabilityUpgradeGateBypassClosure: ((Bool) async throws -> MigrationAvailability)?
+
+    func migrationAvailability(upgradeGateBypass: Bool) async throws -> MigrationAvailability {
+        if let error = migrationAvailabilityUpgradeGateBypassThrowableError {
+            throw error
+        }
+        migrationAvailabilityUpgradeGateBypassCallsCount += 1
+        migrationAvailabilityUpgradeGateBypassReceivedUpgradeGateBypass = upgradeGateBypass
+        if let closure = migrationAvailabilityUpgradeGateBypassClosure {
+            return try await closure(upgradeGateBypass)
+        } else {
+            return migrationAvailabilityUpgradeGateBypassReturnValue
+        }
+    }
+
     // MARK: - migrationBatchPcztsByActions
 
     var migrationBatchPcztsByActionsActionsMaxActionsPerSessionThrowableError: Error?
@@ -6120,6 +6185,25 @@ class ZcashRustBackendWeldingMock: ZcashRustBackendWelding {
         } else {
             return migrationRestartStepForReturnValue
         }
+    }
+
+    // MARK: - migrationCancelRun
+
+    var migrationCancelRunForThrowableError: Error?
+    var migrationCancelRunForCallsCount = 0
+    var migrationCancelRunForCalled: Bool {
+        return migrationCancelRunForCallsCount > 0
+    }
+    var migrationCancelRunForReceivedAccount: AccountUUID?
+    var migrationCancelRunForClosure: ((AccountUUID) async throws -> Void)?
+
+    func migrationCancelRun(for account: AccountUUID) async throws {
+        if let error = migrationCancelRunForThrowableError {
+            throw error
+        }
+        migrationCancelRunForCallsCount += 1
+        migrationCancelRunForReceivedAccount = account
+        try await migrationCancelRunForClosure!(account)
     }
 
     // MARK: - migrationRefreshStaleTransfers

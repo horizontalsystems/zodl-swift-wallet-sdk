@@ -26,6 +26,28 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   run are not refused with `migrationPausedUntilNetworkUpgrade(_:)`, and `restartCurrentMigrationStep(accountUUID:)`
   plans at every height; it does not disable the detection of an interrupted run. A conformer that does not
   support migration gets a no-op default.
+- `Synchronizer.migrationAvailability()` returns a `MigrationAvailability`: what the migration may start at
+  the wallet's next height, so an app can decide which options to offer before anything is planned. It takes
+  no account and makes no network request; it is judged at the wallet's own chain tip, plus one, by the same
+  gate that refuses the calls that plan, build, sign, store or rebuild a scheduled run. `phase` is
+  `.available` (both the scheduled and the immediate migration may start), `.pausedUntilNetworkUpgrade` (the
+  NU7 activation is more than 48 blocks away: only the immediate migration may start) or
+  `.networkUpgradeCutoff` (the wallet's next height is one of the 48 blocks, about an hour, before the
+  activation: neither may start); `activationHeight` is the network's NU7 activation height in every phase,
+  `nil` for a network that has none; `isImmediateLaneAvailable` is `false` only in `.networkUpgradeCutoff`.
+  With `setMigrationNetworkUpgradeGateBypass(_:)` on, the phase is `.available` at every height. It throws
+  `ZcashError.rustMigrationAvailability(_:)` for a wallet that has no chain tip yet (sync first) on a network
+  with an NU7 activation height. A conformer that does not support migration throws by default.
+- `Synchronizer.cancelMigrationRun(accountUUID:)` cancels the account's pending run without planning a new
+  one: the run is stored as cancelled and every note reservation its never-broadcast transactions hold is
+  released, so those notes are spendable at once. Transactions already broadcast are unaffected on-chain and
+  may still be mined, and a plan proposed earlier can no longer be committed. It is how an app ends a run
+  that `migrationAdvanceStep(accountUUID:)` reported as `interruptedByNetworkUpgrade`, before it offers the
+  user a new migration; afterwards `migrationAdvanceStep(accountUUID:)` answers `complete` for the run.
+  Unlike `restartCurrentMigrationStep(accountUUID:)`, which cancels the same way and then plans, it plans
+  nothing, so the NU7 gate never refuses it. With no run pending it succeeds and changes nothing. It throws
+  `ZcashError.rustMigrationCancelRun(_:)` for a rust-layer failure. A conformer that does not support
+  migration throws by default.
 
 ## Changed
 
@@ -63,8 +85,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     chain advances. It replaces a rebuild or a re-plan while the next height is more than 48 blocks before the
     activation, and a broadcast, a proof, a rebuild or a re-plan in the 48 blocks (about an hour) before it.
   - `interruptedByNetworkUpgrade`: the run cannot complete, because a transaction of it that is not mined was
-    built for the consensus branch before the activation, which no block accepts any more. Cancel the run and
-    offer a new migration.
+    built for the consensus branch before the activation, which no block accepts any more. Cancel the run with
+    `cancelMigrationRun(accountUUID:)` and offer a new migration.
   - `reevaluate` is also the answer, around the activation, while the wallet's scan has not reached the last
     block before it and every unmined transaction built for the old branch may already have been sent: sync and
     ask again, and the answer becomes `interruptedByNetworkUpgrade` once the scan has passed that block without
@@ -86,6 +108,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the run is cancelled and nothing is planned, and `activationHeight` is the height at which the upgrade
     activates. The call succeeds, and a plan proposed before it can no longer be committed. Offer the user a new
     migration once the wallet has synced up to that height.
+- `ZcashError` and `ZcashErrorCode` gain `rustMigrationAvailability(_:)` (`ZRUST0160`) and
+  `rustMigrationCancelRun(_:)` (`ZRUST0161`), whose payload is the rust layer's message. An exhaustive `switch`
+  over either type stops compiling until they are handled; see `MIGRATING.md`.
 
 ## Deprecated
 

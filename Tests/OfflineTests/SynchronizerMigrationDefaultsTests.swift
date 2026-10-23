@@ -38,6 +38,10 @@ final class SynchronizerMigrationDefaultsTests: XCTestCase {
         await assertThrowsMigrationUnimplemented { _ = try await self.synchronizer.migrationAdvanceStep(accountUUID: self.accountUUID) }
     }
 
+    func testMigrationAvailabilityDefaultThrowsUnimplemented() async {
+        await assertThrowsMigrationUnimplemented { _ = try await self.synchronizer.migrationAvailability() }
+    }
+
     func testMigrationProgressDefaultThrowsUnimplemented() async {
         await assertThrowsMigrationUnimplemented { _ = try await self.synchronizer.migrationProgress(accountUUID: self.accountUUID) }
     }
@@ -159,6 +163,12 @@ final class SynchronizerMigrationDefaultsTests: XCTestCase {
     func testRestartCurrentMigrationStepDefaultThrowsUnimplemented() async {
         await assertThrowsMigrationUnimplemented {
             _ = try await self.synchronizer.restartCurrentMigrationStep(accountUUID: self.accountUUID)
+        }
+    }
+
+    func testCancelMigrationRunDefaultThrowsUnimplemented() async {
+        await assertThrowsMigrationUnimplemented {
+            try await self.synchronizer.cancelMigrationRun(accountUUID: self.accountUUID)
         }
     }
 

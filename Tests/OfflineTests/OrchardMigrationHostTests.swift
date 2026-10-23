@@ -12,6 +12,7 @@
 //
 
 import Combine
+import os
 import XCTest
 @testable import TestUtils
 @_spi(Testing) @testable import ZODLSwiftWalletSDK
@@ -522,6 +523,68 @@ final class OrchardMigrationHostTests: ZcashTestCase {
 
         XCTAssertEqual(tip, nu7 + 32)
         XCTAssertEqual(secondsPerBlock, 20)
+    }
+
+    // MARK: - Wallet-scope migration availability
+
+    /// The availability read is wallet-scoped: the host serves it through its own welding and
+    /// builds no per-account migration for it. It passes the value of its own bypass holder, since
+    /// that welding is the synchronizer's backend and holds no bypass the host sets: off by default,
+    /// and following the host's setter in both directions. The answer comes back untouched.
+    func testMigrationAvailabilityPassesTheHostsBypassToTheWelding() async throws {
+        let welding = ZcashRustBackendWeldingMock()
+        let expected = MigrationAvailability(
+            phase: .networkUpgradeCutoff,
+            activationHeight: 3_543_405,
+            isImmediateLaneAvailable: false
+        )
+        welding.migrationAvailabilityUpgradeGateBypassReturnValue = expected
+        let accountsBuilt = OSAllocatedUnfairLock<[AccountUUID]>(initialState: [])
+        let makeActor = makeActorFactory(welding: welding, gateTickInterval: 3600)
+        let host = OrchardMigrationHost(
+            welding: welding,
+            sharedBroadcaster: ScriptedBroadcaster(script: .throwing(ZcashError.migrationTorUnavailable)),
+            generalStorageURL: testGeneralStorageDirectory,
+            tickInterval: 3600,
+            now: { Date() },
+            logger: logger,
+            spacing: TargetBlockSpacing(networkType: .testnet),
+            actorFactory: { accountUUID, broadcaster, upgradeGateBypass in
+                accountsBuilt.withLock { $0.append(accountUUID) }
+                return makeActor(accountUUID, broadcaster, upgradeGateBypass)
+            }
+        )
+
+        let withoutTheBypass = try await host.migrationAvailability()
+        XCTAssertEqual(withoutTheBypass, expected)
+        XCTAssertEqual(welding.migrationAvailabilityUpgradeGateBypassReceivedUpgradeGateBypass, false)
+
+        await host.setUpgradeGateBypass(true)
+        _ = try await host.migrationAvailability()
+        XCTAssertEqual(welding.migrationAvailabilityUpgradeGateBypassReceivedUpgradeGateBypass, true)
+
+        await host.setUpgradeGateBypass(false)
+        _ = try await host.migrationAvailability()
+        XCTAssertEqual(welding.migrationAvailabilityUpgradeGateBypassReceivedUpgradeGateBypass, false)
+
+        XCTAssertEqual(welding.migrationAvailabilityUpgradeGateBypassCallsCount, 3)
+        XCTAssertEqual(accountsBuilt.withLock { $0 }, [], "the read takes no account, so no migration is built for it")
+    }
+
+    /// An availability failure reaches the caller as the welding threw it.
+    func testMigrationAvailabilityPropagatesTheWeldingError() async throws {
+        let welding = ZcashRustBackendWeldingMock()
+        welding.migrationAvailabilityUpgradeGateBypassThrowableError = ZcashError.rustMigrationAvailability("boom")
+        let host = makeHost(welding: welding, broadcaster: ScriptedBroadcaster(script: .throwing(ZcashError.migrationTorUnavailable)))
+
+        do {
+            _ = try await host.migrationAvailability()
+            XCTFail("expected rustMigrationAvailability")
+        } catch ZcashError.rustMigrationAvailability(let message) {
+            XCTAssertEqual(message, "boom")
+        } catch {
+            XCTFail("expected rustMigrationAvailability, got \(error)")
+        }
     }
 
     // MARK: - Helpers

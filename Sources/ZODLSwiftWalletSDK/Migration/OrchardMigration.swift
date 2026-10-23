@@ -763,6 +763,16 @@ actor OrchardMigration {
         try await welding.migrationRestartStep(for: accountUUID)
     }
 
+    /// Cancels the stored run and nothing more: it is persisted as cancelled and every note
+    /// reservation its never-broadcast transactions hold is released, but no fresh plan is made --
+    /// the cancel half of ``restartCurrentMigrationStep()``, for ending a run the NU7 network
+    /// upgrade interrupted before the user is offered a new migration. A plan proposed earlier can
+    /// no longer be committed; already-broadcast transactions are unaffected on-chain. With no run
+    /// stored the call succeeds and changes nothing. The network-upgrade gate never refuses it.
+    func cancelMigrationRun() async throws {
+        try await welding.migrationCancelRun(for: accountUUID)
+    }
+
     /// Rebuilds every EXPIRED transfer of the stored migration run in place through the engine and
     /// returns the run's FULL transfer schedule as stored AFTER the refresh (the current stored
     /// schedule when nothing had expired; empty when no run is stored or the run is terminal).

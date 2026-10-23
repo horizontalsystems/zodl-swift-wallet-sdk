@@ -905,12 +905,13 @@ public protocol Synchronizer: AnyObject {
     //
     // The action surface is exactly three things: the conduit (`migrationAdvanceStep(accountUUID:)`),
     // the instruction executors (`proveMigrationTransactions`, `performMigrationBroadcast`,
-    // `refreshStaleMigrationTransfers`), and reads. The app has no semantic goal except to advance
-    // the migration and perform the advancement's dictates, and no member decides for itself what
-    // the migration needs: `MigrationBroadcastInstruction` and `MigrationProveTarget` have no
-    // public initializers, so the advance marshaling is their only producer and un-instructed
-    // proving or broadcasting does not compile. This is a Swift-surface property, not a security
-    // boundary — the Rust executors' per-row state gating remains the safety backstop.
+    // `refreshStaleMigrationTransfers`, and `cancelMigrationRun` for an interrupted run), and
+    // reads. The app has no semantic goal except to advance the migration and perform the
+    // advancement's dictates, and no member decides for itself what the migration needs:
+    // `MigrationBroadcastInstruction` and `MigrationProveTarget` have no public initializers, so
+    // the advance marshaling is their only producer and un-instructed proving or broadcasting does
+    // not compile. This is a Swift-surface property, not a security boundary — the Rust executors'
+    // per-row state gating remains the safety backstop.
     //
     // The ceremony/consent lane is deliberately untouched by this: `prepareNoteSplit` /
     // `submitNoteSplit` and the propose/sign/store family are pre-drive consent flows — a user
@@ -921,8 +922,10 @@ public protocol Synchronizer: AnyObject {
     // `submitNoteSplit`, `proposeMigrationTransfers`, `signAndStoreMigrationSchedule`,
     // `refreshStaleMigrationTransfers`, and the PCZT create/store members) throws
     // `ZcashError.migrationPausedUntilNetworkUpgrade(_:)`, and `restartCurrentMigrationStep`
-    // cancels the run without planning a new one. The reads and the instruction executors are not
-    // refused by it.
+    // cancels the run without planning a new one. The reads and the instruction executors, which
+    // include `cancelMigrationRun` (it ends a run and starts nothing), are not refused by it.
+    // `migrationAvailability` reports what the gate allows at the wallet's next height, so an app
+    // can decide which options to offer before it calls any of them.
 
     /// The migration engine's next step to advance `accountUUID`'s stored run, paired with its
     /// advisory outlook — a verbatim conduit of the engine's own `advance_migration`: the
@@ -954,7 +957,7 @@ public protocol Synchronizer: AnyObject {
     /// case .rebuild:
     ///     _ = try await synchronizer.refreshStaleMigrationTransfers(accountUUID: account, usk: usk)
     /// case .interruptedByNetworkUpgrade:
-    ///     break // cancel the run and offer a new migration; see the per-step notes below
+    ///     try await synchronizer.cancelMigrationRun(accountUUID: account) // then offer a new migration
     /// case .replan, .reevaluate, .waiting, .complete, .pausedForNetworkUpgrade, nil:
     ///     break // nothing to perform; see the per-step notes below
     /// }
@@ -996,8 +999,9 @@ public protocol Synchronizer: AnyObject {
     ///   again as the chain tip advances. The step carries the activation height and no outlook.
     /// - `.interruptedByNetworkUpgrade` — the upgrade has stranded the run: a transaction of it
     ///   that is not mined was built for the branch before the activation, so no block can include
-    ///   it → cancel the run with `cancelMigrationRun(accountUUID:)` and offer a new migration.
-    ///   The step carries the activation height and no outlook.
+    ///   it → cancel the run with ``cancelMigrationRun(accountUUID:)`` and offer a new migration.
+    ///   The step carries the activation height and no outlook. Once the run is cancelled this
+    ///   member answers `.complete` for it.
     /// - Parameter accountUUID: the account whose next step is of interest.
     func migrationAdvanceStep(accountUUID: AccountUUID) async throws -> MigrationAdvance?
 
@@ -1022,6 +1026,28 @@ public protocol Synchronizer: AnyObject {
     /// A conformer without migration support ignores the call.
     /// - Parameter isBypassed: `true` to bypass the gate, `false` to enforce it again.
     func setMigrationNetworkUpgradeGateBypass(_ isBypassed: Bool) async
+
+    /// What the migration may start at the wallet's next height, to decide which options to offer
+    /// before anything is planned. See ``MigrationAvailability`` for the phases:
+    /// ``MigrationAvailability/Phase/available`` offers both the scheduled and the immediate
+    /// migration, ``MigrationAvailability/Phase/pausedUntilNetworkUpgrade`` only the immediate one,
+    /// and ``MigrationAvailability/Phase/networkUpgradeCutoff`` neither.
+    ///
+    /// WALLET-scoped, so it takes no account: the NU7 network-upgrade gate depends on the chain
+    /// alone. It is judged at the wallet's own chain tip, plus one, and never at the sync server's
+    /// height or a wall-clock estimate, and it makes no network request, so it can be asked as
+    /// often as the interface needs. It is the same judgment the calls that plan, build, sign,
+    /// store or rebuild a scheduled run are refused by (``ZcashError/migrationPausedUntilNetworkUpgrade(_:)``),
+    /// so an option it reports as closed is one the SDK would refuse. With the bypass on
+    /// (``setMigrationNetworkUpgradeGateBypass(_:)``, internal builds only) the phase is
+    /// ``MigrationAvailability/Phase/available`` at every height.
+    ///
+    /// A network with no NU7 activation height is always available, with a `nil`
+    /// ``MigrationAvailability/activationHeight``.
+    /// - Throws: ``ZcashError/rustMigrationAvailability(_:)`` if the rust layer returns an error,
+    ///   notably when the wallet has no chain tip yet (sync at least once first) on a network that
+    ///   has an NU7 activation height and the bypass is off.
+    func migrationAvailability() async throws -> MigrationAvailability
 
     /// Live migration progress for `accountUUID`, or `nil` when no snapshot is reportable:
     /// present only while an engine run is ACTIVE (not terminal) or a recorded immediate sweep is
@@ -1494,10 +1520,31 @@ public protocol Synchronizer: AnyObject {
     /// ``MigrationRestartOutcome/cancelledUntilNetworkUpgrade(activationHeight:)``, carrying the
     /// activation height to wait for. A plan proposed before the restart can no longer be committed
     /// then.
+    ///
+    /// To end a run without planning anything, use ``cancelMigrationRun(accountUUID:)``.
     /// - Parameter accountUUID: the account to restart.
     /// - Returns: ``MigrationRestartOutcome/replanned(_:)`` with the fresh schedule to re-confirm, or
     ///   ``MigrationRestartOutcome/cancelledUntilNetworkUpgrade(activationHeight:)``.
     func restartCurrentMigrationStep(accountUUID: AccountUUID) async throws -> MigrationRestartOutcome
+
+    /// Cancels `accountUUID`'s pending run and nothing more: no fresh plan is made.
+    ///
+    /// This is how a host ends a run the NU7 network upgrade interrupted
+    /// (``MigrationAdvanceStep/interruptedByNetworkUpgrade(activationHeight:)``): cancel it, then
+    /// offer the user a new migration, which is built for the consensus branch the chain is on. The
+    /// run is persisted as cancelled and every note reservation its never-broadcast transactions
+    /// hold is released, so those notes are spendable again at once. Its pre-signed transactions are
+    /// abandoned; transactions already broadcast are unaffected on-chain and may still be mined.
+    /// A plan proposed before the call can no longer be committed, and afterwards
+    /// ``migrationAdvanceStep(accountUUID:)`` answers ``MigrationAdvanceStep/complete`` for the run:
+    /// stop polling it.
+    ///
+    /// ``restartCurrentMigrationStep(accountUUID:)`` cancels the same way and then plans. This call
+    /// plans nothing, so the NU7 network-upgrade gate never refuses it, at any height. With no run
+    /// pending it succeeds and changes nothing, so a host may retry it.
+    /// - Parameter accountUUID: the account whose run to cancel.
+    /// - Throws: ``ZcashError/rustMigrationCancelRun(_:)`` if the rust layer returns an error.
+    func cancelMigrationRun(accountUUID: AccountUUID) async throws
 
     /// Rebuilds every EXPIRED transfer of `accountUUID`'s stored migration run in place through the
     /// engine and returns the run's FULL transfer schedule as stored AFTER the refresh.
@@ -1963,6 +2010,10 @@ public extension Synchronizer {
     /// with migration support must override it.
     func setMigrationNetworkUpgradeGateBypass(_ isBypassed: Bool) async { }
 
+    func migrationAvailability() async throws -> MigrationAvailability {
+        throw MigrationUnimplemented(member: #function)
+    }
+
     func migrationProgress(accountUUID: AccountUUID) async throws -> MigrationProgress? {
         throw MigrationUnimplemented(member: #function)
     }
@@ -2091,6 +2142,10 @@ public extension Synchronizer {
     }
 
     func restartCurrentMigrationStep(accountUUID: AccountUUID) async throws -> MigrationRestartOutcome {
+        throw MigrationUnimplemented(member: #function)
+    }
+
+    func cancelMigrationRun(accountUUID: AccountUUID) async throws {
         throw MigrationUnimplemented(member: #function)
     }
 

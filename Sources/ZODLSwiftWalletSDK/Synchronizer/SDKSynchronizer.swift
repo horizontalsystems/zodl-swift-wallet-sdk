@@ -1481,6 +1481,12 @@ public class SDKSynchronizer: AwaitableStopSynchronizer {
         await migrationHost.setUpgradeGateBypass(isBypassed)
     }
 
+    public func migrationAvailability() async throws -> MigrationAvailability {
+        // Wallet-scoped (the gate depends on the chain alone), so this lives on the host, which
+        // passes its own bypass holder's value, not on a per-account actor.
+        try await migrationHost.migrationAvailability()
+    }
+
     public func migrationProgress(accountUUID: AccountUUID) async throws -> MigrationProgress? {
         try await migrationHost.migration(for: accountUUID).migrationProgress()
     }
@@ -1604,6 +1610,10 @@ public class SDKSynchronizer: AwaitableStopSynchronizer {
 
     public func restartCurrentMigrationStep(accountUUID: AccountUUID) async throws -> MigrationRestartOutcome {
         try await migrationHost.migration(for: accountUUID).restartCurrentMigrationStep()
+    }
+
+    public func cancelMigrationRun(accountUUID: AccountUUID) async throws {
+        try await migrationHost.migration(for: accountUUID).cancelMigrationRun()
     }
 
     public func refreshStaleMigrationTransfers(accountUUID: AccountUUID, usk: UnifiedSpendingKey?) async throws -> MigrationSchedule {

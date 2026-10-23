@@ -242,6 +242,89 @@ final class SDKSynchronizerMigrationTests: ZcashTestCase {
         }
     }
 
+    /// The availability read is wallet-scoped, so it reaches the host's welding without naming an
+    /// account, and hands every answer back untouched, whichever phase it is. The bypass the welding
+    /// is asked with is the host's own: off by default, and following the setter both ways.
+    func testMigrationAvailabilityForwardsToTheHostWithItsBypass() async throws {
+        let welding = ZcashRustBackendWeldingMock()
+        let synchronizer = try makeSynchronizer(migrationHost: makeHost(welding: welding))
+        let answers = [
+            MigrationAvailability(phase: .available, activationHeight: 3_543_405, isImmediateLaneAvailable: true),
+            MigrationAvailability(phase: .pausedUntilNetworkUpgrade, activationHeight: 3_543_405, isImmediateLaneAvailable: true),
+            MigrationAvailability(phase: .networkUpgradeCutoff, activationHeight: 3_543_405, isImmediateLaneAvailable: false),
+            MigrationAvailability(phase: .available, activationHeight: nil, isImmediateLaneAvailable: true)
+        ]
+
+        for expected in answers {
+            welding.migrationAvailabilityUpgradeGateBypassReturnValue = expected
+
+            let availability = try await synchronizer.migrationAvailability()
+
+            XCTAssertEqual(availability, expected)
+            XCTAssertEqual(
+                welding.migrationAvailabilityUpgradeGateBypassReceivedUpgradeGateBypass,
+                false,
+                "the bypass is off by default"
+            )
+        }
+        XCTAssertEqual(welding.migrationAvailabilityUpgradeGateBypassCallsCount, answers.count)
+
+        await synchronizer.setMigrationNetworkUpgradeGateBypass(true)
+        _ = try await synchronizer.migrationAvailability()
+        XCTAssertEqual(welding.migrationAvailabilityUpgradeGateBypassReceivedUpgradeGateBypass, true)
+
+        await synchronizer.setMigrationNetworkUpgradeGateBypass(false)
+        _ = try await synchronizer.migrationAvailability()
+        XCTAssertEqual(welding.migrationAvailabilityUpgradeGateBypassReceivedUpgradeGateBypass, false)
+    }
+
+    /// An availability failure reaches the caller as the welding threw it.
+    func testMigrationAvailabilityPropagatesTheWeldingError() async throws {
+        let welding = ZcashRustBackendWeldingMock()
+        welding.migrationAvailabilityUpgradeGateBypassThrowableError = ZcashError.rustMigrationAvailability("boom")
+        let synchronizer = try makeSynchronizer(migrationHost: makeHost(welding: welding))
+
+        do {
+            _ = try await synchronizer.migrationAvailability()
+            XCTFail("Expected rustMigrationAvailability to be thrown")
+        } catch ZcashError.rustMigrationAvailability(let message) {
+            XCTAssertEqual(message, "boom")
+        } catch {
+            XCTFail("Expected rustMigrationAvailability but got \(error)")
+        }
+    }
+
+    /// `cancelMigrationRun` reaches the welding's cancel for the account, through that account's
+    /// actor. It is not a broadcast, so a sync in progress does not refuse it: a host cancels the run
+    /// the upgrade interrupted whatever else the wallet is doing.
+    func testCancelMigrationRunForwardsToTheAccountsActorEvenWhileSyncing() async throws {
+        let welding = ZcashRustBackendWeldingMock()
+        welding.migrationCancelRunForClosure = { _ in }
+        let synchronizer = try makeSynchronizer(migrationHost: makeHost(welding: welding))
+        await synchronizer.updateStatus(.syncing(0.5, false))
+
+        try await synchronizer.cancelMigrationRun(accountUUID: accountUUID)
+
+        XCTAssertEqual(welding.migrationCancelRunForCallsCount, 1)
+        XCTAssertEqual(welding.migrationCancelRunForReceivedAccount, accountUUID)
+    }
+
+    /// A cancel failure reaches the caller as the welding threw it.
+    func testCancelMigrationRunPropagatesTheWeldingError() async throws {
+        let welding = ZcashRustBackendWeldingMock()
+        welding.migrationCancelRunForThrowableError = ZcashError.rustMigrationCancelRun("boom")
+        let synchronizer = try makeSynchronizer(migrationHost: makeHost(welding: welding))
+
+        do {
+            try await synchronizer.cancelMigrationRun(accountUUID: accountUUID)
+            XCTFail("Expected rustMigrationCancelRun to be thrown")
+        } catch ZcashError.rustMigrationCancelRun(let message) {
+            XCTAssertEqual(message, "boom")
+        } catch {
+            XCTFail("Expected rustMigrationCancelRun but got \(error)")
+        }
+    }
+
     /// Before the NU7 network upgrade, every member that plans, builds, signs, stores or rebuilds a
     /// scheduled run throws the welding's refusal as it was thrown, activation height included.
     func testGatedMigrationCallsPropagateTheNetworkUpgradeRefusal() async throws {

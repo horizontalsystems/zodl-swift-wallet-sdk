@@ -472,6 +472,32 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default expiry (40 blocks before NU7, 120 from NU7) is `expiry_height`, the earlier candidate for an
   expiry neither produces. Each returns `false` with the last error set, writing nothing, for an
   unknown or unregistered network or a null output pointer.
+- `zcashlc_migration_cancel_run(db_data, db_data_len, account_uuid_bytes, network_id)` cancels the
+  account's pending migration run and nothing more, and returns `true` (`false` with the last error
+  set otherwise). The run is stored as cancelled and every note reservation its never-broadcast
+  transactions hold is released, so those notes are spendable at once; transactions already
+  broadcast are unaffected on-chain. A proposal previewed earlier can no longer be committed
+  (`MIGRATION_PLAN_STALE`). Unlike `zcashlc_migration_restart_step`, which cancels the same way, it
+  plans nothing. It is never refused before the NU7 activation, so it takes no
+  `upgrade_gate_bypass` and needs no chain tip. With no run pending it succeeds and changes nothing.
+  Afterwards `zcashlc_migration_advance_step` answers `ZCASHLC_ADVANCE_STEP_COMPLETE` for the run,
+  whatever the chain tip: this is how a run that `ZCASHLC_ADVANCE_STEP_INTERRUPTED_BY_NETWORK_UPGRADE`
+  reported is ended.
+- `zcashlc_migration_availability(db_data, db_data_len, network_id, upgrade_gate_bypass)` reports what
+  the migration may start at the height after the wallet's own chain tip, for choosing which options
+  to offer before anything is planned. It takes no account, opens the wallet read-only and makes no
+  network request. It returns an `FfiMigrationAvailability`, freed with
+  `zcashlc_free_migration_availability`: `phase` is `ZCASHLC_MIGRATION_AVAILABLE` (`0`, both the
+  scheduled and the immediate lane may start), `ZCASHLC_MIGRATION_PAUSED_UNTIL_UPGRADE` (`1`, the
+  NU7 activation is more than 48 blocks away: the scheduled lane is refused and the immediate lane
+  is open) or `ZCASHLC_MIGRATION_UPGRADE_CUTOFF` (`2`, the next height is one of the 48 blocks
+  before the activation: neither lane may start); `activation_height` is the network's NU7
+  activation height in every phase, `-1` when it has none; `immediate_available` is `false` only in
+  the cutoff phase. It judges the same gate as the calls refused with
+  `MIGRATION_PAUSED_UNTIL_UPGRADE`. `upgrade_gate_bypass` is for internal builds: `true` makes the
+  phase `0` at every height. A wallet with no chain tip, on a network that has an NU7 activation
+  height and without the bypass, returns NULL with the last error set ("sync first"); with the
+  bypass, or on a network with no NU7 activation height, no tip is read.
 
 ### Changed
 

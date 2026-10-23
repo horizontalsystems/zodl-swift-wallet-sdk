@@ -544,6 +544,23 @@ protocol ZcashRustBackendWelding {
     /// - Throws: `rustMigrationBlockRateSamples` if the rust layer returns an error.
     func migrationBlockRateSamples(window: UInt32) async throws -> [MigrationBlockRateSample]
 
+    /// What the migration may start at the wallet's next height, the NU7 network-upgrade gate's
+    /// phase for the app to decide which options to offer (see ``MigrationAvailability``).
+    /// Wallet-scoped, not account-scoped: the gate depends on the chain alone, so the read takes no
+    /// account and opens the wallet read-only. It is judged at the wallet's own chain tip, plus
+    /// one, and never at a server's height or a wall-clock estimate.
+    ///
+    /// `upgradeGateBypass` is the host's opt-out (internal builds only): with it the gate is open
+    /// at every height, as it is for the calls the gate refuses, and the answer needs no chain tip.
+    /// It is passed explicitly, not read from the backend's own holder, because the read is
+    /// wallet-scoped: the migration host serves it through the synchronizer's backend, which is not
+    /// one of the per-account backends the host's shared holder reaches, and passes that holder's
+    /// value.
+    /// - Throws: `rustMigrationAvailability` if the rust layer returns an error, notably when the
+    ///   wallet has no chain tip yet (sync first) on a network that has an NU7 activation height
+    ///   and the bypass is off.
+    func migrationAvailability(upgradeGateBypass: Bool) async throws -> MigrationAvailability
+
 
     /// Splits an ORDERED list of transaction action-weights (`MigrationUnsignedTransferPczt.actions`)
     /// into signer sessions bounded by `maxActionsPerSession`, preserving order, and returns the
@@ -838,6 +855,19 @@ protocol ZcashRustBackendWelding {
     /// schedule.
     /// - Throws: `rustMigrationRestartStep` if the rust layer returns an error.
     func migrationRestartStep(for account: AccountUUID) async throws -> MigrationRestartOutcome
+
+    /// Cancels `account`'s pending run and nothing more: the stored run is persisted as cancelled
+    /// and every note reservation its never-broadcast transactions hold is released, so those notes
+    /// are spendable again at once. Its pre-signed transactions are abandoned; already-broadcast
+    /// ones are unaffected on-chain and may still be mined. A plan proposed earlier can no longer
+    /// be committed. Unlike ``migrationRestartStep(for:)``, which cancels the same way, no new plan
+    /// is made.
+    ///
+    /// Never gated by the NU7 network-upgrade gate (it ends a run, it starts nothing), so the
+    /// backend's upgrade-gate bypass plays no part. With no run pending the call succeeds and
+    /// changes nothing.
+    /// - Throws: `rustMigrationCancelRun` if the rust layer returns an error.
+    func migrationCancelRun(for account: AccountUUID) async throws
 
     /// Rebuilds every EXPIRED transfer of the stored migration run in place through the engine:
     /// each rebuilt transfer re-spends the SAME funding note (recovered from the expired PCZT by
