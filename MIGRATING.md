@@ -1549,7 +1549,7 @@ case .rebuild: ...
 case .pausedForNetworkUpgrade(let activationHeight):
     // Nothing to perform. Show the run as paused for the upgrade that activates at `activationHeight`.
     break
-case .interruptedByNetworkUpgrade(let activationHeight):
+case .interruptedByNetworkUpgrade:
     // The run cannot complete: cancel it and offer a new migration.
     try await synchronizer.cancelMigrationRun(accountUUID: account)
 case .replan, .reevaluate, .waiting, .complete, nil:
@@ -1600,8 +1600,12 @@ stored or broadcast: `prepareNoteSplit`, `submitNoteSplit`, `proposeMigrationTra
 `signAndStoreMigrationSchedule`, `refreshStaleMigrationTransfers`, `createUnsignedNoteSplitPCZTs`,
 `storeSignedNoteSplitPCZTs`, `createUnsignedMigrationTransferPCZTs` and `storeSignedMigrationSchedulePCZTs`.
 The reads, the proving and broadcast executors and the immediate lane are not affected. It is judged at the
-wallet's own chain tip, and a network with no NU7 activation height never throws it. An exhaustive `switch`
-over either type stops compiling until it is handled.
+wallet's own chain tip, and a network with no NU7 activation height never throws it. The judgment needs that
+tip, so a wallet that has none yet fails these calls with their rust error instead (sync first). That includes
+`refreshStaleMigrationTransfers`, which used to answer the empty schedule for an account with no stored run, or
+a terminal one, whatever the wallet's tip, and still does with `setMigrationNetworkUpgradeGateBypass(_:)` on or
+on a network with no NU7 activation height. An exhaustive `switch` over either type stops compiling until it is
+handled.
 
 ```swift
 case .migrationPausedUntilNetworkUpgrade(let activationHeight):
@@ -1645,24 +1649,29 @@ stops compiling until it is handled.
 case .migrationSubmissionRefused(let refusal):
     switch refusal {
     case .wrongConsensusBranch, .expired:
-        // The transaction can never be mined: crank `migrationAdvanceStep(accountUUID:)`, which says what
-        // becomes of the run (an interrupted one is cancelled, an expired transfer rebuilt).
+        // The transaction can never be mined: sync, then crank `migrationAdvanceStep(accountUUID:)` again,
+        // which says what becomes of the run (an interrupted one is cancelled, an expired transfer rebuilt).
         break
     case .networkUpgradeCutoff:
         // The next block is one of the 48 before the NU7 activation: nothing is submitted until it has
-        // passed. Crank again later.
+        // passed. Sync, then crank again later.
         break
     }
 ```
+
+The crank judges the run at the wallet's own chain tip, and the refusal is judged at the higher of that and the
+server's height, so a wallet that is behind the server is offered the same instruction again until it has synced.
 
 These calls also change how they reach the network, with no signature change. `performMigrationBroadcast` and
 `submitNoteSplit` connect to the submission server and read its height before they take the transaction from the
 wallet, so `ZcashError.migrationTorUnavailable` now arrives before the wallet is touched, and a server whose height
 cannot be read yields `MigrationTransferResult.networkError(retryable: true)` with nothing submitted or recorded.
-`takeMigrationPreparation` makes one network request of its own, to the synchronizer's lightwalletd server, and
-throws the request's error when it fails. With Tor enabled that request uses the Tor group the SDK submits the
-transaction in (named after its txid), not the circuit the sync uses; no change is needed in the app. See
-`CHANGELOG.md`.
+That includes `submitNoteSplit` before the NU7 upgrade has activated: it contacts the submission server first, and
+only then is refused with `migrationPausedUntilNetworkUpgrade`, so ask `migrationAvailability()`, which makes no
+network request, before calling it. `takeMigrationPreparation` makes one network request of its own, to the
+synchronizer's lightwalletd server, and throws the request's error when it fails. With Tor enabled that request uses
+a Tor group named after the transaction's txid, which is not the circuit the sync uses and is shared with no other
+transaction; no change is needed in the app. See `CHANGELOG.md`.
 
 ## Every submission is checked against the next block
 
@@ -1674,11 +1683,14 @@ to, on the connection it submits over, and refuses a transaction that cannot be 
 higher of that height and the wallet's chain tip: one built for another consensus branch than that block's, which is what the NU7
 activation does to a transaction created before it and not yet sent, or one that has expired by then. Nothing else changes for a
 transaction that can be valid, apart from the extra request, and a normal send is never held back in the blocks before the
-activation.
+activation. The immediate migration is a normal send, so check `isImmediateLaneAvailable` of `migrationAvailability()` before
+sending one.
 
 A refusal is reported as the failure of the call, under the local code and the stable description of its
 `TransactionSubmissionRefusal`, which no server sends. Nothing was submitted, and no block can include the transaction as it
-is, so the caller creates it again:
+is, so the caller syncs and creates it again. The sync matters: a wallet that is behind the server would build a transaction
+that is refused again, and the refused one, which the wallet stored when it created it, returns its inputs to the spendable
+balance only at its expiry height:
 
 ```swift
 // Before
@@ -1689,21 +1701,22 @@ case .submitFailure(let txId, let code, let description):
 // After
 case .submitFailure(let txId, let code, let description):
     if code == TransactionSubmissionRefusal.wrongConsensusBranch.code || code == TransactionSubmissionRefusal.expired.code {
-        // The SDK did not submit it: it cannot be valid in the next block. Create the transaction again.
+        // The SDK did not submit it: it cannot be valid in the next block. Sync, then create the transaction again.
     } else {
         // A server rejected the transaction. Show `description`.
     }
 ```
 
-`Broadcaster.submit` reports the same refusal as `TransactionSubmissionOutcome.rejected(code:message:)` when no endpoint accepted
-the transaction, so the check above applies to its `code` as well. When the server's height cannot be read, nothing is submitted either.
-The height is the first request of a submission, so this is reported like any other failure to reach the server, and a caller that
-handles that needs no change: a stream reports `TransactionSubmitResult.grpcFailure(txId:error:)` for the transaction, with the ones
-after it `.notAttempted`, and an endpoint of `Broadcaster.submit` counts as unreachable. A transaction the check cannot judge at all, because
-it does not parse or the wallet database is missing, is not submitted and ends a stream with `ZcashError.rustCheckTransactionSubmittable`
-(below).
+`Broadcaster.submit` reports the same refusal as `TransactionSubmissionOutcome.rejected(code:message:)` when every endpoint has
+answered, none accepted the transaction and at least one refused or rejected it, so the check above applies to its `code` as well;
+an endpoint still pending when `responseTimeout` ends makes the outcome `.timedOut` instead. When the server's height cannot be read,
+nothing is submitted either. The height is the first request of a submission, so this is reported like any other failure to reach the
+server, and a caller that handles that needs no change: a stream reports `TransactionSubmitResult.grpcFailure(txId:error:)` for the
+transaction, with the ones after it `.notAttempted`, and an endpoint of `Broadcaster.submit` counts as unreachable. A transaction the
+check cannot judge at all, because it does not parse or the wallet database is missing, is not submitted and ends a stream with
+`ZcashError.rustCheckTransactionSubmittable` (below).
 
-Two enums gained a case, so an exhaustive `switch` over either stops compiling until it is handled. `ZcashError` and `ZcashErrorCode` have
+Three enums gained a case, so an exhaustive `switch` over any of them stops compiling until it is handled. `ZcashError` and `ZcashErrorCode` have
 `rustCheckTransactionSubmittable` (`ZRUST0163`), whose payload is the rust layer's message: the transaction could not be judged, so it was
 not submitted. `TransactionEncoderError` has `notSubmittable(_:)`, whose payload is the `TransactionSubmissionRefusal`; the
 synchronizers and the broadcaster report a refusal as above, so it is not one a consumer meets from them.

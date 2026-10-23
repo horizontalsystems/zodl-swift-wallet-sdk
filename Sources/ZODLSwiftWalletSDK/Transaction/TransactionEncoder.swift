@@ -173,8 +173,9 @@ extension LightWalletService {
     /// The height is the first request of a submission, so a read that fails is a submission that could not reach the
     /// server, and it fails the way the submit after it would have: as ``ZcashError/serviceSubmitFailed(_:)``, carrying the
     /// failure of the read. Over Tor the read throws the error of the Tor connection, where the submit wraps all of
-    /// them in a generic service error, and so does this. A caller that reports a failed submit as a failure to reach the
-    /// server reports this as one too.
+    /// them in a generic service error, and so does this. A cancellation during the read is reported as a failed submit
+    /// too, as the services' own submit reports one, not as a `CancellationError`. A caller that reports a failed submit as
+    /// a failure to reach the server reports this as one too.
     ///
     /// A transaction the check cannot judge (it does not parse, or the wallet database is missing) is another thing: no
     /// retry fixes it. It fails with ``ZcashError/rustCheckTransactionSubmittable(_:)``.

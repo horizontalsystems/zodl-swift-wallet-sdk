@@ -452,8 +452,8 @@ actor OrchardMigration {
     /// own, possibly to several servers, so there is no single submission server to ask for the
     /// height the check needs: this reads it from the synchronizer's own lightwalletd server
     /// (``Config/submissionHeight``), with one request of its own, made for `txid` so that it can
-    /// ride a connection of that transaction's own (with Tor on, the Tor group the SDK submits that
-    /// transaction in, never the default circuit the sync keeps for the wallet), and a height that
+    /// ride a connection of that transaction's own (with Tor on, a Tor group named after the
+    /// transaction, never the default circuit the sync keeps for the wallet), and a height that
     /// cannot be read fails closed — the error propagates and nothing is taken. The next block is
     /// the one after the higher of that height and the wallet's chain tip; the preparation must be
     /// built for its consensus branch and not have expired by it, and the migration takes nothing
@@ -567,8 +567,11 @@ actor OrchardMigration {
     /// - Throws: a pre-broadcast failure throws untouched and nothing is recorded — a fail-closed
     ///   ``ZcashError/migrationTorUnavailable`` when `options.useTor` is set and Tor cannot be
     ///   established, ``ZcashError/migrationSubmissionRefused(_:)`` when the transaction cannot be
-    ///   valid in the next block (nothing was submitted, and the wallet recorded nothing — crank
-    ///   ``advanceStep()`` again to learn what becomes of the run), or the seam's STALENESS refusal
+    ///   valid in the next block (nothing was submitted, and the wallet recorded nothing — sync,
+    ///   then crank ``advanceStep()`` again to learn what becomes of the run: the crank judges the
+    ///   run at the wallet's own chain tip, and the check at the higher of that and the server's
+    ///   height, so a wallet that is behind the server is offered the same broadcast again until
+    ///   it has synced), or the seam's STALENESS refusal
     ///   (``ZcashError/rustMigrationTakeBroadcastTransaction(_:)``) of a row that is no longer
     ///   proved-and-servable. The staleness throw is the honest answer to a stale instruction —
     ///   discharge it by cranking ``advanceStep()`` again rather than retrying the executor. A
@@ -846,7 +849,8 @@ actor OrchardMigration {
     /// the cancel half of ``restartCurrentMigrationStep()``, for ending a run the NU7 network
     /// upgrade interrupted before the user is offered a new migration. A plan proposed earlier can
     /// no longer be committed; already-broadcast transactions are unaffected on-chain. With no run
-    /// stored the call succeeds and changes nothing. The network-upgrade gate never refuses it.
+    /// pending the call succeeds and changes no stored run. The network-upgrade gate never refuses
+    /// it.
     func cancelMigrationRun() async throws {
         try await welding.migrationCancelRun(for: accountUUID)
     }

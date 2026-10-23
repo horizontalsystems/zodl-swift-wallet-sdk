@@ -80,8 +80,9 @@ actor OrchardMigrationHost {
 
         // The synchronizer's own lightwalletd server's latest block height, which a preparation's
         // submission check is judged against (see ``OrchardMigration/takePreparation(byTxid:)``).
-        // With Tor on it is read over the Tor group the SDK submits that preparation in
-        // (`submit-<txid>`), like the SDK's other requests that name a transaction, each of which
+        // With Tor on it is read over a Tor group named after the preparation's txid
+        // (`submit-<txid>`, not necessarily the one the host submits it in), like the SDK's other
+        // requests that name a transaction, each of which
         // gets a circuit of that transaction's own so that nothing the server sees ties one
         // transaction to another or to the wallet's sync identity. It is never read over the default
         // circuit the sync keeps for the wallet: a request there moments before every preparation is

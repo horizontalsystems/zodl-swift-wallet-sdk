@@ -2652,7 +2652,9 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
 
         // NULL is an unambiguous error sentinel here: every legitimate outcome — nothing stored,
         // a terminal run, nothing expired, or a completed rebuild — returns a schedule (possibly
-        // empty), mirroring `migrationRestartStep`.
+        // empty), and a refusal by the network-upgrade gate is an error like any other. Unlike
+        // `migrationRestartStep`, whose successful outcome can carry no schedule, there is no
+        // success without one.
         guard let schedulePtr else {
             throw migrationRoutedError(
                 lastErrorMessage(fallback: "`migrationRefreshStaleTransfers` failed with unknown error"),

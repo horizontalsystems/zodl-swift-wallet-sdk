@@ -754,8 +754,9 @@ public struct MigrationAvailability: Equatable, Sendable {
         case pausedUntilNetworkUpgrade
         /// The wallet's next height is one of the 48 blocks (about an hour) before the upgrade
         /// activates. Neither lane may start, so that nothing is still in flight when the
-        /// consensus branch changes. Offer a migration again once the wallet has synced up to the
-        /// activation height.
+        /// consensus branch changes: the SDK refuses the scheduled lane's calls, and the caller
+        /// withholds the immediate lane (see ``MigrationAvailability/isImmediateLaneAvailable``).
+        /// Offer a migration again once the wallet has synced up to the activation height.
         case networkUpgradeCutoff
     }
 
@@ -765,7 +766,8 @@ public struct MigrationAvailability: Equatable, Sendable {
     /// network has none (and then the phase is always ``Phase/available``).
     public let activationHeight: BlockHeight?
     /// Whether the immediate lane, one transaction that migrates the whole balance, may start:
-    /// `false` only in ``Phase/networkUpgradeCutoff``.
+    /// `false` only in ``Phase/networkUpgradeCutoff``. Nothing in the SDK refuses the immediate
+    /// migration when it is `false`, so a caller must check it before it proposes or sends one.
     public let isImmediateLaneAvailable: Bool
 
     /// Creates an availability.

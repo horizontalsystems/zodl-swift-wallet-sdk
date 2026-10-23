@@ -20,17 +20,23 @@ import Foundation
 ///
 /// A refusal is reported where the submission is. A migration transaction throws
 /// ``ZcashError/migrationSubmissionRefused(_:)``. Any other transaction is reported as
-/// ``TransactionSubmitResult/submitFailure(txId:code:description:)`` when the synchronizer submits it, and
-/// as ``TransactionSubmissionOutcome/rejected(code:message:)`` when it is submitted to several endpoints,
-/// with the refusal's ``code`` and ``description``. ``networkUpgradeCutoff`` is the migration's alone:
-/// a normal send is never cut off.
+/// ``TransactionSubmitResult/submitFailure(txId:code:description:)`` when the synchronizer submits it, and,
+/// when it is submitted to several endpoints, as ``TransactionSubmissionOutcome/rejected(code:message:)`` once
+/// every endpoint has answered and none accepted it, with the refusal's ``code`` and ``description``.
+/// ``networkUpgradeCutoff`` is the scheduled migration's alone: a normal send, the immediate migration
+/// included, is never cut off.
+///
+/// A refused normal transaction has to be created again, after a sync: a wallet that is behind the
+/// server would build one that is refused again. The refused one stays in the wallet, which stored it
+/// when it was created, and its inputs return to the spendable balance at its expiry height.
 public enum TransactionSubmissionRefusal: Equatable, Sendable, CustomStringConvertible {
     /// The transaction is built for another consensus branch than the next block is under. This is
     /// what a network upgrade does to a transaction created before it and not yet sent: no block
-    /// of the new branch can include it, so it has to be created again.
+    /// of the new branch can include it, so a normal transaction has to be created again, after a
+    /// sync.
     case wrongConsensusBranch
     /// The transaction's expiry height is below the next block's, so no block can include it any
-    /// more (ZIP 203). It has to be created again.
+    /// more (ZIP 203). A normal transaction has to be created again, after a sync.
     case expired
     /// The next block is one of the 48 immediately before the NU7 network upgrade activates, in
     /// which the migration submits nothing, so that no migration transaction is still in flight

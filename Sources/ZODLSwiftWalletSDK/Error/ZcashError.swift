@@ -758,7 +758,7 @@ public enum ZcashError: Equatable, Error {
     /// ZRUST0161
     case rustMigrationCancelRun(_ rustError: String)
     /// The migration transaction cannot be valid in the next block, so it was not submitted.
-    /// A migration transaction is submitted only if it is built for the consensus branch of the next block, has not expired by then, and does not fall in the blocks just before the NU7 network upgrade, all judged at the higher of the wallet's chain tip and the height the submission server reports. This one failed that check, so nothing was submitted and the wallet recorded nothing. Crank the migration again: the step it returns says what becomes of the run.
+    /// A migration transaction is submitted only if it is built for the consensus branch of the next block, has not expired by then, and does not fall in the blocks just before the NU7 network upgrade, all judged at the higher of the wallet's chain tip and the height the submission server reports. This one failed that check, so nothing was submitted and the wallet recorded nothing. Sync, then crank the migration again: the step it returns says what becomes of the run, and a wallet that is behind the server is offered the same transaction again until it has synced.
     /// - `refusal` is why the transaction cannot be valid in the next block.
     /// ZRUST0162
     case migrationSubmissionRefused(_ refusal: TransactionSubmissionRefusal)

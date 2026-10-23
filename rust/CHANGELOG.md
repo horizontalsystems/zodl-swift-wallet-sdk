@@ -490,8 +490,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   broadcast are unaffected on-chain. A proposal previewed earlier can no longer be committed
   (`MIGRATION_PLAN_STALE`). Unlike `zcashlc_migration_restart_step`, which cancels the same way, it
   plans nothing. It is never refused before the NU7 activation, so it takes no
-  `upgrade_gate_bypass` and needs no chain tip. With no run pending it succeeds and changes nothing.
-  Afterwards `zcashlc_migration_advance_step` answers `ZCASHLC_ADVANCE_STEP_COMPLETE` for the run,
+  `upgrade_gate_bypass` and needs no chain tip. With no run pending it succeeds and changes no stored
+  run. Afterwards `zcashlc_migration_advance_step` answers `ZCASHLC_ADVANCE_STEP_COMPLETE` for the run,
   whatever the chain tip: this is how a run that `ZCASHLC_ADVANCE_STEP_INTERRUPTED_BY_NETWORK_UPGRADE`
   reported is ended.
 - `zcashlc_migration_availability(db_data, db_data_len, network_id, upgrade_gate_bypass)` reports what
@@ -505,10 +505,12 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before the activation: neither lane may start); `activation_height` is the network's NU7
   activation height in every phase, `-1` when it has none; `immediate_available` is `false` only in
   the cutoff phase. It judges the same gate as the calls refused with
-  `MIGRATION_PAUSED_UNTIL_UPGRADE`. `upgrade_gate_bypass` is for internal builds: `true` makes the
-  phase `0` at every height. A wallet with no chain tip, on a network that has an NU7 activation
-  height and without the bypass, returns NULL with the last error set ("sync first"); with the
-  bypass, or on a network with no NU7 activation height, no tip is read.
+  `MIGRATION_PAUSED_UNTIL_UPGRADE`, which enforce the scheduled lane alone: no call refuses the
+  immediate lane in the cutoff window, so a caller checks `immediate_available`.
+  `upgrade_gate_bypass` is for internal builds: `true` makes the phase `0` at every height. A wallet
+  with no chain tip, on a network that has an NU7 activation height and without the bypass, returns
+  NULL with the last error set ("sync first"); with the bypass, or on a network with no NU7
+  activation height, no tip is read.
 
 ### Changed
 
@@ -830,8 +832,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `ZCASHLC_ADVANCE_STEP_REEVALUATE` instead, to sync and ask again, until the wallet has scanned the
     block before the activation.
   - `upgrade_gate_bypass` is for internal builds: `true` lifts the pause and the 48-block window, so
-    the engine's own step is returned at every height, and never lifts the interruption. Pass `false`
-    to enforce the gate.
+    the call never answers `PAUSED_FOR_NETWORK_UPGRADE` and otherwise returns the engine's own step.
+    It never lifts the interruption: the call still answers `INTERRUPTED_BY_NETWORK_UPGRADE`, or
+    `ZCASHLC_ADVANCE_STEP_REEVALUATE` while the wallet's scan has not reached the block before the
+    activation. Pass `false` to enforce the gate.
 - Until the NU7 network upgrade has activated, the calls that plan, build, sign, store or rebuild a
   scheduled migration run are refused: `zcashlc_migration_propose_transfers`,
   `zcashlc_migration_prepare_note_split`, `zcashlc_migration_sign_note_split`,
@@ -843,7 +847,9 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MIGRATION_PAUSED_UNTIL_UPGRADE:<activation height>`, the height following the colon directly (for
   example `MIGRATION_PAUSED_UNTIL_UPGRADE:3543405`). Nothing is planned, cached, built, signed or
   stored by a refused call. The gate is judged at the height after the wallet's own chain tip, so a
-  wallet with no chain tip fails with the usual "sync first" error instead, and a network with no NU7
+  wallet with no chain tip fails with the usual "sync first" error instead, and
+  `zcashlc_migration_refresh_stale_transfers` is no exception even where it has nothing to refresh (no
+  stored run, or a terminal one), which it used to answer before reading any tip. A network with no NU7
   activation height is never gated. Each of the nine, and `zcashlc_migration_restart_step`, takes a
   trailing `upgrade_gate_bypass: bool`, which every existing call site must now pass. It is for
   internal builds: `true` lets the call through at every height. Pass `false` to enforce the gate. The

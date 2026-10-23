@@ -2275,8 +2275,9 @@ pub const ZCASHLC_MIGRATION_AVAILABLE: u32 = 0;
 /// The scheduled lane is paused until the NU7 upgrade has activated and the immediate lane is open:
 /// the wallet's next height is more than 48 blocks before the activation.
 pub const ZCASHLC_MIGRATION_PAUSED_UNTIL_UPGRADE: u32 = 1;
-/// Both lanes are stopped: the wallet's next height is one of the 48 blocks before the NU7
-/// activation.
+/// Neither lane may start: the wallet's next height is one of the 48 blocks before the NU7
+/// activation. The calls of the scheduled lane are refused; nothing refuses the immediate lane, so
+/// the caller withholds it (see [`FfiMigrationAvailability::immediate_available`]).
 pub const ZCASHLC_MIGRATION_UPGRADE_CUTOFF: u32 = 2;
 
 /// What the migration may start at the wallet's next height (returned by
@@ -2290,7 +2291,8 @@ pub struct FfiMigrationAvailability {
     /// has none, and then the phase is always [`ZCASHLC_MIGRATION_AVAILABLE`].
     pub activation_height: i64,
     /// Whether the immediate lane (one transaction that migrates the whole balance) is open:
-    /// `false` only in the cutoff window, [`ZCASHLC_MIGRATION_UPGRADE_CUTOFF`].
+    /// `false` only in the cutoff window, [`ZCASHLC_MIGRATION_UPGRADE_CUTOFF`]. Nothing in this
+    /// library refuses the immediate lane when it is `false`: the caller must check it.
     pub immediate_available: bool,
 }
 
@@ -4838,8 +4840,9 @@ pub unsafe extern "C" fn zcashlc_migration_cancel_run(
 /// nothing is planned, built, signed, stored or rebuilt then. `upgrade_gate_bypass` is for internal
 /// builds and opens the gate.
 ///
-/// Like the other gated calls it needs the wallet's chain tip, so on a wallet that has none it
-/// fails even where there is nothing to refresh.
+/// Like the other gated calls it needs the wallet's chain tip for the gate, so on a network that
+/// has an NU7 activation height, and without `upgrade_gate_bypass`, a wallet that has none fails
+/// even where there is nothing to refresh.
 ///
 /// # Safety
 /// See [`open`]; `usk_ptr` must be null (with `usk_len == 0`) or valid for reads of `usk_len`
@@ -4878,8 +4881,9 @@ pub unsafe extern "C" fn zcashlc_migration_refresh_stale_transfers(
 
         // Reconcile before judging expiry: a Broadcast transfer the wallet has since observed
         // on-chain must count as Mined here, or it would look expired and be rebuilt into a
-        // double spend of its own mined copy. The no-run and terminal answers come before any
-        // tip lookup, so they hold even before the wallet ever saw a chain tip.
+        // double spend of its own mined copy. The no-run and terminal answers come before this
+        // call's own tip lookup, so they hold even before the wallet ever saw a chain tip wherever
+        // the gate above reads none: with the bypass on, or on a network with no NU7 height.
         let Some(mut state) = reconcile_mined(&mut ctx)? else {
             return Ok(encode_empty_schedule());
         };

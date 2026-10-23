@@ -938,7 +938,7 @@ protocol ZcashRustBackendWelding {
     ///
     /// Never gated by the NU7 network-upgrade gate (it ends a run, it starts nothing), so the
     /// backend's upgrade-gate bypass plays no part. With no run pending the call succeeds and
-    /// changes nothing.
+    /// changes no stored run.
     /// - Throws: `rustMigrationCancelRun` if the rust layer returns an error.
     func migrationCancelRun(for account: AccountUUID) async throws
 
