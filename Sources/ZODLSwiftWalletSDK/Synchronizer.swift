@@ -926,6 +926,14 @@ public protocol Synchronizer: AnyObject {
     // include `cancelMigrationRun` (it ends a run and starts nothing), are not refused by it.
     // `migrationAvailability` reports what the gate allows at the wallet's next height, so an app
     // can decide which options to offer before it calls any of them.
+    //
+    // In every phase, the members that hand a transaction to the network (`submitNoteSplit`,
+    // `performMigrationBroadcast`) and `takeMigrationPreparation`, which hands one to the app, check
+    // it first against the block it would be mined in: the one after the higher of the wallet's
+    // chain tip and the latest block height of the server it is going to (for `takeMigrationPreparation`,
+    // the synchronizer's own). A transaction that is not built for that block's consensus branch,
+    // that has expired by it, or that falls in the blocks just before the upgrade is not recorded in
+    // the wallet and not submitted, and the member throws `ZcashError.migrationSubmissionRefused(_:)`.
 
     /// The migration engine's next step to advance `accountUUID`'s stored run, paired with its
     /// advisory outlook — a verbatim conduit of the engine's own `advance_migration`: the
@@ -1113,15 +1121,29 @@ public protocol Synchronizer: AnyObject {
     /// ZIP 318 schedule and are served by ``performMigrationBroadcast(accountUUID:_:options:)``
     /// alone. This call does not broadcast, so it carries no privacy options and is not guarded
     /// against sync.
+    ///
+    /// The preparation is checked before the wallet records it: it must be built for the
+    /// consensus branch of the next block, must not have expired by it, and is not served in the
+    /// blocks just before the NU7 network upgrade. The next block is the one after the higher of
+    /// the wallet's chain tip and the latest block height of the synchronizer's own lightwalletd
+    /// server, which this call therefore reads, with one network request of its own (in the mode
+    /// the sync's own chain-tip updates use). A preparation that fails the check is not recorded
+    /// in the wallet, and a height that cannot be read fails the call without taking anything. An
+    /// app that submits the bytes to other servers than the synchronizer's, or to several, should
+    /// judge them against each of those servers' own heights as well.
     /// - Parameters:
     ///   - accountUUID: the account whose preparation is being retrieved.
     ///   - txid: a txid ``MigrationProveOutcome/preparationTxids`` named, in the SDK's
     ///     raw/internal byte order.
-    /// - Throws: ``ZcashError/migrationProvingUnavailable(_:)`` when the stored artifact cannot be
-    ///   turned into servable bytes; ``ZcashError/rustMigrationTakePreparation(_:)`` for a
-    ///   transfer's txid, for a txid the stored run does not carry, and for the readiness refusal
-    ///   of a preparation that is not proved — which an app discharges by proving again rather
-    ///   than retrying this.
+    /// - Throws: ``ZcashError/migrationSubmissionRefused(_:)`` when the preparation cannot be valid
+    ///   in the next block, with the reason; ``ZcashError/migrationProvingUnavailable(_:)`` when the
+    ///   stored artifact cannot be turned into servable bytes;
+    ///   ``ZcashError/rustMigrationTakePreparation(_:)`` for a transfer's txid, for a txid the
+    ///   stored run does not carry, for a run that has ended, and for the readiness refusal of a
+    ///   preparation that is not proved — which an app discharges by proving again rather than
+    ///   retrying this; and the error of the height read, for instance
+    ///   ``ZcashError/serviceLatestBlockHeightFailed(_:)``, when the synchronizer's server cannot be
+    ///   asked.
     func takeMigrationPreparation(accountUUID: AccountUUID, byTxid txid: Data) async throws -> PreparedMigrationTransfer
 
     /// Closes the seam: records the engine-side outcome of a preparation the app retrieved with
@@ -1247,6 +1269,13 @@ public protocol Synchronizer: AnyObject {
     /// Signs, extracts, broadcasts, and records `accountUUID`'s note-split transaction, returning the
     /// broadcast outcome.
     ///
+    /// The SDK connects to the submission server first and reads its latest block height on that
+    /// connection, then signs and checks the transaction against the next block (the one after the
+    /// higher of that height and the wallet's chain tip) before the wallet records it, then
+    /// submits it. A transaction that cannot be valid in the next block is refused, not recorded
+    /// and not submitted, and a server whose height cannot be read gets nothing: the result is
+    /// ``MigrationTransferResult/networkError(retryable:)`` and nothing was signed or recorded.
+    ///
     /// - Parameters:
     ///   - accountUUID: the account whose note split is being submitted.
     ///   - proposal: the note-split proposal to sign and broadcast, from ``prepareNoteSplit(accountUUID:)``.
@@ -1255,9 +1284,11 @@ public protocol Synchronizer: AnyObject {
     /// - Throws: ``ZcashError/migrationBroadcastDuringSync`` if the synchronizer is actively syncing —
     ///   sync and migration broadcasts must never share a session; this is enforced by the SDK on
     ///   this call, so stop sync first. ``ZcashError/migrationPausedUntilNetworkUpgrade(_:)``
-    ///   before the NU7 network upgrade has activated: nothing is signed or broadcast. Otherwise,
-    ///   a pre-broadcast failure throws untouched (nothing was broadcast); a failure to record a
-    ///   broadcast that did land throws
+    ///   before the NU7 network upgrade has activated: nothing is signed or broadcast.
+    ///   ``ZcashError/migrationSubmissionRefused(_:)`` when the signed transaction cannot be valid
+    ///   in the next block: it was not submitted and the wallet did not record it, while the
+    ///   committed run stays. Otherwise, a pre-broadcast failure throws untouched (nothing was
+    ///   broadcast); a failure to record a broadcast that did land throws
     ///   ``ZcashError/migrationRecordFailedAfterBroadcast(_:)`` — the broadcast is real and a
     ///   later attempt self-heals.
     /// - Note: A completed submission leaves no timed hold behind — the migration gate blocks
@@ -1417,11 +1448,21 @@ public protocol Synchronizer: AnyObject {
     /// never proves, either: a due row still awaiting its proof is never named by a `.broadcast`
     /// step; the crank reports it inside the `.prove` batch.
     ///
-    /// It wraps exactly what an app cannot do for itself: serving the transaction's finalized
-    /// bytes through the store's atomic broadcast seam, submitting them under the given privacy
-    /// options — always over the dedicated migration Tor runtime when `options.useTor` is set,
-    /// independent of the global `tor(enabled:)` toggle and fail-closed — bracketing the submit
-    /// in the sync gate's in-flight marker, and recording the result.
+    /// It wraps exactly what an app cannot do for itself: connecting to the submission server and
+    /// reading its latest block height there, serving the transaction's finalized bytes through the
+    /// store's atomic broadcast seam, submitting them under the given privacy options — always over
+    /// the dedicated migration Tor runtime when `options.useTor` is set, independent of the global
+    /// `tor(enabled:)` toggle and fail-closed — bracketing the submit in the sync gate's in-flight
+    /// marker, and recording the result.
+    ///
+    /// The transaction is checked before the wallet records it. The next block is the one after
+    /// the higher of the wallet's chain tip and the height the submission server reported, and the
+    /// transaction must be built for that block's consensus branch, must not have expired by it,
+    /// and is not submitted in the blocks just before the NU7 network upgrade. One that fails is
+    /// neither recorded in the wallet nor submitted. A server whose height cannot be read gets
+    /// nothing either: no transaction is taken, and the result is
+    /// ``MigrationTransferResult/networkError(retryable:)``, so the next crank offers the
+    /// instruction again.
     ///
     /// - Parameters:
     ///   - accountUUID: the account the instruction belongs to.
@@ -1431,6 +1472,9 @@ public protocol Synchronizer: AnyObject {
     ///   sync and migration broadcasts must never share a session; this is enforced by the SDK on
     ///   this call, so stop sync first. Otherwise, a pre-broadcast failure throws untouched (nothing
     ///   was broadcast) — including
+    ///   ``ZcashError/migrationSubmissionRefused(_:)`` when the transaction cannot be valid in the
+    ///   next block, with the reason (crank ``migrationAdvanceStep(accountUUID:)`` to learn what
+    ///   becomes of the run), and
     ///   ``ZcashError/rustMigrationTakeBroadcastTransaction(_:)`` when the instruction has gone
     ///   STALE (its row is no longer proved-and-servable, typically because it was already
     ///   broadcast). Discharge a staleness throw by cranking

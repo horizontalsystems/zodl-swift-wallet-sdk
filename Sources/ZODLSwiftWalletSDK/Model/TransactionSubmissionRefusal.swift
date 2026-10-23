@@ -1,0 +1,77 @@
+//
+//  TransactionSubmissionRefusal.swift
+//  ZODLSwiftWalletSDK
+//
+
+import Foundation
+
+/// Why the SDK refused to submit a transaction: it cannot be valid in the next block.
+///
+/// A block accepts only a transaction built for the consensus branch its own height is under, and
+/// only one that has not expired by then. The SDK judges a submission against the next block, the
+/// one after the higher of the wallet's chain tip and the height reported by the server the
+/// transaction is about to go to, and refuses a transaction that fails either test before anything
+/// reaches the network. A refused transaction is never submitted, and a migration transaction is
+/// not recorded in the wallet either.
+///
+/// The server's height counts because the wallet's own chain tip can lag it by every block the
+/// wallet has not synced yet, and a transaction is mined by the chain as the server sees it. When
+/// that height cannot be read, nothing is submitted.
+public enum TransactionSubmissionRefusal: Equatable, Sendable, CustomStringConvertible {
+    /// The transaction is built for another consensus branch than the next block is under. This is
+    /// what a network upgrade does to a transaction created before it and not yet sent: no block
+    /// of the new branch can include it, so it has to be created again.
+    case wrongConsensusBranch
+    /// The transaction's expiry height is below the next block's, so no block can include it any
+    /// more (ZIP 203). It has to be created again.
+    case expired
+    /// The next block is one of the 48 immediately before the NU7 network upgrade activates, in
+    /// which the migration submits nothing, so that no migration transaction is still in flight
+    /// when the consensus branch changes. Only a migration transaction is refused for this reason.
+    /// Nothing is lost: the transaction waits for the upgrade.
+    case networkUpgradeCutoff
+
+    /// The local code the refusal is reported under where a failure carries an integer code:
+    /// `-9101` (``wrongConsensusBranch``), `-9102` (``expired``) and `-9103`
+    /// (``networkUpgradeCutoff``). They are stable, and no server sends them.
+    public var code: Int {
+        switch self {
+        case .wrongConsensusBranch:
+            return -9101
+        case .expired:
+            return -9102
+        case .networkUpgradeCutoff:
+            return -9103
+        }
+    }
+
+    /// A stable description of the refusal, for logs and diagnostics. It carries no transaction
+    /// data.
+    public var description: String {
+        switch self {
+        case .wrongConsensusBranch:
+            return "The transaction is built for another consensus branch than the next block's."
+        case .expired:
+            return "The transaction expires before the next block."
+        case .networkUpgradeCutoff:
+            return "Migration transactions are not submitted in the blocks just before the network upgrade."
+        }
+    }
+}
+
+extension TransactionSubmissionRefusal {
+    /// The refusal a code of the rust layer's `MIGRATION_SUBMISSION_REFUSED:<code>` error names, or
+    /// `nil` for a code this SDK does not know.
+    init?(rustCode: String) {
+        switch rustCode {
+        case "wrong_branch":
+            self = .wrongConsensusBranch
+        case "expired":
+            self = .expired
+        case "cutoff":
+            self = .networkUpgradeCutoff
+        default:
+            return nil
+        }
+    }
+}

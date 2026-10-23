@@ -112,7 +112,7 @@ final class MigrationFFITests: XCTestCase {
     /// `migrationAdvanceStep`, never from this call.
     func testFreshWalletTakeBroadcastTransactionThrows() async throws {
         do {
-            _ = try await rustBackend.migrationTakeBroadcastTransaction(id: 0, for: account)
+            _ = try await rustBackend.migrationTakeBroadcastTransaction(id: 0, submissionServerHeight: 4_000_000, for: account)
             XCTFail("a wallet with no stored run has no transaction to serve")
         } catch let error as ZcashError {
             XCTAssertEqual(error.code.rawValue, "ZRUST0111")
@@ -138,7 +138,11 @@ final class MigrationFFITests: XCTestCase {
     /// only ever reaches it holding a txid `migrationProveTransactions` just handed out.
     func testFreshWalletTakePreparationThrows() async throws {
         do {
-            _ = try await rustBackend.migrationTakePreparation(txid: Data(repeating: 0, count: 32), for: account)
+            _ = try await rustBackend.migrationTakePreparation(
+                txid: Data(repeating: 0, count: 32),
+                submissionServerHeight: 4_000_000,
+                for: account
+            )
             XCTFail("a wallet with no stored run has no preparation to serve")
         } catch let error as ZcashError {
             XCTAssertEqual(error.code.rawValue, "ZRUST0149")
@@ -149,7 +153,11 @@ final class MigrationFFITests: XCTestCase {
     /// accessor's parameter is a raw internal-order txid, never a display-hex string.
     func testTakePreparationRejectsAMalformedTxid() async throws {
         do {
-            _ = try await rustBackend.migrationTakePreparation(txid: Data(repeating: 0, count: 31), for: account)
+            _ = try await rustBackend.migrationTakePreparation(
+                txid: Data(repeating: 0, count: 31),
+                submissionServerHeight: 4_000_000,
+                for: account
+            )
             XCTFail("a 31-byte txid must be refused")
         } catch let error as ZcashError {
             XCTAssertEqual(error.code.rawValue, "ZRUST0149")
@@ -336,7 +344,12 @@ final class MigrationFFITests: XCTestCase {
                 _ = try await backend.migrationPrepareNoteSplit(for: account)
             },
             GatedWeldingCall(name: "migrationSignNoteSplit", codePastTheGate: .migrationPlanStale) {
-                _ = try await backend.migrationSignNoteSplit(proposal: noSplit, usk: usk, for: account)
+                _ = try await backend.migrationSignNoteSplit(
+                    proposal: noSplit,
+                    usk: usk,
+                    submissionServerHeight: 4_000_000,
+                    for: account
+                )
             },
             GatedWeldingCall(name: "migrationSignAndStoreSchedule", codePastTheGate: .migrationPlanStale) {
                 try await backend.migrationSignAndStoreSchedule(noSchedule, usk: usk, for: account)
@@ -455,6 +468,39 @@ final class MigrationFFITests: XCTestCase {
             outcome,
             .replanned(MigrationSchedule(transfers: [], estimatedDurationHours: 0, proposalHandle: 0, preparations: []))
         )
+    }
+
+    // MARK: - The submission check (real FFI)
+
+    /// The note-split ceremony takes the submission server's height by value over the FFI, right
+    /// after the gate. A height that is not one (the "unknown" -1) fails closed there, before any run
+    /// is committed, and the rust layer's own words come back in the member's error: past the gate
+    /// (the bypass is on) it is the height that is refused, not the upgrade, and the same call with
+    /// a real height goes on to its plan-stale answer (see
+    /// `testEveryGatedCallIsRefusedBeforeTestnetActivationUnlessBypassed`).
+    func testSignNoteSplitFailsClosedWithoutASubmissionServerHeightOverRealFFI() async throws {
+        let directory = try makeUniqueStorageDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let wallet = try await makePreActivationTestnetWallet(in: directory)
+        wallet.bypass.setBypassed(true)
+        let noSplit = NoteSplitProposal(outputNotes: [], fee: Zatoshi(0), proposalHandle: 0)
+
+        do {
+            _ = try await wallet.backend.migrationSignNoteSplit(
+                proposal: noSplit,
+                usk: wallet.usk,
+                submissionServerHeight: -1,
+                for: wallet.account
+            )
+            XCTFail("an unknown submission server height must fail closed")
+        } catch ZcashError.rustMigrationSignNoteSplit(let message) {
+            XCTAssertTrue(
+                message.contains("the submission server's height is unknown"),
+                "the refusal must say why, got: \(message)"
+            )
+        } catch {
+            XCTFail("Expected rustMigrationSignNoteSplit but got \(error)")
+        }
     }
 
     // MARK: - The availability read and the cancel-only call (real FFI)
@@ -1512,6 +1558,67 @@ final class MigrationFFITests: XCTestCase {
         }
     }
 
+    /// `MIGRATION_SUBMISSION_REFUSED:<code>` routes to `.migrationSubmissionRefused(refusal)` for
+    /// each code the rust layer emits, whichever member the failure came from; a code this SDK does
+    /// not know (contract drift), or none, degrades to the member's own fallback rather than
+    /// fabricating a refusal.
+    func testSubmissionRefusedPrefixRoutesToTheTypedError() throws {
+        let backend = try XCTUnwrap(rustBackend as? ZcashRustBackend)
+
+        let codes: [(rustCode: String, refusal: TransactionSubmissionRefusal)] = [
+            ("wrong_branch", .wrongConsensusBranch),
+            ("expired", .expired),
+            ("cutoff", .networkUpgradeCutoff)
+        ]
+        for (rustCode, refusal) in codes {
+            let routed = backend.migrationRoutedError(
+                "MIGRATION_SUBMISSION_REFUSED:\(rustCode)",
+                fallback: ZcashError.rustMigrationTakeBroadcastTransaction
+            )
+            guard case .migrationSubmissionRefused(let routedRefusal) = routed else {
+                XCTFail("expected migrationSubmissionRefused for \(rustCode), got \(routed)")
+                return
+            }
+            XCTAssertEqual(routedRefusal, refusal, rustCode)
+            XCTAssertEqual(routed.code.rawValue, "ZRUST0162")
+        }
+
+        let unknownMessages = [
+            "MIGRATION_SUBMISSION_REFUSED:",
+            "MIGRATION_SUBMISSION_REFUSED:not_a_code",
+            "MIGRATION_SUBMISSION_REFUSED:expired and more",
+            "MIGRATION_SUBMISSION_REFUSED:EXPIRED",
+            "MIGRATION_SUBMISSION_REFUSED"
+        ]
+        for unknown in unknownMessages {
+            let degraded = backend.migrationRoutedError(unknown, fallback: ZcashError.rustMigrationTakePreparation)
+
+            guard case .rustMigrationTakePreparation(let message) = degraded else {
+                XCTFail("expected the rustMigrationTakePreparation fallback for \(unknown), got \(degraded)")
+                return
+            }
+            XCTAssertEqual(message, unknown, "the fallback must carry the raw message untouched")
+        }
+    }
+
+    /// The refusal's local codes and descriptions are part of the public surface: a consumer that
+    /// carries a refusal in a failure with an integer code sees these, and none of them is a code a
+    /// server sends.
+    func testTransactionSubmissionRefusalHasStableCodesAndDescriptions() {
+        XCTAssertEqual(TransactionSubmissionRefusal.wrongConsensusBranch.code, -9101)
+        XCTAssertEqual(TransactionSubmissionRefusal.expired.code, -9102)
+        XCTAssertEqual(TransactionSubmissionRefusal.networkUpgradeCutoff.code, -9103)
+        XCTAssertEqual(
+            Set([
+                TransactionSubmissionRefusal.wrongConsensusBranch.description,
+                TransactionSubmissionRefusal.expired.description,
+                TransactionSubmissionRefusal.networkUpgradeCutoff.description
+            ]).count,
+            3,
+            "each refusal describes itself"
+        )
+    }
+
     /// An unrelated message — including one merely CONTAINING a known prefix mid-string — falls
     /// through to the member's own case untouched.
     func testMigrationRoutedErrorLeavesUnrelatedMessagesToTheFallback() throws {
@@ -1520,7 +1627,8 @@ final class MigrationFFITests: XCTestCase {
         let unrelatedMessages = [
             "sqlite disk I/O error",
             "saw MIGRATION_PLAN_STALE downstream",
-            "saw MIGRATION_PAUSED_UNTIL_UPGRADE:3543405 downstream"
+            "saw MIGRATION_PAUSED_UNTIL_UPGRADE:3543405 downstream",
+            "saw MIGRATION_SUBMISSION_REFUSED:expired downstream"
         ]
         for unrelated in unrelatedMessages {
             let routed = backend.migrationRoutedError(unrelated, fallback: ZcashError.rustMigrationRestartStep)
@@ -1542,13 +1650,15 @@ final class MigrationFFITests: XCTestCase {
     ///
     /// THE BACKSTOP, OVER REAL FFI: the Swift surface makes the instruction un-forgeable, but this
     /// test forges one through `@testable` precisely to prove the honest-boundary claim in the
-    /// surface docs — the rust seam refuses it on its own per-row state, so nothing reaches the
-    /// broadcaster and nothing is recorded. A pre-broadcast refusal, not a silent no-op.
+    /// surface docs — the rust seam refuses it on its own per-row state, so nothing is submitted
+    /// and nothing is recorded. A pre-broadcast refusal, not a silent no-op. (The broadcaster is
+    /// reached, because the take runs from within it once it has connected and read a height, and it
+    /// is the take that is refused.)
     func testFreshWalletActorPerformBroadcastRefusesAnUninstructedIdOverRealFFI() async throws {
         let storageDirectory = try makeUniqueStorageDirectory()
         defer { try? FileManager.default.removeItem(at: storageDirectory) }
 
-        let broadcaster = ScriptedBroadcaster(script: .throwing(ZcashError.migrationTorUnavailable))
+        let broadcaster = ScriptedBroadcaster(script: .outcome(.submitted))
         let migration = OrchardMigration(
             welding: rustBackend,
             accountUUID: account,
@@ -1578,7 +1688,7 @@ final class MigrationFFITests: XCTestCase {
             XCTFail("Expected rustMigrationTakeBroadcastTransaction but got \(error)")
         }
 
-        XCTAssertEqual(broadcaster.receivedCalls.count, 0, "a refused serve must never reach the network")
+        XCTAssertTrue(broadcaster.submittedTransactions.isEmpty, "a refused serve must never reach the network")
     }
 
     // MARK: - Gate ticker boundary wake (field-caught 2026-08-02)
@@ -1686,6 +1796,7 @@ final class MigrationFFITests: XCTestCase {
                 torDirURL: storageDirectory.appendingPathComponent("tor", isDirectory: true),
                 generalStorageURL: storageDirectory,
                 upgradeGateBypass: MigrationUpgradeGateBypass(),
+                submissionHeight: { 4_000_000 },
                 loggingPolicy: .noLogging
             )
         }

@@ -48,6 +48,15 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nothing, so the NU7 gate never refuses it. With no run pending it succeeds and changes nothing. It throws
   `ZcashError.rustMigrationCancelRun(_:)` for a rust-layer failure. A conformer that does not support
   migration throws by default.
+- `TransactionSubmissionRefusal` says why the SDK refused to submit a transaction: it cannot be valid in the
+  next block, which is the one after the higher of the wallet's chain tip and the latest block height reported
+  by the server the transaction is about to go to. `wrongConsensusBranch` means it is built for another
+  consensus branch than the next block's, as a transaction created before a network upgrade and still unsent
+  is when the chain reaches it. `expired` means its expiry height is below the next block's. `networkUpgradeCutoff`
+  means the next block is one of the 48 before the NU7 activation, in which a migration transaction is not
+  submitted. `code` is the stable local code the refusal is reported under, `-9101`, `-9102` and `-9103`
+  respectively, which no server sends, and `description` a stable text that carries no transaction data. See
+  `ZcashError.migrationSubmissionRefused(_:)`.
 
 ## Changed
 
@@ -111,6 +120,34 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ZcashError` and `ZcashErrorCode` gain `rustMigrationAvailability(_:)` (`ZRUST0160`) and
   `rustMigrationCancelRun(_:)` (`ZRUST0161`), whose payload is the rust layer's message. An exhaustive `switch`
   over either type stops compiling until they are handled; see `MIGRATING.md`.
+- `performMigrationBroadcast(accountUUID:_:options:)` and `submitNoteSplit(accountUUID:proposal:usk:options:)`
+  connect to the submission server (`options.submissionEndpoint`, over the dedicated migration Tor runtime when
+  `options.useTor` is set) and read its latest block height on that connection before they take the transaction
+  from the wallet: connect, read the height, take, submit. The transaction is then checked against the next
+  block, the one after the higher of that height and the wallet's chain tip. It must be built for that block's
+  consensus branch and must not have expired by it, and it is not submitted in the 48 blocks before the NU7
+  activation (`setMigrationNetworkUpgradeGateBypass(_:)` lifts that window and nothing else). A transaction that
+  fails is neither submitted nor recorded in the wallet, and the call throws
+  `ZcashError.migrationSubmissionRefused(_:)` with the reason: crank `migrationAdvanceStep(accountUUID:)` to
+  learn what becomes of the run (for `submitNoteSplit` the run it committed stays). The wallet is now touched
+  only once the connection is up and the height is read, so `ZcashError.migrationTorUnavailable`, which these
+  calls threw after the transaction was taken, is thrown before it, and `submitNoteSplit` no longer commits and
+  signs a run before it knows the server can be reached. When the server's height cannot be read nothing is
+  taken, submitted or recorded, and the call returns `MigrationTransferResult.networkError(retryable: true)`
+  without a submit having been attempted. A stale instruction now costs a connection and a height read before
+  the executor refuses it with `ZcashError.rustMigrationTakeBroadcastTransaction(_:)`. A call that finds the run
+  already ended (cancelled, completed, failed or superseded) throws that same error; see Fixed.
+- `takeMigrationPreparation(accountUUID:byTxid:)` keeps its signature but now makes one network request of its
+  own: it reads the latest block height of the synchronizer's own lightwalletd server, in the mode the sync's
+  chain-tip updates use, and checks the preparation against the next block as above before the wallet records it.
+  It throws `ZcashError.migrationSubmissionRefused(_:)` for a preparation that cannot be valid there, and the error
+  of the height read (`ZcashError.serviceLatestBlockHeightFailed(_:)`, for instance) when the server cannot be
+  asked, in which case nothing is taken. An app that submits the bytes it gets to other servers than the
+  synchronizer's should judge them against those servers' own heights as well.
+- `ZcashError` and `ZcashErrorCode` gain `migrationSubmissionRefused(_:)` (`ZRUST0162`), whose payload is the
+  `TransactionSubmissionRefusal` that says why. `performMigrationBroadcast`, `submitNoteSplit` and
+  `takeMigrationPreparation` throw it. An exhaustive `switch` over either type stops compiling until it is
+  handled; see `MIGRATING.md`.
 
 ## Deprecated
 
@@ -122,6 +159,12 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Fixed
 
+- `performMigrationBroadcast(accountUUID:_:options:)` and `takeMigrationPreparation(accountUUID:byTxid:)` no
+  longer serve a transaction of a run that has ended. An instruction a crank issued before
+  `cancelMigrationRun(accountUUID:)` (or before the run completed, failed or was superseded) could still be
+  discharged after it, which recorded the transaction in the wallet and marked the notes the cancel had just
+  released as spent again. They now throw `ZcashError.rustMigrationTakeBroadcastTransaction(_:)` and
+  `ZcashError.rustMigrationTakePreparation(_:)` for it. No caller changes are required.
 - Transactions created by `createProposedTransactions(proposal:spendingKey:)`,
   `createProposedTransactions(proposal:spendingKey:ovkPolicy:)` or `createPCZTFromProposal(accountUUID:proposal:)`
   at a target height with NU7 active (mainnet from 3,543,405, testnet from 4,465,026) expired after 40

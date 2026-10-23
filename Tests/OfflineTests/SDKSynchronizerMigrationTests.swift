@@ -331,7 +331,7 @@ final class SDKSynchronizerMigrationTests: ZcashTestCase {
         let welding = ZcashRustBackendWeldingMock()
         let refusal = ZcashError.migrationPausedUntilNetworkUpgrade(4_465_026)
         welding.migrationPrepareNoteSplitForThrowableError = refusal
-        welding.migrationSignNoteSplitProposalUskForThrowableError = refusal
+        welding.migrationSignNoteSplitProposalUskSubmissionServerHeightForThrowableError = refusal
         welding.migrationProposeTransfersForThrowableError = refusal
         welding.migrationSignAndStoreScheduleUskForThrowableError = refusal
         welding.migrationRefreshStaleTransfersUskForThrowableError = refusal
@@ -820,7 +820,7 @@ final class SDKSynchronizerMigrationTests: ZcashTestCase {
         }
 
         XCTAssertEqual(recorder.callCount, 0, "the guard must throw before the host is ever consulted")
-        XCTAssertFalse(welding.migrationSignNoteSplitProposalUskForCalled, "the engine must never see a during-sync submission")
+        XCTAssertFalse(welding.migrationSignNoteSplitProposalUskSubmissionServerHeightForCalled, "the engine must never see a during-sync submission")
     }
 
     func testPerformMigrationBroadcastThrowsDuringSyncWithoutTouchingTheHost() async throws {
@@ -850,7 +850,7 @@ final class SDKSynchronizerMigrationTests: ZcashTestCase {
 
         XCTAssertEqual(recorder.callCount, 0, "the guard must throw before the host is ever consulted")
         XCTAssertFalse(
-            welding.migrationTakeBroadcastTransactionIdForCalled,
+            welding.migrationTakeBroadcastTransactionIdSubmissionServerHeightForCalled,
             "the engine must never see a during-sync execution attempt"
         )
     }
@@ -863,7 +863,7 @@ final class SDKSynchronizerMigrationTests: ZcashTestCase {
     func testSubmitNoteSplitForwardsWhenNotSyncing() async throws {
         struct StubSigningFailure: Error, Equatable {}
         let welding = ZcashRustBackendWeldingMock()
-        welding.migrationSignNoteSplitProposalUskForThrowableError = StubSigningFailure()
+        welding.migrationSignNoteSplitProposalUskSubmissionServerHeightForThrowableError = StubSigningFailure()
         let recorder = FactoryInvocationRecorder()
         let synchronizer = try makeSynchronizer(migrationHost: makeHost(welding: welding, factoryRecorder: recorder))
         await synchronizer.updateStatus(.stopped)
@@ -882,7 +882,7 @@ final class SDKSynchronizerMigrationTests: ZcashTestCase {
         }
 
         // Note: the mock's generated body checks `...ThrowableError` before bumping `...CallsCount`,
-        // so `migrationSignNoteSplitProposalUskForCalled` stays false on this path -- catching the
+        // so `migrationSignNoteSplitProposalUskSubmissionServerHeightForCalled` stays false on this path -- catching the
         // exact stub type above (which can only originate from that one call site) plus the
         // recorder count already prove the call reached the engine.
         XCTAssertEqual(recorder.callCount, 1, "the host must be consulted when the synchronizer is not syncing")
@@ -893,7 +893,7 @@ final class SDKSynchronizerMigrationTests: ZcashTestCase {
     func testPerformMigrationBroadcastForwardsWhenNotSyncing() async throws {
         struct StubNextDueTransferFailure: Error, Equatable {}
         let welding = ZcashRustBackendWeldingMock()
-        welding.migrationTakeBroadcastTransactionIdForThrowableError = StubNextDueTransferFailure()
+        welding.migrationTakeBroadcastTransactionIdSubmissionServerHeightForThrowableError = StubNextDueTransferFailure()
         let recorder = FactoryInvocationRecorder()
         let synchronizer = try makeSynchronizer(migrationHost: makeHost(welding: welding, factoryRecorder: recorder))
         await synchronizer.updateStatus(.stopped)
@@ -931,7 +931,7 @@ final class SDKSynchronizerMigrationTests: ZcashTestCase {
     func testTakeMigrationPreparationForwardsEvenWhileSyncing() async throws {
         struct StubTakePreparationFailure: Error, Equatable {}
         let welding = ZcashRustBackendWeldingMock()
-        welding.migrationTakePreparationTxidForThrowableError = StubTakePreparationFailure()
+        welding.migrationTakePreparationTxidSubmissionServerHeightForThrowableError = StubTakePreparationFailure()
         let recorder = FactoryInvocationRecorder()
         let synchronizer = try makeSynchronizer(migrationHost: makeHost(welding: welding, factoryRecorder: recorder))
         await synchronizer.updateStatus(.syncing(0.5, false))
@@ -959,7 +959,7 @@ final class SDKSynchronizerMigrationTests: ZcashTestCase {
     func testTakeMigrationPreparationPassesTheTxidThroughAndReturnsTheEngineId() async throws {
         let txid = Data(repeating: 0x5A, count: 32)
         let welding = ZcashRustBackendWeldingMock()
-        welding.migrationTakePreparationTxidForReturnValue = PreparedMigrationTransfer(
+        welding.migrationTakePreparationTxidSubmissionServerHeightForReturnValue = PreparedMigrationTransfer(
             id: 11,
             txid: txid,
             pczt: Data([0xDE, 0xAD, 0xBE, 0xEF])
@@ -971,8 +971,57 @@ final class SDKSynchronizerMigrationTests: ZcashTestCase {
         XCTAssertEqual(prepared.id, 11, "the engine transfer id crosses the surface")
         XCTAssertEqual(prepared.txid, txid)
         XCTAssertEqual(prepared.pczt, Data([0xDE, 0xAD, 0xBE, 0xEF]), "the finalized transaction is submittable as-is")
-        XCTAssertEqual(welding.migrationTakePreparationTxidForReceivedArguments?.txid, txid)
-        XCTAssertEqual(welding.migrationTakePreparationTxidForReceivedArguments?.account, accountUUID)
+        XCTAssertEqual(welding.migrationTakePreparationTxidSubmissionServerHeightForReceivedArguments?.txid, txid)
+        XCTAssertEqual(welding.migrationTakePreparationTxidSubmissionServerHeightForReceivedArguments?.account, accountUUID)
+    }
+
+    /// The retrieval is checked against the height the host's provider reads (the synchronizer's
+    /// own server), and the height reaches the engine call: the surface adds one request for it.
+    func testTakeMigrationPreparationReadsTheSubmissionHeight() async throws {
+        let txid = Data(repeating: 0x5A, count: 32)
+        let welding = ZcashRustBackendWeldingMock()
+        welding.migrationTakePreparationTxidSubmissionServerHeightForReturnValue = PreparedMigrationTransfer(
+            id: 11,
+            txid: txid,
+            pczt: Data([0x01])
+        )
+        let synchronizer = try makeSynchronizer(migrationHost: makeHost(welding: welding, submissionHeight: { 4_321_000 }))
+
+        _ = try await synchronizer.takeMigrationPreparation(accountUUID: accountUUID, byTxid: txid)
+
+        XCTAssertEqual(
+            welding.migrationTakePreparationTxidSubmissionServerHeightForReceivedArguments?.submissionServerHeight,
+            4_321_000
+        )
+    }
+
+    /// A height that cannot be read fails the retrieval closed, before the engine is asked.
+    func testTakeMigrationPreparationFailsClosedWhenTheSubmissionHeightIsUnreadable() async throws {
+        let welding = ZcashRustBackendWeldingMock()
+        // Stubbed so that a regression that takes anyway fails the assertion below instead of
+        // crashing the process on the mock's un-stubbed return value.
+        welding.migrationTakePreparationTxidSubmissionServerHeightForReturnValue = PreparedMigrationTransfer(
+            id: 11,
+            txid: Data(repeating: 0x5A, count: 32),
+            pczt: Data([0x01])
+        )
+        let synchronizer = try makeSynchronizer(
+            migrationHost: makeHost(
+                welding: welding,
+                submissionHeight: { throw ZcashError.serviceLatestBlockHeightFailed(LightWalletServiceError.timeOut) }
+            )
+        )
+
+        do {
+            _ = try await synchronizer.takeMigrationPreparation(accountUUID: accountUUID, byTxid: Data(repeating: 0x5A, count: 32))
+            XCTFail("an unreadable height must fail the retrieval closed")
+        } catch ZcashError.serviceLatestBlockHeightFailed {
+            // expected
+        } catch {
+            XCTFail("expected serviceLatestBlockHeightFailed, got \(error)")
+        }
+
+        XCTAssertFalse(welding.migrationTakePreparationTxidSubmissionServerHeightForCalled)
     }
 
     /// The seam's closing member forwards to the per-account actor, and — like the accessor — is
@@ -1126,10 +1175,17 @@ final class SDKSynchronizerMigrationTests: ZcashTestCase {
     /// actually built (or reused... no, `migration(for:)` caches, so this only fires once per
     /// account) a per-account actor, which is what the broadcast guard's "never touched the host"
     /// assertions pin.
+    ///
+    /// The default broadcaster connects and reads a height, then takes from the engine, as the
+    /// production one does: the engine call a broadcasting member makes runs from within the
+    /// broadcaster, so a broadcaster that fails closed first would never let these tests' stubbed
+    /// engine answers reach the caller. `submissionHeight` is the provider a preparation retrieval
+    /// reads its height from.
     private func makeHost(
         welding: ZcashRustBackendWeldingMock,
-        broadcaster: any MigrationBroadcasting = ScriptedBroadcaster(script: .throwing(ZcashError.migrationTorUnavailable)),
+        broadcaster: any MigrationBroadcasting = ScriptedBroadcaster(script: .outcome(.submitted)),
         tickInterval: TimeInterval = 3600,
+        submissionHeight: @escaping @Sendable () async throws -> BlockHeight = { 4_000_000 },
         factoryRecorder: FactoryInvocationRecorder? = nil
     ) -> OrchardMigrationHost {
         // `isSyncBlocked()`/`syncBlockedStream`/`start()`'s privacy gate unconditionally read
@@ -1163,7 +1219,8 @@ final class SDKSynchronizerMigrationTests: ZcashTestCase {
                         logger: logger
                     ),
                     logger: logger,
-                    spacing: TargetBlockSpacing(networkType: .testnet)
+                    spacing: TargetBlockSpacing(networkType: .testnet),
+                    submissionHeight: submissionHeight
                 )
             }
         )

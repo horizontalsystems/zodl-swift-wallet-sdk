@@ -2059,8 +2059,11 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
     /// inconsistent stored schedule; the id names the offending transfer), and
     /// `MIGRATION_PAUSED_UNTIL_UPGRADE:<activation height>` ->
     /// `.migrationPausedUntilNetworkUpgrade(height)` (the scheduled lane is closed until the NU7
-    /// network upgrade activates). Anything else — including a `MIGRATION_WAKEUP_INFEASIBLE` whose
-    /// id or a `MIGRATION_PAUSED_UNTIL_UPGRADE` whose height does not parse — falls back to the
+    /// network upgrade activates), and `MIGRATION_SUBMISSION_REFUSED:<code>` ->
+    /// `.migrationSubmissionRefused(refusal)` (a transaction about to be submitted cannot be valid
+    /// in the next block; the code is `wrong_branch`, `expired` or `cutoff`). Anything else —
+    /// including a `MIGRATION_WAKEUP_INFEASIBLE` whose id, a `MIGRATION_PAUSED_UNTIL_UPGRADE` whose
+    /// height or a `MIGRATION_SUBMISSION_REFUSED` whose code does not parse — falls back to the
     /// member's own case.
     ///
     /// Internal (not `private`) so the parse/degrade branches are pinned by unit tests directly —
@@ -2088,6 +2091,15 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
                 return .migrationPausedUntilNetworkUpgrade(BlockHeight(activationHeight))
             }
         }
+        if message.hasPrefix("MIGRATION_SUBMISSION_REFUSED:") {
+            // The rust side emits exactly `MIGRATION_SUBMISSION_REFUSED:<code>`; a code this SDK
+            // does not know (a contract drift) degrades to the generic fallback rather than
+            // inventing a refusal.
+            let rawCode = message.dropFirst("MIGRATION_SUBMISSION_REFUSED:".count)
+            if let refusal = TransactionSubmissionRefusal(rustCode: String(rawCode)) {
+                return .migrationSubmissionRefused(refusal)
+            }
+        }
         return fallback(message)
     }
 
@@ -2095,6 +2107,7 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
     func migrationSignNoteSplit(
         proposal: NoteSplitProposal,
         usk: UnifiedSpendingKey,
+        submissionServerHeight: BlockHeight,
         for account: AccountUUID
     ) async throws -> PreparedMigrationTransfer {
         let preparedPtr = zcashlc_migration_sign_note_split(
@@ -2105,6 +2118,7 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
             proposal.proposalHandle,
             usk.bytes,
             UInt(usk.bytes.count),
+            Int64(submissionServerHeight),
             migrationUpgradeGateBypass.isBypassed
         )
 
@@ -2366,7 +2380,11 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
     // the transaction in the wallet's own tables in the same database transaction that hands the
     // bytes back. Stays serialized.
     @DBActor
-    func migrationTakePreparation(txid: Data, for account: AccountUUID) async throws -> PreparedMigrationTransfer {
+    func migrationTakePreparation(
+        txid: Data,
+        submissionServerHeight: BlockHeight,
+        for account: AccountUUID
+    ) async throws -> PreparedMigrationTransfer {
         guard txid.count == TxId.byteLength else {
             throw ZcashError.rustMigrationTakePreparation(
                 "`migrationTakePreparation` was given a \(txid.count)-byte txid; it must be \(TxId.byteLength) bytes"
@@ -2383,7 +2401,9 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
                 dbData.1,
                 account.id,
                 networkType.networkId,
-                bufferPtr
+                bufferPtr,
+                Int64(submissionServerHeight),
+                migrationUpgradeGateBypass.isBypassed
             )
         }
 
@@ -2408,13 +2428,19 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
     // DB-AUDIT (2026-08-03): WRITE — the broadcast seam records the transaction in the wallet's
     // own tables in the same database transaction that hands the bytes back. Stays serialized.
     @DBActor
-    func migrationTakeBroadcastTransaction(id: UInt32, for account: AccountUUID) async throws -> PreparedMigrationTransfer {
+    func migrationTakeBroadcastTransaction(
+        id: UInt32,
+        submissionServerHeight: BlockHeight,
+        for account: AccountUUID
+    ) async throws -> PreparedMigrationTransfer {
         let preparedPtr = zcashlc_migration_take_broadcast_transaction(
             dbData.0,
             dbData.1,
             account.id,
             networkType.networkId,
-            id
+            id,
+            Int64(submissionServerHeight),
+            migrationUpgradeGateBypass.isBypassed
         )
 
         guard let preparedPtr else {

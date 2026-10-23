@@ -849,6 +849,33 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plans nothing and succeeds with no last error: `schedule` is NULL, `replan_after_height` is the NU7
   activation height a new scheduled plan waits for, and a plan proposed earlier can no longer be
   committed (`MIGRATION_PLAN_STALE`).
+- `zcashlc_migration_take_broadcast_transaction`, `zcashlc_migration_take_preparation_by_txid` and
+  `zcashlc_migration_sign_note_split` check the transaction they hand back against the block it would
+  be mined in, before the store's broadcast seam records it in the wallet, and refuse one that cannot
+  be valid there. `zcashlc_migration_take_broadcast_transaction` and
+  `zcashlc_migration_take_preparation_by_txid` take two trailing arguments,
+  `submission_server_height: i64` and `upgrade_gate_bypass: bool`; `zcashlc_migration_sign_note_split`
+  takes `submission_server_height: i64` right before its existing `upgrade_gate_bypass`. Every existing
+  call site must pass them.
+  - `submission_server_height` is the latest block height the server the transaction will be submitted
+    to reports, read just before the call. The next block is the one after the higher of that height
+    and the wallet's chain tip. A negative value means the height could not be read, and the call
+    fails closed with the last error `the submission server's height is unknown` (for
+    `zcashlc_migration_sign_note_split` before the run is committed), and so does a value above
+    `u32::MAX`.
+  - A transaction that is not built for the consensus branch of the next block, that has expired by it
+    (an expiry height of 0 never expires, and a transaction can still be mined in the block at its
+    expiry height), or, unless `upgrade_gate_bypass` is set, whose next block is one of the 48 before
+    the NU7 activation, makes the call return NULL with the last error
+    `MIGRATION_SUBMISSION_REFUSED:<code>`, the code following the colon directly (for example
+    `MIGRATION_SUBMISSION_REFUSED:wrong_branch`). `<code>` is `wrong_branch`, `expired` or `cutoff`,
+    checked in that order. A refused call records nothing in the wallet: for
+    `zcashlc_migration_sign_note_split` the committed run and the stored proof stay. A stored PCZT that
+    does not parse fails with `MIGRATION_PROVING_UNAVAILABLE`.
+  - `upgrade_gate_bypass` is for internal builds: `true` lifts the 48-block window and nothing else,
+    never the branch and expiry checks. Pass `false` to enforce the window.
+  - A network with no NU7 activation height is never in the cutoff window, but the branch and expiry
+    checks apply to it as to any other.
 
 ### Removed
 - The step-by-step coinholder-voting C surface is gone: `zcash_voting` absorbed the
@@ -951,6 +978,11 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `migration_finalize::extract_tx`, goes with it — the FFI entry point was its only caller.
 
 ### Fixed
+- `zcashlc_migration_take_broadcast_transaction` and `zcashlc_migration_take_preparation_by_txid`
+  refuse a run that has ended (completed, failed, superseded or cancelled) with a bare error, before
+  any other check. An instruction issued before `zcashlc_migration_cancel_run` could previously still
+  be served after it, which recorded the transaction in the wallet and marked the notes the cancel had
+  just released as spent again. No caller changes are required.
 - `zcashlc_payment_uri_parse` rejects Ethereum native recipients, ERC-20 recipients, and token
   contracts whose hexadecimal address is not exactly 40 digits, instead of trusting the pinned
   EIP-681 parser's over-length address result.

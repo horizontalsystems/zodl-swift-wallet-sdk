@@ -38,6 +38,16 @@
 //!   included, without planning a new one, and [`zcashlc_migration_availability`] reports the
 //!   gate's phase at the wallet's next height (with the same bypass), so that the platform can
 //!   choose what to offer before it calls anything the gate would refuse.
+//! - A transaction about to be submitted is checked once more, in whatever phase the gate is: the
+//!   calls that hand one to the platform ([`zcashlc_migration_take_broadcast_transaction`],
+//!   [`zcashlc_migration_take_preparation_by_txid`] and the handback of
+//!   [`zcashlc_migration_sign_note_split`]) take the height the server it goes to reports, and
+//!   refuse a transaction that cannot be valid in the next block, which is the one after the higher
+//!   of that height and the wallet's chain tip ([`refuse_unsubmittable`]). It must be built for that
+//!   block's consensus branch and must not have expired by then, and the migration sends nothing in
+//!   the cutoff window before the activation. The check runs before the store's broadcast seam, so
+//!   a refused transaction is never recorded in the wallet. The same calls refuse to serve a run that
+//!   has already ended.
 //! - Mined-ness is DERIVED, never reported: this layer never marks a transaction mined. The
 //!   engine promotes every in-flight transaction its scan has seen mine, inside
 //!   `advance_migration` — including one whose broadcast THIS process failed to record, which it
@@ -67,15 +77,16 @@
 //! preview DTO; the handle identifies the plan object itself, covering every field (including
 //! ones the DTO never displayed) with none of the echo path's reproduce-exactly bookkeeping.
 //!
-//! Error channel: failures land in the thread-local last-error message. Four stable prefixes let
+//! Error channel: failures land in the thread-local last-error message. Five stable prefixes let
 //! the Swift layer surface dedicated errors: `MIGRATION_PLAN_STALE:` (commit whose handle does
 //! not identify the currently cached proposal — re-propose), `MIGRATION_PROVING_UNAVAILABLE:`
 //! (proving failed hard), `MIGRATION_WAKEUP_INFEASIBLE:<id>` (a stored transfer admits no valid
-//! sync wake-up height — see [`zcashlc_migration_sync_wakeups`]), and
+//! sync wake-up height — see [`zcashlc_migration_sync_wakeups`]),
 //! `MIGRATION_PAUSED_UNTIL_UPGRADE:<activation height>` (the scheduled lane is closed until the
-//! NU7 upgrade activates — see [`refuse_while_upgrade_gate_closed`]). Pointer-returning functions
-//! yield NULL on error, `bool`-returning functions `false`, and the `i64` sentinels are
-//! documented per function.
+//! NU7 upgrade activates — see [`refuse_while_upgrade_gate_closed`]), and
+//! `MIGRATION_SUBMISSION_REFUSED:<code>` (a transaction about to be submitted cannot be valid in
+//! the next block — see [`refuse_unsubmittable`]). Pointer-returning functions yield NULL on error,
+//! `bool`-returning functions `false`, and the `i64` sentinels are documented per function.
 //!
 //! Heap ownership: every function that returns a `*mut Ffi*` (or a [`crate::ffi::BoxedSlice`])
 //! transfers ownership to the caller, who must free it with the matching
@@ -135,7 +146,8 @@ use crate::migration_engine::{
 };
 use crate::migration_finalize;
 use crate::migration_gate::{
-    GatePhase, UpgradeVerdict, gate_phase, nu7_activation, upgrade_verdict,
+    GatePhase, SubmissionRefusal, UpgradeVerdict, check_submittable, gate_phase, nu7_activation,
+    pczt_consensus_branch_id, upgrade_verdict,
 };
 use crate::migration_plan_cache;
 use crate::{
@@ -216,6 +228,18 @@ const PAUSED_UNTIL_UPGRADE_PREFIX: &str = "MIGRATION_PAUSED_UNTIL_UPGRADE";
 /// refusal [`refuse_while_upgrade_gate_closed`] raises.
 fn paused_until_upgrade(activation: BlockHeight) -> anyhow::Error {
     anyhow!("{PAUSED_UNTIL_UPGRADE_PREFIX}:{}", u32::from(activation))
+}
+
+/// The stable prefix the Swift layer maps to `ZcashError.migrationSubmissionRefused` (ZRUST0162).
+/// The refusal's code follows the colon DIRECTLY (no space, no prose), so the Swift side can parse
+/// it back out: `MIGRATION_SUBMISSION_REFUSED:<code>`, with `<code>` one of the values of
+/// [`SubmissionRefusal::code`] (`wrong_branch`, `expired`, `cutoff`).
+const SUBMISSION_REFUSED_PREFIX: &str = "MIGRATION_SUBMISSION_REFUSED";
+
+/// The submission check ([`refuse_unsubmittable`]) found that the transaction cannot be valid in the
+/// next block, for the reason `refusal` gives.
+fn submission_refused(refusal: SubmissionRefusal) -> anyhow::Error {
+    anyhow!("{SUBMISSION_REFUSED_PREFIX}:{}", refusal.code())
 }
 
 /// A spendable-value amount as a signed 64-bit integer (zatoshi). Every migration amount is a
@@ -446,6 +470,83 @@ fn refuse_while_upgrade_gate_closed(ctx: &CallCtx, bypass: bool) -> anyhow::Resu
         Some(activation) => Err(paused_until_upgrade(activation)),
         None => Ok(()),
     }
+}
+
+/// The height the submission server reported, from the FFI's `i64`. A negative value is the FFI's
+/// "unknown" (the caller could not read it), and a value no block height can have is as unusable:
+/// the submission check fails closed on either rather than judge a transaction against a guess.
+fn known_submission_server_height(height: i64) -> anyhow::Result<BlockHeight> {
+    u32::try_from(height)
+        .map(BlockHeight::from_u32)
+        .map_err(|_| anyhow!("the submission server's height is unknown"))
+}
+
+/// The height of the next block as a submission is judged at it: one past the higher of the
+/// wallet's chain tip and the height the server the transaction is about to go to reports. Either
+/// can lead. The wallet may lag the server by every block it has not synced, and the server may lag
+/// the wallet, so the block a transaction would be mined in is never earlier than the later of the
+/// two.
+fn submission_target(tip: BlockHeight, server_height: BlockHeight) -> anyhow::Result<BlockHeight> {
+    u32::from(tip.max(server_height))
+        .checked_add(1)
+        .map(BlockHeight::from_u32)
+        .ok_or_else(|| anyhow!("no block can follow the submission server's height"))
+}
+
+/// The transaction `id` names in `state`, or the error every caller that was handed an id the run
+/// does not carry gives.
+fn transaction_by_id(
+    state: &MigrationState,
+    id: MigrationTransferId,
+) -> anyhow::Result<&MigrationTransaction> {
+    state
+        .transactions()
+        .iter()
+        .find(|t| t.id() == id)
+        .ok_or_else(|| anyhow!("no migration transaction with id {}", u32::from(id)))
+}
+
+/// Refuses a migration transaction that cannot be valid in the next block, so that it is never
+/// handed to the network.
+///
+/// A block accepts only transactions built for its own consensus branch and that have not expired,
+/// and the migration builds a whole run ahead of time and sends it over many blocks, so a
+/// transaction taken for submission may have been overtaken by the chain: by the NU7 activation
+/// that changes the branch, or by its own expiry height. This is the check every submission of a
+/// migration transaction passes. It runs BEFORE the store's broadcast seam
+/// ([`serve_for_broadcast`]), which records the transaction in the wallet, so a refused transaction
+/// is not recorded either.
+///
+/// The next block is judged at the higher of the wallet's chain tip and `server_height`, the height
+/// of the server the transaction is about to go to ([`submission_target`]). The transaction must be
+/// built for that block's branch and must not have expired by it ([`check_submittable`], which
+/// reports the branch first), and a PCZT that does not parse has no branch to read, which is a
+/// failure to turn the stored artifact into servable bytes
+/// ([`PROVING_UNAVAILABLE_PREFIX`]). Last, the migration does not send in the cutoff window before
+/// the activation ([`GatePhase::Cutoff`]): `bypass`, the host's opt-out for internal builds, lifts
+/// that window and nothing else.
+///
+/// A refusal errs `MIGRATION_SUBMISSION_REFUSED:<code>` ([`SUBMISSION_REFUSED_PREFIX`]).
+fn refuse_unsubmittable(
+    ctx: &CallCtx,
+    row: &MigrationTransaction,
+    server_height: BlockHeight,
+    bypass: bool,
+) -> anyhow::Result<()> {
+    let target = submission_target(ctx.tip()?, server_height)?;
+    let Some(branch) = pczt_consensus_branch_id(row.pczt()) else {
+        return Err(proving_unavailable(format!(
+            "the PCZT of migration transaction {} does not parse, so the consensus branch it is \
+             built for cannot be read",
+            u32::from(row.id())
+        )));
+    };
+    check_submittable(&ctx.network, Some(branch), row.expiry_height(), target)
+        .map_err(submission_refused)?;
+    if let GatePhase::Cutoff { .. } = gate_phase(&ctx.network, target, bypass) {
+        return Err(submission_refused(SubmissionRefusal::Cutoff));
+    }
+    Ok(())
 }
 
 // ----- SDK-owned immediate-migration-run record -----
@@ -1173,18 +1274,16 @@ fn map_rebuild_err(e: engine::RebuildError<AdapterError>) -> anyhow::Error {
 /// The seam's own refusal of a non-`Proved` row is the STALENESS GUARD for both callers: neither
 /// re-asks the engine what to serve, so an instruction that has gone stale between the advance
 /// that issued it and the serve that discharges it is refused here rather than acted on.
+///
+/// This is the serve alone. A transaction that is about to be submitted is served through
+/// [`serve_for_submission`], which checks it can be valid in the next block first.
 fn serve_for_broadcast(
     rng: impl CryptoRng,
     ctx: &mut CallCtx,
     state: &MigrationState,
     id: MigrationTransferId,
 ) -> anyhow::Result<(Vec<u8>, [u8; 32])> {
-    let txid = state
-        .transactions()
-        .iter()
-        .find(|t| t.id() == id)
-        .map(|t| <[u8; 32]>::from(t.txid()))
-        .ok_or_else(|| anyhow!("no migration transaction with id {}", u32::from(id)))?;
+    let txid = <[u8; 32]>::from(transaction_by_id(state, id)?.txid());
     let mut store = account_store(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
     let tx = store
         .take_transaction_for_broadcast(rng, state, id)
@@ -1193,6 +1292,27 @@ fn serve_for_broadcast(
     tx.write(&mut raw)
         .map_err(|e| anyhow!("encoding the broadcastable transaction failed: {e}"))?;
     Ok((raw, txid))
+}
+
+/// [`serve_for_broadcast`] for a transaction that is about to be submitted: the same serve, but
+/// only once the transaction has passed [`refuse_unsubmittable`] against the block it would be
+/// mined in. The check comes first on purpose. The seam records the transaction in the wallet's own
+/// tables, and a transaction that cannot be valid in the next block must leave no such record
+/// behind, nor mark its notes as spent.
+///
+/// `server_height` is the height of the server the transaction is about to go to, and `bypass` the
+/// host's opt-out of the cutoff window. Every submission of a migration transaction (the delivery
+/// executor, the preparation accessor and the note-split ceremony) serves through this.
+fn serve_for_submission(
+    rng: impl CryptoRng,
+    ctx: &mut CallCtx,
+    state: &MigrationState,
+    id: MigrationTransferId,
+    server_height: BlockHeight,
+    bypass: bool,
+) -> anyhow::Result<(Vec<u8>, [u8; 32])> {
+    refuse_unsubmittable(ctx, transaction_by_id(state, id)?, server_height, bypass)?;
+    serve_for_broadcast(rng, ctx, state, id)
 }
 
 /// Proves ONE `Signed` row through the upstream engine prover
@@ -3648,6 +3768,17 @@ pub unsafe extern "C" fn zcashlc_migration_prepare_note_split(
 /// nothing is planned, built, signed, stored or rebuilt then. `upgrade_gate_bypass` is for internal
 /// builds and opens the gate.
 ///
+/// `submission_server_height` is the height the server the returned transaction will be submitted
+/// to reports as its latest block, which the platform reads on its connection to that server just
+/// before it calls this. The transaction is checked against the next block, the one after the higher
+/// of that height and the wallet's chain tip, and refused with
+/// `MIGRATION_SUBMISSION_REFUSED:<code>` when it cannot be valid there (see
+/// [`refuse_unsubmittable`]; `upgrade_gate_bypass` lifts the cutoff window of that check and
+/// nothing else). The check runs after the transaction is proved and before the store's broadcast
+/// seam records it, so a refused transaction is not recorded in the wallet, while the committed run
+/// and the stored proof stay. A negative `submission_server_height` is "unknown" and fails closed,
+/// before the run is committed.
+///
 /// # Safety
 /// See [`open`]; `usk_ptr` must be valid for reads of `usk_len` bytes.
 /// Free the returned pointer with [`zcashlc_free_migration_prepared_transfer`].
@@ -3660,6 +3791,7 @@ pub unsafe extern "C" fn zcashlc_migration_sign_note_split(
     proposal_handle: u64,
     usk_ptr: *const u8,
     usk_len: usize,
+    submission_server_height: i64,
     upgrade_gate_bypass: bool,
 ) -> *mut FfiPreparedTransfer {
     let res = catch_panic(|| {
@@ -3673,6 +3805,9 @@ pub unsafe extern "C" fn zcashlc_migration_sign_note_split(
             )?
         };
         refuse_while_upgrade_gate_closed(&ctx, upgrade_gate_bypass)?;
+        // Validated before the run is committed or anything is proved: an unknown height is a
+        // caller bug to refuse up front, not a reason to leave a signed run behind.
+        let server_height = known_submission_server_height(submission_server_height)?;
         // The decoded spending key is handed straight to the engine's signing entry point, which
         // derives its own full viewing key and checks it against the account's before building
         // anything. It never reaches the adapter: no migration type holds spend authority, so the
@@ -3716,8 +3851,17 @@ pub unsafe extern "C" fn zcashlc_migration_sign_note_split(
         // the commit persists the run, the prove above stores the wallet record of the proof, and
         // the platform records the broadcast — which is why it hands a transaction back at all
         // instead of deferring to the drive, whose window for this preparation opens a few blocks
-        // ahead.
-        let (raw, txid) = serve_for_broadcast(system_rng(), &mut ctx, &state, first_prep)?;
+        // ahead. Like every submission it is checked first, here against the proven PCZT, so a
+        // preparation that cannot be valid in the next block is not recorded; the committed run
+        // and the stored proof stay, for the drive to carry on from.
+        let (raw, txid) = serve_for_submission(
+            system_rng(),
+            &mut ctx,
+            &state,
+            first_prep,
+            server_height,
+            upgrade_gate_bypass,
+        )?;
         FfiPreparedTransfer::from_parts(first_prep, txid, raw)
     });
     unwrap_exc_or_null(res)
@@ -4166,6 +4310,21 @@ pub unsafe extern "C" fn zcashlc_migration_prove_transactions(
 /// artifact is the FINALIZED CONSENSUS TRANSACTION, submittable as-is, paired with the row's
 /// stored txid to submit-and-record under.
 ///
+/// THE TRANSACTION IS CHECKED BEFORE THE SEAM. `submission_server_height` is the height the server
+/// the transaction will be submitted to reports as its latest block, which the platform reads on
+/// its connection to that server just before it calls this. The next block is the one after the
+/// higher of that height and the wallet's chain tip, and a transaction that is not built for that
+/// block's consensus branch, that has expired by it, or that falls in the cutoff window before the
+/// NU7 activation is refused with `MIGRATION_SUBMISSION_REFUSED:<code>` (`wrong_branch`, `expired`
+/// or `cutoff`; see [`refuse_unsubmittable`]) and returns NULL. The seam is never reached then, so
+/// the refused transaction is not recorded in the wallet. `upgrade_gate_bypass` is for internal
+/// builds: it lifts the cutoff window and nothing else, never the branch and expiry checks. A
+/// negative `submission_server_height` is "unknown", which fails closed.
+///
+/// A run that has ended (completed, failed, superseded or cancelled) serves nothing: an instruction
+/// issued before a cancel can arrive after it, and serving it would record the transaction and mark
+/// the notes the cancel released as spent again. That refusal is bare, and is made before any check.
+///
 /// # Safety
 /// See [`open`]. Free the returned pointer with [`zcashlc_free_migration_prepared_transfer`].
 #[unsafe(no_mangle)]
@@ -4175,6 +4334,8 @@ pub unsafe extern "C" fn zcashlc_migration_take_broadcast_transaction(
     account_uuid_bytes: *const u8,
     network_id: u32,
     id: u32,
+    submission_server_height: i64,
+    upgrade_gate_bypass: bool,
 ) -> *mut FfiPreparedTransfer {
     let res = catch_panic(|| {
         let mut ctx = unsafe {
@@ -4201,7 +4362,25 @@ pub unsafe extern "C" fn zcashlc_migration_take_broadcast_transaction(
                 u32::from(id)
             ));
         };
-        let (raw, txid) = serve_for_broadcast(system_rng(), &mut ctx, &state, id)?;
+        // A run that has ended serves nothing: the instruction may have been issued before the
+        // cancel that ended it, and serving it now would record the transaction in the wallet and
+        // mark the notes the cancel released as spent again. Refused before anything is checked.
+        if state.is_terminal() {
+            return Err(anyhow!(
+                "the stored migration run is already over, so transaction {} cannot be served for \
+                 broadcast",
+                u32::from(id)
+            ));
+        }
+        let server_height = known_submission_server_height(submission_server_height)?;
+        let (raw, txid) = serve_for_submission(
+            system_rng(),
+            &mut ctx,
+            &state,
+            id,
+            server_height,
+            upgrade_gate_bypass,
+        )?;
         FfiPreparedTransfer::from_parts(id, txid, raw)
     });
     unwrap_exc_or_null(res)
@@ -4243,6 +4422,15 @@ pub unsafe extern "C" fn zcashlc_migration_take_broadcast_transaction(
 /// the row's stored txid, so the platform records the submission's outcome through the standard
 /// record path with no identity of its own to keep.
 ///
+/// THE PREPARATION IS CHECKED BEFORE THE SEAM, as on [`zcashlc_migration_take_broadcast_transaction`]
+/// and under the same terms: `submission_server_height` is the latest block height of a server the
+/// platform reads it from (the platform submits the preparation by its own means, possibly to
+/// several servers, so it is not necessarily the one it submits to), a transaction that cannot be
+/// valid in the block after the higher of that height and the wallet's chain tip is refused with
+/// `MIGRATION_SUBMISSION_REFUSED:<code>` and not recorded in the wallet, `upgrade_gate_bypass` lifts
+/// the cutoff window and nothing else, and a negative height fails closed. A run that has ended
+/// serves nothing, with a bare refusal made before any check.
+///
 /// # Safety
 /// See [`open`]; `txid_ptr` must be non-null and valid for reads of 32 bytes (a null pointer is
 /// refused rather than read). Free the returned pointer with
@@ -4254,6 +4442,8 @@ pub unsafe extern "C" fn zcashlc_migration_take_preparation_by_txid(
     account_uuid_bytes: *const u8,
     network_id: u32,
     txid_ptr: *const u8,
+    submission_server_height: i64,
+    upgrade_gate_bypass: bool,
 ) -> *mut FfiPreparedTransfer {
     let res = catch_panic(|| {
         let mut ctx = unsafe {
@@ -4291,6 +4481,15 @@ pub unsafe extern "C" fn zcashlc_migration_take_preparation_by_txid(
                 TxId::from_bytes(txid)
             ));
         };
+        // As on the delivery executor: a run that has ended serves nothing, whatever was
+        // retrieved from it before.
+        if state.is_terminal() {
+            return Err(anyhow!(
+                "the stored migration run is already over, so no preparation with txid {} can be \
+                 served",
+                TxId::from_bytes(txid)
+            ));
+        }
         let row = state
             .transactions()
             .iter()
@@ -4309,7 +4508,15 @@ pub unsafe extern "C" fn zcashlc_migration_take_preparation_by_txid(
                 u32::from(id)
             ));
         }
-        let (raw, served_txid) = serve_for_broadcast(system_rng(), &mut ctx, &state, id)?;
+        let server_height = known_submission_server_height(submission_server_height)?;
+        let (raw, served_txid) = serve_for_submission(
+            system_rng(),
+            &mut ctx,
+            &state,
+            id,
+            server_height,
+            upgrade_gate_bypass,
+        )?;
         FfiPreparedTransfer::from_parts(id, served_txid, raw)
     });
     unwrap_exc_or_null(res)
@@ -13126,6 +13333,10 @@ mod tests {
         (path, account, usk)
     }
 
+    /// The height the note-split ceremony is told its submission server is at. The gate is judged
+    /// before it is read, so what matters is only that it is a height (not the "unknown" -1).
+    const GATED_ENTRY_SERVER_HEIGHT: i64 = 3_543_000;
+
     /// The nine entry points the upgrade gate guards.
     #[derive(Clone, Copy, Debug)]
     enum GatedEntry {
@@ -13205,6 +13416,7 @@ mod tests {
                         no_handle,
                         usk.as_ptr(),
                         usk.len(),
+                        GATED_ENTRY_SERVER_HEIGHT,
                         bypass,
                     );
                     let succeeded = !ptr.is_null();
@@ -14873,10 +15085,54 @@ mod tests {
         anchor_boundary: Option<u32>,
         state: MigrationTxState,
     ) -> MigrationTransaction {
+        provable_tx_row_with(
+            minimal_pczt_bytes(),
+            id,
+            kind,
+            scheduled,
+            expiry,
+            anchor_boundary,
+            state,
+        )
+    }
+
+    /// [`provable_tx_row`] built for NU7, the branch the next block is under at the delivery
+    /// fixtures' tip ([`init_delivery_fixture`]): what the submission check lets through to the
+    /// seam. A row of NU6.3 there is a transaction the upgrade has overtaken, which the check
+    /// refuses before the seam is reached.
+    fn provable_nu7_tx_row(
+        id: u32,
+        kind: MigrationTxKind,
+        scheduled: u32,
+        expiry: u32,
+        anchor_boundary: Option<u32>,
+        state: MigrationTxState,
+    ) -> MigrationTransaction {
+        provable_tx_row_with(
+            minimal_nu7_pczt_bytes(),
+            id,
+            kind,
+            scheduled,
+            expiry,
+            anchor_boundary,
+            state,
+        )
+    }
+
+    /// The row both [`provable_tx_row`] and [`provable_nu7_tx_row`] build, carrying `pczt`.
+    fn provable_tx_row_with(
+        pczt: Vec<u8>,
+        id: u32,
+        kind: MigrationTxKind,
+        scheduled: u32,
+        expiry: u32,
+        anchor_boundary: Option<u32>,
+        state: MigrationTxState,
+    ) -> MigrationTransaction {
         test_transaction_from_parts(
             MigrationTransferId::new(id),
             kind,
-            minimal_pczt_bytes(),
+            pczt,
             Vec::new(),
             h(scheduled),
             h(expiry),
@@ -14898,6 +15154,11 @@ mod tests {
         (path, account)
     }
 
+    /// The height the delivery fixtures tell the executor its submission server is at: the tip
+    /// they all sit at ([`set_fixture_tip`]), so the next block is the one every check is judged at
+    /// when no test says otherwise.
+    const FIXTURE_SERVER_HEIGHT: i64 = 3_600_000;
+
     /// One run of the delivery executor over the FFI, with the DTO copied out and freed: the
     /// named id, the served txid, and the served (finalized transaction) bytes. Asserts success —
     /// the executor has no benign empty answer, so a NULL here is an error to be read with
@@ -14914,6 +15175,8 @@ mod tests {
                 account.as_ptr(),
                 NETWORK_ID_MAINNET,
                 id,
+                FIXTURE_SERVER_HEIGHT,
+                false,
             )
         };
         assert!(
@@ -14933,6 +15196,18 @@ mod tests {
 
     /// The delivery executor's refusal message: asserts the NULL return and takes the last error.
     fn take_broadcast_error(path_bytes: &[u8], account: &[u8; 16], id: u32) -> String {
+        take_broadcast_error_at(path_bytes, account, id, FIXTURE_SERVER_HEIGHT, false)
+    }
+
+    /// [`take_broadcast_error`] for a submission server at `server_height` and the given
+    /// `bypass`.
+    fn take_broadcast_error_at(
+        path_bytes: &[u8],
+        account: &[u8; 16],
+        id: u32,
+        server_height: i64,
+        bypass: bool,
+    ) -> String {
         let ptr = unsafe {
             zcashlc_migration_take_broadcast_transaction(
                 path_bytes.as_ptr(),
@@ -14940,6 +15215,8 @@ mod tests {
                 account.as_ptr(),
                 NETWORK_ID_MAINNET,
                 id,
+                server_height,
+                bypass,
             )
         };
         assert!(
@@ -15085,7 +15362,7 @@ mod tests {
         let path_bytes = path.to_str().unwrap().as_bytes();
         let state = custom_state(
             MigrationStatus::InProgress,
-            vec![provable_tx_row(
+            vec![provable_nu7_tx_row(
                 0,
                 MigrationTxKind::Transfer { crossing: 0 },
                 3_600_000,
@@ -15141,7 +15418,7 @@ mod tests {
         let path_bytes = path.to_str().unwrap().as_bytes();
         let unproved = custom_state(
             MigrationStatus::InProgress,
-            vec![provable_tx_row(
+            vec![provable_nu7_tx_row(
                 0,
                 MigrationTxKind::Transfer { crossing: 0 },
                 3_600_000,
@@ -15317,6 +15594,8 @@ mod tests {
                 account.as_ptr(),
                 NETWORK_ID_MAINNET,
                 txid.as_ptr(),
+                FIXTURE_SERVER_HEIGHT,
+                false,
             )
         };
         assert!(
@@ -15337,6 +15616,18 @@ mod tests {
     /// The preparation accessor's refusal message: asserts the NULL return and takes the last
     /// error.
     fn take_preparation_error(path_bytes: &[u8], account: &[u8; 16], txid: [u8; 32]) -> String {
+        take_preparation_error_at(path_bytes, account, txid, FIXTURE_SERVER_HEIGHT, false)
+    }
+
+    /// [`take_preparation_error`] for a submission server at `server_height` and the given
+    /// `bypass`.
+    fn take_preparation_error_at(
+        path_bytes: &[u8],
+        account: &[u8; 16],
+        txid: [u8; 32],
+        server_height: i64,
+        bypass: bool,
+    ) -> String {
         let ptr = unsafe {
             zcashlc_migration_take_preparation_by_txid(
                 path_bytes.as_ptr(),
@@ -15344,6 +15635,8 @@ mod tests {
                 account.as_ptr(),
                 NETWORK_ID_MAINNET,
                 txid.as_ptr(),
+                server_height,
+                bypass,
             )
         };
         assert!(
@@ -15515,7 +15808,7 @@ mod tests {
         let path_bytes = path.to_str().unwrap().as_bytes();
         let state = custom_state(
             MigrationStatus::InProgress,
-            vec![provable_tx_row(
+            vec![provable_nu7_tx_row(
                 0,
                 MigrationTxKind::Preparation { layer: 0, index: 0 },
                 3_600_000,
@@ -15561,7 +15854,7 @@ mod tests {
         let path_bytes = path.to_str().unwrap().as_bytes();
         let state = custom_state(
             MigrationStatus::InProgress,
-            vec![provable_tx_row(
+            vec![provable_nu7_tx_row(
                 0,
                 MigrationTxKind::Transfer { crossing: 0 },
                 3_600_000,
@@ -15599,7 +15892,7 @@ mod tests {
         let path_bytes = path.to_str().unwrap().as_bytes();
         let state = custom_state(
             MigrationStatus::InProgress,
-            vec![provable_tx_row(
+            vec![provable_nu7_tx_row(
                 0,
                 MigrationTxKind::Preparation { layer: 0, index: 0 },
                 3_600_000,
@@ -15630,6 +15923,8 @@ mod tests {
                 account.as_ptr(),
                 NETWORK_ID_MAINNET,
                 std::ptr::null(),
+                FIXTURE_SERVER_HEIGHT,
+                false,
             )
         };
         assert!(ptr.is_null(), "a null txid pointer must be refused");
@@ -15658,6 +15953,444 @@ mod tests {
             wallet_transaction_records(&path),
             0,
             "neither refusal leaves a wallet record behind"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ----- the submission check before the broadcast seam -----
+    //
+    // The take executors, and the note-split ceremony's handback, check the transaction they are
+    // about to serve against the block it would be mined in, before the store's seam records it in
+    // the wallet: it must be built for that block's consensus branch, it must not have expired by
+    // then, and the migration does not send in the cutoff window before the NU7 activation. The
+    // block is the one after the HIGHER of the wallet's chain tip and the submission server's
+    // height, and a server height that is unknown fails closed.
+    //
+    // The fixtures are REAL runs, committed by [`committed_run_fixture`] at 3,543,000 (every row
+    // built for NU6.3) or at 3,600,000 (NU7), so a row's branch and expiry are the engine's own. Their
+    // rows are `Signed`, which the seam itself refuses as not proved: a refusal of any other kind can
+    // only have come from the check before it, and one that is the seam's shows the check let the
+    // row through. Mainnet activates NU7 at 3,543,405, so the cutoff window holds the next heights
+    // 3,543,357..=3,543,404.
+
+    /// What the seam says of a row that is not `Proved`.
+    const SEAM_NOT_PROVED: &str = "is not proved";
+
+    /// What the check says of a row built for another branch than the next block's.
+    const WRONG_BRANCH_ERROR: &str = "MIGRATION_SUBMISSION_REFUSED:wrong_branch";
+
+    /// A row of the stored fixture run, as the submission-check tests address it.
+    struct FixtureRow {
+        id: u32,
+        txid: [u8; 32],
+        expiry: u32,
+    }
+
+    /// The first preparation (with `preparation` set) or the first transfer of the stored fixture
+    /// run.
+    fn fixture_run_row(
+        path: &std::path::Path,
+        account: &[u8; 16],
+        preparation: bool,
+    ) -> FixtureRow {
+        let state = read_fixture_state(path, account);
+        let row = state
+            .transactions()
+            .iter()
+            .find(|t| matches!(t.kind(), MigrationTxKind::Preparation { .. }) == preparation)
+            .expect("the fixture run has a row of the kind");
+        FixtureRow {
+            id: u32::from(row.id()),
+            txid: <[u8; 32]>::from(row.txid()),
+            expiry: u32::from(row.expiry_height()),
+        }
+    }
+
+    /// Whether the wallet holds a record of the transaction with `txid`, which is what the
+    /// broadcast seam writes when it serves one.
+    fn wallet_holds_transaction(
+        path: &std::path::Path,
+        account: &[u8; 16],
+        txid: [u8; 32],
+    ) -> bool {
+        let path_bytes = path.to_str().unwrap().as_bytes();
+        let ctx = unsafe {
+            open(
+                system_rng(),
+                path_bytes.as_ptr(),
+                path_bytes.len(),
+                account.as_ptr(),
+                NETWORK_ID_MAINNET,
+            )
+        }
+        .expect("the fixture context opens");
+        ctx.wallet
+            .get_transaction(TxId::from_bytes(txid))
+            .expect("the wallet reads its transactions")
+            .is_some()
+    }
+
+    /// A row built for the branch before the activation is refused once the next block is the
+    /// activation block, before the seam can record it, and the bypass, which lifts the cutoff, never
+    /// lifts this.
+    #[test]
+    fn take_broadcast_refuses_an_old_branch_transaction_before_the_seam() {
+        let (path, account) = committed_run_fixture("take_old_branch", 3_543_000);
+        let path_bytes = path.to_str().unwrap().as_bytes();
+        let row = fixture_run_row(&path, &account, false);
+        let spendable = spendable_fixture_orchard(&path, &account);
+        // The wallet has scanned up to the last block under NU6.3: the next block is the
+        // activation block.
+        set_fixture_tip_at(path_bytes, 3_543_404);
+
+        for bypass in [false, true] {
+            let error = take_broadcast_error_at(path_bytes, &account, row.id, 3_543_404, bypass);
+            assert_eq!(error, WRONG_BRANCH_ERROR, "bypass {bypass}");
+        }
+
+        assert!(
+            !wallet_holds_transaction(&path, &account, row.txid),
+            "a refused transaction is never recorded in the wallet"
+        );
+        assert_eq!(
+            spendable_fixture_orchard(&path, &account),
+            spendable,
+            "a refusal leaves the spendable value as it was"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The next block is judged at the higher of the wallet's tip and the server's height, whichever
+    /// of the two leads: either alone reaches the activation here, and neither does when both are
+    /// short of it. (A wallet's tip only moves forward, so the cases run in that order.)
+    #[test]
+    fn take_broadcast_uses_the_higher_of_wallet_and_server_heights() {
+        let (path, account) = committed_run_fixture("take_higher_height", 3_543_000);
+        let path_bytes = path.to_str().unwrap().as_bytes();
+        let row = fixture_run_row(&path, &account, false);
+
+        // Neither reaches the activation: the check lets the row through to the seam.
+        let error = take_broadcast_error_at(path_bytes, &account, row.id, 3_543_000, false);
+        assert!(error.contains(SEAM_NOT_PROVED), "{error}");
+
+        // The server leads the wallet, whose tip is 3,543,000.
+        assert_eq!(
+            take_broadcast_error_at(path_bytes, &account, row.id, 3_543_404, false),
+            WRONG_BRANCH_ERROR,
+            "the wallet's tip is 3,543,000, the server's height is 3,543,404"
+        );
+
+        // The wallet leads the server.
+        set_fixture_tip_at(path_bytes, 3_543_404);
+        assert_eq!(
+            take_broadcast_error_at(path_bytes, &account, row.id, 3_543_000, false),
+            WRONG_BRANCH_ERROR,
+            "the wallet's tip is 3,543,404, the server's height is 3,543,000"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A transaction can still be mined in the block at its expiry height, so a server that stands
+    /// on the block before is fine and one that stands on the expiry height itself is not, whether
+    /// or not the bypass is on.
+    #[test]
+    fn take_broadcast_refuses_an_expired_transaction() {
+        let (path, account) = committed_run_fixture("take_expired", 3_600_000);
+        let path_bytes = path.to_str().unwrap().as_bytes();
+        let row = fixture_run_row(&path, &account, false);
+        let expiry = i64::from(row.expiry);
+
+        let error = take_broadcast_error_at(path_bytes, &account, row.id, expiry - 1, false);
+        assert!(
+            error.contains(SEAM_NOT_PROVED),
+            "the next block is the one at the expiry height, which can still mine it: {error}"
+        );
+        for bypass in [false, true] {
+            let error = take_broadcast_error_at(path_bytes, &account, row.id, expiry, bypass);
+            assert_eq!(
+                error, "MIGRATION_SUBMISSION_REFUSED:expired",
+                "bypass {bypass}"
+            );
+        }
+
+        assert!(
+            !wallet_holds_transaction(&path, &account, row.txid),
+            "a refused transaction is never recorded in the wallet"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The migration sends nothing in the 48 blocks before the activation: a server at 3,543,356
+    /// makes 3,543,357, the first height of the window, the next block, and one at 3,543,403 makes
+    /// the last. The block below the window is open. The bypass lifts the window, and then the
+    /// check lets the row through to the seam.
+    #[test]
+    fn take_broadcast_refuses_in_the_cutoff_window_unless_bypassed() {
+        let (path, account) = committed_run_fixture("take_cutoff", 3_543_000);
+        let path_bytes = path.to_str().unwrap().as_bytes();
+        let row = fixture_run_row(&path, &account, false);
+
+        for server in [3_543_356, 3_543_403] {
+            let error = take_broadcast_error_at(path_bytes, &account, row.id, server, false);
+            assert_eq!(
+                error, "MIGRATION_SUBMISSION_REFUSED:cutoff",
+                "server at {server}"
+            );
+
+            let error = take_broadcast_error_at(path_bytes, &account, row.id, server, true);
+            assert!(
+                !error.starts_with(SUBMISSION_REFUSED_PREFIX),
+                "server at {server}, bypassed: {error}"
+            );
+            assert!(
+                error.contains(SEAM_NOT_PROVED),
+                "server at {server}, bypassed: {error}"
+            );
+        }
+
+        let error = take_broadcast_error_at(path_bytes, &account, row.id, 3_543_355, false);
+        assert!(
+            error.contains(SEAM_NOT_PROVED),
+            "the block below the window is open: {error}"
+        );
+        assert!(
+            !wallet_holds_transaction(&path, &account, row.txid),
+            "a refused transaction is never recorded in the wallet"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A transaction built for the next block's branch, unexpired and outside the window, is not
+    /// refused: it reaches the seam.
+    #[test]
+    fn take_broadcast_passes_a_valid_transaction_to_the_seam() {
+        let (path, account) = committed_run_fixture("take_valid", 3_600_000);
+        let path_bytes = path.to_str().unwrap().as_bytes();
+        let row = fixture_run_row(&path, &account, false);
+
+        let error = take_broadcast_error_at(path_bytes, &account, row.id, 3_600_000, false);
+
+        assert!(
+            !error.starts_with(SUBMISSION_REFUSED_PREFIX),
+            "a valid transaction is not refused by the check: {error}"
+        );
+        assert!(
+            error.contains(SEAM_NOT_PROVED),
+            "the seam, which is reached, refuses the row that is not proved: {error}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A stored PCZT that does not parse has no branch to read, so the check cannot judge the
+    /// transaction. That is a failure to turn the stored artifact into servable bytes, reported
+    /// under the proving-unavailable prefix in the check's own words rather than as a refusal, and
+    /// the seam is not reached, so nothing is recorded.
+    #[test]
+    fn take_broadcast_reports_an_unreadable_pczt_as_proving_unavailable_before_the_seam() {
+        let (path, account) = init_delivery_fixture("zcashlc_take_unreadable_pczt");
+        let path_bytes = path.to_str().unwrap().as_bytes();
+        // `tx_row` carries the one-byte placeholder PCZT, which does not parse.
+        let state = custom_state(
+            MigrationStatus::InProgress,
+            vec![tx_row(
+                0,
+                MigrationTxKind::Transfer { crossing: 0 },
+                &[],
+                3_600_000,
+                4_000_000,
+                Some(3_500_000),
+                MigrationTxState::Proved,
+            )],
+        );
+        store_fixture_state(&path, &account, &state);
+
+        let error = take_broadcast_error(path_bytes, &account, 0);
+
+        assert!(error.starts_with(PROVING_UNAVAILABLE_PREFIX), "{error}");
+        assert!(
+            error.contains("does not parse"),
+            "the check says so itself, the seam is not reached: {error}"
+        );
+        assert!(!error.contains(SUBMISSION_REFUSED_PREFIX), "{error}");
+        assert_eq!(
+            wallet_transaction_records(&path),
+            0,
+            "nothing is recorded for a transaction that could not be judged"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A server height that is not a height (the FFI's "unknown", or one no block has) fails
+    /// closed, with and without the bypass: nothing is checked against a guess, and nothing is
+    /// recorded.
+    #[test]
+    fn take_broadcast_fails_closed_without_a_server_height() {
+        let (path, account) = committed_run_fixture("take_no_height", 3_600_000);
+        let path_bytes = path.to_str().unwrap().as_bytes();
+        let row = fixture_run_row(&path, &account, false);
+
+        for height in [-1, i64::MIN, i64::from(u32::MAX) + 1] {
+            for bypass in [false, true] {
+                let error = take_broadcast_error_at(path_bytes, &account, row.id, height, bypass);
+                assert!(
+                    error.contains("the submission server's height is unknown"),
+                    "height {height}, bypass {bypass}: {error}"
+                );
+            }
+        }
+
+        assert!(
+            !wallet_holds_transaction(&path, &account, row.txid),
+            "an unchecked transaction is never recorded in the wallet"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The preparation accessor makes the same check before its seam: the branch, the cutoff
+    /// window and an unknown server height are refused for a preparation's txid.
+    #[test]
+    fn take_preparation_checks_before_the_seam() {
+        let (path, account) = committed_run_fixture("take_prep_check", 3_543_000);
+        let path_bytes = path.to_str().unwrap().as_bytes();
+        let preparation = fixture_run_row(&path, &account, true);
+
+        // The next block is the first of the cutoff window.
+        assert_eq!(
+            take_preparation_error_at(path_bytes, &account, preparation.txid, 3_543_356, false),
+            "MIGRATION_SUBMISSION_REFUSED:cutoff"
+        );
+        let error =
+            take_preparation_error_at(path_bytes, &account, preparation.txid, 3_543_356, true);
+        assert!(
+            !error.starts_with(SUBMISSION_REFUSED_PREFIX) && error.contains(SEAM_NOT_PROVED),
+            "bypassed, the check lets the preparation through to the seam: {error}"
+        );
+
+        let error = take_preparation_error_at(path_bytes, &account, preparation.txid, -1, false);
+        assert!(
+            error.contains("the submission server's height is unknown"),
+            "{error}"
+        );
+
+        // The wallet has scanned up to the last block under NU6.3: the next block is the
+        // activation block.
+        set_fixture_tip_at(path_bytes, 3_543_404);
+        assert_eq!(
+            take_preparation_error_at(path_bytes, &account, preparation.txid, 3_543_404, false),
+            WRONG_BRANCH_ERROR
+        );
+
+        assert!(
+            !wallet_holds_transaction(&path, &account, preparation.txid),
+            "a refused preparation is never recorded in the wallet"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The submission server's height is a height or it is unknown, and the next block is one past
+    /// the higher of it and the wallet's tip.
+    #[test]
+    fn the_submission_target_is_one_past_the_higher_height() {
+        assert!(known_submission_server_height(-1).is_err());
+        assert!(known_submission_server_height(i64::MIN).is_err());
+        assert!(known_submission_server_height(i64::from(u32::MAX) + 1).is_err());
+        assert_eq!(known_submission_server_height(0).unwrap(), h(0));
+        assert_eq!(
+            known_submission_server_height(3_543_404).unwrap(),
+            h(3_543_404)
+        );
+
+        assert_eq!(
+            submission_target(h(3_543_000), h(3_543_404)).unwrap(),
+            h(3_543_405)
+        );
+        assert_eq!(
+            submission_target(h(3_543_404), h(3_543_000)).unwrap(),
+            h(3_543_405)
+        );
+        assert_eq!(
+            submission_target(h(3_600_000), h(3_600_000)).unwrap(),
+            h(3_600_001)
+        );
+        // No height follows the highest one a `BlockHeight` holds.
+        assert!(submission_target(h(1), h(u32::MAX)).is_err());
+    }
+
+    /// The run a cancel has ended serves nothing. An instruction issued before the cancel can
+    /// still arrive after it, and serving it would record the transaction in the wallet and mark
+    /// the notes the cancel just released as spent again. The refusal is bare, and it comes before
+    /// the check and before the seam: an expiring height and a valid one are answered alike.
+    ///
+    /// The rows are proved, as they are in a run that has been proving, so that the seam would be
+    /// reached were it not for the guard.
+    #[test]
+    fn take_broadcast_refuses_a_cancelled_run() {
+        let (path, account) = committed_run_fixture("take_cancelled", 3_600_000);
+        let path_bytes = path.to_str().unwrap().as_bytes();
+        reserve_fixture_funding_for_the_run(&path, &account);
+        let row = fixture_run_row(&path, &account, false);
+        assert!(
+            cancel_fixture_run(&path, &account),
+            "the cancel must succeed: {:?}",
+            ffi_helpers::error_handling::error_message()
+        );
+        assert_eq!(
+            stored_fixture_run(&path, &account)
+                .expect("the cancelled run stays stored")
+                .status(),
+            MigrationStatus::Cancelled
+        );
+
+        for height in [FIXTURE_SERVER_HEIGHT, i64::from(row.expiry)] {
+            let error = take_broadcast_error_at(path_bytes, &account, row.id, height, false);
+            assert!(
+                error.contains("already over"),
+                "server at {height}: {error}"
+            );
+            assert!(
+                !error.starts_with(SUBMISSION_REFUSED_PREFIX)
+                    && !error.starts_with(PROVING_UNAVAILABLE_PREFIX),
+                "the refusal is bare, server at {height}: {error}"
+            );
+        }
+
+        assert!(
+            !wallet_holds_transaction(&path, &account, row.txid),
+            "a cancelled run's transaction is never recorded in the wallet"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// [`take_broadcast_refuses_a_cancelled_run`] for the preparation accessor.
+    #[test]
+    fn take_preparation_refuses_a_cancelled_run() {
+        let (path, account) = committed_run_fixture("take_prep_cancelled", 3_600_000);
+        let path_bytes = path.to_str().unwrap().as_bytes();
+        reserve_fixture_funding_for_the_run(&path, &account);
+        let preparation = fixture_run_row(&path, &account, true);
+        assert!(
+            cancel_fixture_run(&path, &account),
+            "the cancel must succeed: {:?}",
+            ffi_helpers::error_handling::error_message()
+        );
+
+        for height in [FIXTURE_SERVER_HEIGHT, i64::from(preparation.expiry)] {
+            let error =
+                take_preparation_error_at(path_bytes, &account, preparation.txid, height, false);
+            assert!(
+                error.contains("already over"),
+                "server at {height}: {error}"
+            );
+            assert!(
+                !error.starts_with(SUBMISSION_REFUSED_PREFIX)
+                    && !error.starts_with(PROVING_UNAVAILABLE_PREFIX),
+                "the refusal is bare, server at {height}: {error}"
+            );
+        }
+
+        assert!(
+            !wallet_holds_transaction(&path, &account, preparation.txid),
+            "a cancelled run's preparation is never recorded in the wallet"
         );
         let _ = std::fs::remove_file(&path);
     }

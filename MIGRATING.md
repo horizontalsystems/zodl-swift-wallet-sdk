@@ -1632,6 +1632,36 @@ case .rustMigrationCancelRun:
 Both calls are new requirements of `Synchronizer` with default implementations that throw, so a custom
 conformer needs no change.
 
+## `ZcashError` gained a case — `migrationSubmissionRefused`
+
+`ZcashError` and `ZcashErrorCode` have a new case, `migrationSubmissionRefused` (`ZRUST0162`), whose payload is a
+`TransactionSubmissionRefusal`: why a migration transaction cannot be valid in the next block, which is the one
+after the higher of the wallet's chain tip and the latest block height of the server the transaction is about to
+go to. `performMigrationBroadcast`, `submitNoteSplit` and `takeMigrationPreparation` throw it, and the
+transaction they refuse is neither submitted nor recorded in the wallet. An exhaustive `switch` over either type
+stops compiling until it is handled.
+
+```swift
+case .migrationSubmissionRefused(let refusal):
+    switch refusal {
+    case .wrongConsensusBranch, .expired:
+        // The transaction can never be mined: crank `migrationAdvanceStep(accountUUID:)`, which says what
+        // becomes of the run (an interrupted one is cancelled, an expired transfer rebuilt).
+        break
+    case .networkUpgradeCutoff:
+        // The next block is one of the 48 before the NU7 activation: nothing is submitted until it has
+        // passed. Crank again later.
+        break
+    }
+```
+
+These calls also change how they reach the network, with no signature change. `performMigrationBroadcast` and
+`submitNoteSplit` connect to the submission server and read its height before they take the transaction from the
+wallet, so `ZcashError.migrationTorUnavailable` now arrives before the wallet is touched, and a server whose height
+cannot be read yields `MigrationTransferResult.networkError(retryable: true)` with nothing submitted or recorded.
+`takeMigrationPreparation` makes one network request of its own, to the synchronizer's lightwalletd server, and
+throws the request's error when it fails. See `CHANGELOG.md`.
+
 ## The pool-migration surface rides the final engine
 
 The Orchard→Ironwood migration group (never in a released SDK) is rewired onto the final engine

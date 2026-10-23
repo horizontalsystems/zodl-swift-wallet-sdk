@@ -5868,25 +5868,25 @@ class ZcashRustBackendWeldingMock: ZcashRustBackendWelding {
 
     // MARK: - migrationSignNoteSplit
 
-    var migrationSignNoteSplitProposalUskForThrowableError: Error?
-    var migrationSignNoteSplitProposalUskForCallsCount = 0
-    var migrationSignNoteSplitProposalUskForCalled: Bool {
-        return migrationSignNoteSplitProposalUskForCallsCount > 0
+    var migrationSignNoteSplitProposalUskSubmissionServerHeightForThrowableError: Error?
+    var migrationSignNoteSplitProposalUskSubmissionServerHeightForCallsCount = 0
+    var migrationSignNoteSplitProposalUskSubmissionServerHeightForCalled: Bool {
+        return migrationSignNoteSplitProposalUskSubmissionServerHeightForCallsCount > 0
     }
-    var migrationSignNoteSplitProposalUskForReceivedArguments: (proposal: NoteSplitProposal, usk: UnifiedSpendingKey, account: AccountUUID)?
-    var migrationSignNoteSplitProposalUskForReturnValue: PreparedMigrationTransfer!
-    var migrationSignNoteSplitProposalUskForClosure: ((NoteSplitProposal, UnifiedSpendingKey, AccountUUID) async throws -> PreparedMigrationTransfer)?
+    var migrationSignNoteSplitProposalUskSubmissionServerHeightForReceivedArguments: (proposal: NoteSplitProposal, usk: UnifiedSpendingKey, submissionServerHeight: BlockHeight, account: AccountUUID)?
+    var migrationSignNoteSplitProposalUskSubmissionServerHeightForReturnValue: PreparedMigrationTransfer!
+    var migrationSignNoteSplitProposalUskSubmissionServerHeightForClosure: ((NoteSplitProposal, UnifiedSpendingKey, BlockHeight, AccountUUID) async throws -> PreparedMigrationTransfer)?
 
-    func migrationSignNoteSplit(proposal: NoteSplitProposal, usk: UnifiedSpendingKey, for account: AccountUUID) async throws -> PreparedMigrationTransfer {
-        if let error = migrationSignNoteSplitProposalUskForThrowableError {
+    func migrationSignNoteSplit(proposal: NoteSplitProposal, usk: UnifiedSpendingKey, submissionServerHeight: BlockHeight, for account: AccountUUID) async throws -> PreparedMigrationTransfer {
+        if let error = migrationSignNoteSplitProposalUskSubmissionServerHeightForThrowableError {
             throw error
         }
-        migrationSignNoteSplitProposalUskForCallsCount += 1
-        migrationSignNoteSplitProposalUskForReceivedArguments = (proposal: proposal, usk: usk, account: account)
-        if let closure = migrationSignNoteSplitProposalUskForClosure {
-            return try await closure(proposal, usk, account)
+        migrationSignNoteSplitProposalUskSubmissionServerHeightForCallsCount += 1
+        migrationSignNoteSplitProposalUskSubmissionServerHeightForReceivedArguments = (proposal: proposal, usk: usk, submissionServerHeight: submissionServerHeight, account: account)
+        if let closure = migrationSignNoteSplitProposalUskSubmissionServerHeightForClosure {
+            return try await closure(proposal, usk, submissionServerHeight, account)
         } else {
-            return migrationSignNoteSplitProposalUskForReturnValue
+            return migrationSignNoteSplitProposalUskSubmissionServerHeightForReturnValue
         }
     }
 
@@ -6079,49 +6079,49 @@ class ZcashRustBackendWeldingMock: ZcashRustBackendWelding {
 
     // MARK: - migrationTakePreparation
 
-    var migrationTakePreparationTxidForThrowableError: Error?
-    var migrationTakePreparationTxidForCallsCount = 0
-    var migrationTakePreparationTxidForCalled: Bool {
-        return migrationTakePreparationTxidForCallsCount > 0
+    var migrationTakePreparationTxidSubmissionServerHeightForThrowableError: Error?
+    var migrationTakePreparationTxidSubmissionServerHeightForCallsCount = 0
+    var migrationTakePreparationTxidSubmissionServerHeightForCalled: Bool {
+        return migrationTakePreparationTxidSubmissionServerHeightForCallsCount > 0
     }
-    var migrationTakePreparationTxidForReceivedArguments: (txid: Data, account: AccountUUID)?
-    var migrationTakePreparationTxidForReturnValue: PreparedMigrationTransfer!
-    var migrationTakePreparationTxidForClosure: ((Data, AccountUUID) async throws -> PreparedMigrationTransfer)?
+    var migrationTakePreparationTxidSubmissionServerHeightForReceivedArguments: (txid: Data, submissionServerHeight: BlockHeight, account: AccountUUID)?
+    var migrationTakePreparationTxidSubmissionServerHeightForReturnValue: PreparedMigrationTransfer!
+    var migrationTakePreparationTxidSubmissionServerHeightForClosure: ((Data, BlockHeight, AccountUUID) async throws -> PreparedMigrationTransfer)?
 
-    func migrationTakePreparation(txid: Data, for account: AccountUUID) async throws -> PreparedMigrationTransfer {
-        if let error = migrationTakePreparationTxidForThrowableError {
+    func migrationTakePreparation(txid: Data, submissionServerHeight: BlockHeight, for account: AccountUUID) async throws -> PreparedMigrationTransfer {
+        if let error = migrationTakePreparationTxidSubmissionServerHeightForThrowableError {
             throw error
         }
-        migrationTakePreparationTxidForCallsCount += 1
-        migrationTakePreparationTxidForReceivedArguments = (txid: txid, account: account)
-        if let closure = migrationTakePreparationTxidForClosure {
-            return try await closure(txid, account)
+        migrationTakePreparationTxidSubmissionServerHeightForCallsCount += 1
+        migrationTakePreparationTxidSubmissionServerHeightForReceivedArguments = (txid: txid, submissionServerHeight: submissionServerHeight, account: account)
+        if let closure = migrationTakePreparationTxidSubmissionServerHeightForClosure {
+            return try await closure(txid, submissionServerHeight, account)
         } else {
-            return migrationTakePreparationTxidForReturnValue
+            return migrationTakePreparationTxidSubmissionServerHeightForReturnValue
         }
     }
 
     // MARK: - migrationTakeBroadcastTransaction
 
-    var migrationTakeBroadcastTransactionIdForThrowableError: Error?
-    var migrationTakeBroadcastTransactionIdForCallsCount = 0
-    var migrationTakeBroadcastTransactionIdForCalled: Bool {
-        return migrationTakeBroadcastTransactionIdForCallsCount > 0
+    var migrationTakeBroadcastTransactionIdSubmissionServerHeightForThrowableError: Error?
+    var migrationTakeBroadcastTransactionIdSubmissionServerHeightForCallsCount = 0
+    var migrationTakeBroadcastTransactionIdSubmissionServerHeightForCalled: Bool {
+        return migrationTakeBroadcastTransactionIdSubmissionServerHeightForCallsCount > 0
     }
-    var migrationTakeBroadcastTransactionIdForReceivedArguments: (id: UInt32, account: AccountUUID)?
-    var migrationTakeBroadcastTransactionIdForReturnValue: PreparedMigrationTransfer!
-    var migrationTakeBroadcastTransactionIdForClosure: ((UInt32, AccountUUID) async throws -> PreparedMigrationTransfer)?
+    var migrationTakeBroadcastTransactionIdSubmissionServerHeightForReceivedArguments: (id: UInt32, submissionServerHeight: BlockHeight, account: AccountUUID)?
+    var migrationTakeBroadcastTransactionIdSubmissionServerHeightForReturnValue: PreparedMigrationTransfer!
+    var migrationTakeBroadcastTransactionIdSubmissionServerHeightForClosure: ((UInt32, BlockHeight, AccountUUID) async throws -> PreparedMigrationTransfer)?
 
-    func migrationTakeBroadcastTransaction(id: UInt32, for account: AccountUUID) async throws -> PreparedMigrationTransfer {
-        if let error = migrationTakeBroadcastTransactionIdForThrowableError {
+    func migrationTakeBroadcastTransaction(id: UInt32, submissionServerHeight: BlockHeight, for account: AccountUUID) async throws -> PreparedMigrationTransfer {
+        if let error = migrationTakeBroadcastTransactionIdSubmissionServerHeightForThrowableError {
             throw error
         }
-        migrationTakeBroadcastTransactionIdForCallsCount += 1
-        migrationTakeBroadcastTransactionIdForReceivedArguments = (id: id, account: account)
-        if let closure = migrationTakeBroadcastTransactionIdForClosure {
-            return try await closure(id, account)
+        migrationTakeBroadcastTransactionIdSubmissionServerHeightForCallsCount += 1
+        migrationTakeBroadcastTransactionIdSubmissionServerHeightForReceivedArguments = (id: id, submissionServerHeight: submissionServerHeight, account: account)
+        if let closure = migrationTakeBroadcastTransactionIdSubmissionServerHeightForClosure {
+            return try await closure(id, submissionServerHeight, account)
         } else {
-            return migrationTakeBroadcastTransactionIdForReturnValue
+            return migrationTakeBroadcastTransactionIdSubmissionServerHeightForReturnValue
         }
     }
 

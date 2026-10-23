@@ -634,14 +634,27 @@ protocol ZcashRustBackendWelding {
     /// transfer. Only `proposal.proposalHandle` crosses to the native side — it identifies the
     /// exact cached plan the user was shown, and the native side refuses to sign any other plan,
     /// so a stale display cannot sign different values than the ones the user approved.
+    ///
+    /// The returned transaction is checked, before the store's broadcast seam records it in the
+    /// wallet, against the next block: the one after the higher of the wallet's chain tip and
+    /// `submissionServerHeight`, the latest block height the server the transaction is about to be
+    /// submitted to reports. It must be built for that block's consensus branch and not have expired
+    /// by it, and the migration submits nothing in the blocks just before the NU7 network upgrade
+    /// (the upgrade-gate bypass lifts that window and nothing else). A transaction that fails is not
+    /// recorded; the committed run and the proof stay.
+    /// - Parameter submissionServerHeight: the latest block height the submission server reported,
+    ///   read on the connection the transaction will go over.
     /// - Throws: `migrationPausedUntilNetworkUpgrade` before the NU7 network upgrade has activated
     ///   (nothing is signed) unless the backend's upgrade-gate bypass is on; `migrationPlanStale`
     ///   when the identified plan is missing (process restart between propose and confirm) or
     ///   superseded by a later propose/prepare call, and no resumable run is stored — re-propose
-    ///   and re-display; `rustMigrationSignNoteSplit` for other rust-layer errors.
+    ///   and re-display; `migrationSubmissionRefused` when the transaction cannot be valid in the
+    ///   next block; `rustMigrationSignNoteSplit` for other rust-layer errors, among them a
+    ///   negative `submissionServerHeight`.
     func migrationSignNoteSplit(
         proposal: NoteSplitProposal,
         usk: UnifiedSpendingKey,
+        submissionServerHeight: BlockHeight,
         for account: AccountUUID
     ) async throws -> PreparedMigrationTransfer
 
@@ -739,7 +752,7 @@ protocol ZcashRustBackendWelding {
     /// ``MigrationProveOutcome``: how many were proved (`0` is the ordinary "nothing left to prove
     /// right now" answer) and THE TXIDS OF THE PREPARATIONS it proved.
     ///
-    /// The txids are the handoff to ``migrationTakePreparation(txid:for:)``: a proved preparation
+    /// The txids are the handoff to ``migrationTakePreparation(txid:submissionServerHeight:for:)``: a proved preparation
     /// is submitted through the caller's ordinary raw-transaction machinery. Transfers are never
     /// named — they are delivered by the drive's broadcast instruction alone.
     ///
@@ -790,14 +803,31 @@ protocol ZcashRustBackendWelding {
     /// Retrieved-but-never-submitted is therefore a bounded, engine-modelled state: the record is
     /// idempotent, the preparation carries a ZIP 203 expiry, and an unsubmitted row surfaces
     /// through the ordinary attention path once it expires.
-    /// - Parameter txid: a txid ``MigrationProveOutcome/preparationTxids`` named, in the SDK's
-    ///   raw/internal byte order.
+    ///
+    /// THE PREPARATION IS CHECKED BEFORE THE SEAM, so a preparation that cannot be valid in the next
+    /// block is never recorded in the wallet. The next block is the one after the higher of the
+    /// wallet's chain tip and `submissionServerHeight`, the latest block height of the server the
+    /// caller reads it from; the preparation must be built for that block's consensus branch and not
+    /// have expired by it, and the migration submits nothing in the blocks just before the NU7
+    /// network upgrade (the upgrade-gate bypass lifts that window and nothing else). A run that has
+    /// ended serves nothing.
+    /// - Parameters:
+    ///   - txid: a txid ``MigrationProveOutcome/preparationTxids`` named, in the SDK's raw/internal
+    ///     byte order.
+    ///   - submissionServerHeight: the latest block height the server the preparation will be
+    ///     submitted to reported, read just before this call.
     /// - Throws: `migrationProvingUnavailable` when the stored artifact cannot be turned into
-    ///   servable bytes; `rustMigrationTakePreparation` otherwise — for a txid naming a TRANSFER
+    ///   servable bytes; `migrationSubmissionRefused` when the preparation cannot be valid in the
+    ///   next block; `rustMigrationTakePreparation` otherwise — for a txid naming a TRANSFER
     ///   (transfers are served by the drive's broadcast instruction alone), for a txid the stored
-    ///   run does not carry, and for the readiness refusal of a preparation that is not proved,
-    ///   which a caller discharges by proving again rather than retrying this.
-    func migrationTakePreparation(txid: Data, for account: AccountUUID) async throws -> PreparedMigrationTransfer
+    ///   run does not carry, for a run that has ended, for a negative `submissionServerHeight`, and
+    ///   for the readiness refusal of a preparation that is not proved, which a caller discharges by
+    ///   proving again rather than retrying this.
+    func migrationTakePreparation(
+        txid: Data,
+        submissionServerHeight: BlockHeight,
+        for account: AccountUUID
+    ) async throws -> PreparedMigrationTransfer
 
     /// Serves the transaction `id` for broadcast — the instruction a prior
     /// ``migrationAdvanceStep(for:estimatedTip:)`` call returned as its
@@ -814,11 +844,29 @@ protocol ZcashRustBackendWelding {
     /// ``PreparedMigrationTransfer/pczt`` is therefore the FINALIZED CONSENSUS TRANSACTION,
     /// submittable as-is. Retrying a failed submission re-serves the same transaction over the
     /// same record.
+    ///
+    /// THE TRANSACTION IS CHECKED BEFORE THE SEAM, so a transaction that cannot be valid in the next
+    /// block is never recorded in the wallet. The next block is the one after the higher of the
+    /// wallet's chain tip and `submissionServerHeight`, the latest block height of the server the
+    /// transaction is about to be submitted to; it must be built for that block's consensus branch
+    /// and not have expired by it, and the migration submits nothing in the blocks just before the
+    /// NU7 network upgrade (the upgrade-gate bypass lifts that window and nothing else). A run that
+    /// has ended serves nothing.
+    /// - Parameters:
+    ///   - id: the transaction the instruction named.
+    ///   - submissionServerHeight: the latest block height the submission server reported, read on
+    ///     the connection the transaction will go over, just before this call.
     /// - Throws: `migrationProvingUnavailable` when the stored artifact cannot be turned into
-    ///   servable bytes; `rustMigrationTakeBroadcastTransaction` for other rust-layer errors —
+    ///   servable bytes; `migrationSubmissionRefused` when the transaction cannot be valid in the
+    ///   next block; `rustMigrationTakeBroadcastTransaction` for other rust-layer errors —
     ///   including the STALENESS refusal of a row that is no longer proved-and-servable, which a
-    ///   caller discharges by advancing again rather than retrying the executor.
-    func migrationTakeBroadcastTransaction(id: UInt32, for account: AccountUUID) async throws -> PreparedMigrationTransfer
+    ///   caller discharges by advancing again rather than retrying the executor, the refusal of a
+    ///   run that has ended, and a negative `submissionServerHeight`.
+    func migrationTakeBroadcastTransaction(
+        id: UInt32,
+        submissionServerHeight: BlockHeight,
+        for account: AccountUUID
+    ) async throws -> PreparedMigrationTransfer
 
     /// Records the platform's broadcast outcome for `transferId`, advancing the engine's state.
     /// - Throws: `rustMigrationRecordTransferResult` if the rust layer returns an error;

@@ -21,7 +21,9 @@ import Foundation
 /// dormant account whose actor has never been created this launch still counts), the
 /// account-free chain-tip estimation pair (``estimatedChainTip()`` /
 /// ``estimatedSecondsPerBlock()``, which read the shared blocks table) and the account-free
-/// ``migrationAvailability()`` (which reads the wallet's chain tip).
+/// ``migrationAvailability()`` (which reads the wallet's chain tip). The one other thing it borrows
+/// is the synchronizer's lightwalletd service, as the source of the latest block height a
+/// preparation retrieved with ``OrchardMigration/takePreparation(byTxid:)`` is checked against.
 actor OrchardMigrationHost {
     private let welding: ZcashRustBackendWelding
     private let sharedBroadcaster: any MigrationBroadcasting
@@ -76,6 +78,24 @@ actor OrchardMigrationHost {
         let generalStorageURL = initializer.generalStorageURL
         let logger = initializer.logger
 
+        // The synchronizer's own lightwalletd server's latest block height, which a preparation's
+        // submission check is judged against (see ``OrchardMigration/takePreparation(byTxid:)``).
+        // It is read in the mode the sync's own chain-tip updates use (`UpdateChainTipAction`,
+        // `LatestBlocksDataProvider`): the same request over the same connection the wallet already
+        // makes to that server all the time, so it is not a new kind of traffic to it, which a
+        // connection of a mode of its own would be. The service is looked up when the height is read
+        // and not held: `switchTo(endpoint:)` replaces the initializer's service, and holding the
+        // current one would read a server the wallet no longer syncs from. The initializer is held
+        // weakly, as the container registration of this host does, so that initializer -> container
+        // -> host -> this closure -> initializer is not a cycle.
+        let sdkFlags = initializer.container.resolve(SDKFlags.self)
+        let submissionHeight: @Sendable () async throws -> BlockHeight = { [weak initializer] in
+            guard let initializer else {
+                throw ZcashError.synchronizerNotPrepared
+            }
+            return try await initializer.lightWalletService.latestBlockHeight(mode: await sdkFlags.ifTor(.defaultTor))
+        }
+
         let factory: ActorFactory = { accountUUID, broadcaster, upgradeGateBypass in
             OrchardMigration(
                 config: OrchardMigration.Config(
@@ -88,6 +108,7 @@ actor OrchardMigrationHost {
                     torDirURL: torDirURL,
                     generalStorageURL: generalStorageURL,
                     upgradeGateBypass: upgradeGateBypass,
+                    submissionHeight: submissionHeight,
                     loggingPolicy: Initializer.LoggingPolicy.custom(logger)
                 ),
                 sharedBroadcaster: broadcaster
