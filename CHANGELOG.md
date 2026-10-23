@@ -6,6 +6,214 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 # Unreleased
 
+# 6.0.0 - 2026-10-15
+
+Changes are relative to `5.2.2`.
+
+## Added
+
+- `PaymentURIParser` and the typed `PaymentURIRequest` results provide Rust-backed parsing and
+  validation for Bitcoin, Ethereum (EIP-681, native and ERC-20), Litecoin, and Solana payment
+  request URIs, including Solana Pay interactive transaction-request links.
+- `PaymentURIParserError` distinguishes a bad URI (`invalidURI`, `rejected(_:)`) from an
+  SDK/Rust-core mismatch (`unsupportedEnvelope(version:)`, `invalidEnvelope`) and from a parser
+  crash (`parserFailure(_:)`, carrying a redacted `RedactedRustError`). `PaymentURIRejection`
+  reports which check the Rust parser failed, without carrying any fragment of the caller's input
+  across the FFI.
+- The payment-URI result types expose public initialisers, so consumers can build canned values
+  for tests and dependency doubles.
+- `PaymentURIParser` rejects Ethereum native recipients, ERC-20 recipients, and token contracts
+  whose hexadecimal address is not exactly 40 digits. The pinned EIP-681 parser previously
+  accepted over-length addresses as validated requests.
+- `PaymentURIParser` accepts all-uppercase Bitcoin and Litecoin bech32 addresses used by QR
+  encoders without changing Litecoin's case-sensitive BIP-21 query-key semantics.
+- `PaymentURIParser` rejects overflowing explicit ERC-20 chain IDs and conflicting native
+  Ethereum `value`, `gas`/`gasLimit`, or `gasPrice` parameters instead of reporting those fields
+  as omitted.
+- `PaymentURIParser` rejects SPL-token amounts that cannot fit the `u64` used by any SPL transfer,
+  while leaving mint-specific decimal validation to the consumer that resolves the mint.
+- `PaymentURIParserError.parserFailure(_:)` never exposes a raw Rust panic string. Its
+  `RedactedRustError` payload is safe to include in support reports; raw detail remains only in
+  device-local Rust diagnostics.
+- `PaymentURIParser` reports missing, retyped, or unknown fields in the Rust result envelope as
+  `invalidEnvelope` rather than `invalidURI`. Callers can distinguish an SDK/core mismatch from a
+  bad scanned URI without asking the user to rescan.
+- `DerivationTool.describeUnifiedFullViewingKey(_:)` reports which items a `UnifiedFullViewingKey`
+  carries, as a `UnifiedFullViewingKeyComponents` with `hasP2pkh`, `hasP2sh`, `hasSapling`,
+  `hasOrchard`, `hasUnknownItems` and `hasTransparent` (a P2PKH or a P2SH item). A wallet can use it
+  to require an item, such as Orchard, before it imports a key. It returns `nil` when the key is not
+  a unified full viewing key for the tool's network, for instance a key created for the other
+  network, and throws `ZcashError.rustDescribeUnifiedFullViewingKey` (`ZRUST0172`) when the check
+  itself fails. It reads no database, makes no network request, and puts no part of the key in an
+  error.
+- `Synchronizer.findAccountSharingKeyComponents(_:)` tells a wallet what importing a
+  `UnifiedFullViewingKey` would do, before it imports the key. It returns `nil` when the import would
+  add an account, and otherwise an `AccountKeyOverlap`: the `account` that already shares an Orchard,
+  Sapling or transparent P2PKH viewing key component with the key, and the `kind` of the overlap. An
+  `alreadyImported` or `conflicting` import fails, while a `wouldUpgrade` import adds no account and
+  replaces that account's viewing key with the key; `importWouldFail` says which. It throws
+  `ZcashError.accountKeyOverlapMultipleAccounts` (`ZRUST0171`) when several accounts share a
+  component, which makes the import fail too, and `ZcashError.rustFindAccountKeyOverlap`
+  (`ZRUST0170`) when the lookup itself fails. The answer is a snapshot, because the lookup and an
+  import run in separate transactions. It reads the wallet database without changing it, does not
+  stop synchronization, and puts no part of the key in an error. A protocol-extension default keeps
+  other `Synchronizer` conformers compiling; it throws, so a conformer that offers the lookup must
+  implement it.
+- `Account.viewOnlyKeySource` (`"view_only"`) is the `keySource` to pass to
+  `Synchronizer.importAccount(ufvk:seedFingerprint:zip32AccountIndex:purpose:name:keySource:birthday:)`
+  when a wallet imports a unified full viewing key as a view-only account (`AccountPurpose.viewOnly`).
+  It is a tag for the wallet to read back from `Account.keySource`; the SDK does not act on it.
+- `Synchronizer.renameAccount(_:name:)` stores a new name for an account in the wallet database,
+  replacing any name it had. The account's keys and all other state are unchanged, and
+  `listAccounts()` returns the new name afterwards. It throws the new `ZcashError.rustSetAccountName`
+  (`ZRUST0173`) when the name cannot be stored, for example when no account has the given UUID, or
+  the name is empty or contains a null character. It does not stop synchronization. A
+  protocol-extension default keeps other `Synchronizer` conformers compiling; it throws, so a
+  conformer that offers renaming must implement it.
+- `SlipstreamStopReport`, what a stop of the Slipstream engine found: whether every sync pass the
+  engine had aborted finished unwinding within its ten-second budget (`settled`), whether no engine
+  wallet write was still running within its own (`drained`), how long each wait took (`settleWait`,
+  `drainWait`, as `Duration`), and `isQuiescent`, which is true only when both waits finished.
+  `refusalReason` says which wait ran out and after how long, for instance `a sync pass was still
+  running after 10.0 s`, and is `nil` for a quiescent report. Its public initializer lets a
+  consumer build one for a test double.
+- `SlipstreamEngine.stopForWalletChange()`, the stop to make right before changing the wallet. It
+  asks the running sync pass to end its scan at the next block, then stops exactly as `stop()` does
+  and returns the same `SlipstreamStopReport`; `stop()` lets a scan call in progress finish its
+  chunk first. The next pass scans the interrupted blocks again.
+
+## Changed
+
+- The Swift package is renamed from `ZcashLightClientKit` to `zodl-swift-wallet-sdk`, and
+  its single library product and module from `ZcashLightClientKit` to `ZODLSwiftWalletSDK`.
+  Every `import ZcashLightClientKit` — including the `@testable` and `@_spi(Testing)` forms —
+  and every module-qualified name such as `ZcashLightClientKit.BlockHeight` stops compiling
+  until it says `ZODLSwiftWalletSDK`. In `Package.swift`, `.product(name: "ZcashLightClientKit", …)`
+  becomes `.product(name: "ZODLSwiftWalletSDK", …)`. The repository is now
+  `https://github.com/zodl-inc/zodl-swift-wallet-sdk`: update `.package(url:)` to it and, because
+  SwiftPM derives the `package:` argument from the URL's last path component, set
+  `package: "zodl-swift-wallet-sdk"` in the same edit (GitHub redirects the old URL, and a
+  manifest that keeps it keeps `package: "zcash-swift-wallet-sdk"`). A dependency declared with
+  the explicit `.package(name: "ZcashLightClientKit", url: …)` form must drop that `name:` or
+  set it to `"zodl-swift-wallet-sdk"`. There is no compatibility product under the old name.
+  Two runtime strings follow the module: a `ZcashError` bridged to `NSError` now reports the
+  domain `ZODLSwiftWalletSDK.ZcashError` instead of `ZcashLightClientKit.ZcashError`, and the
+  SPM resource bundle is `zodl-swift-wallet-sdk_ZODLSwiftWalletSDK.bundle` instead of
+  `ZcashLightClientKit_ZcashLightClientKit.bundle`; code that matched either literal must be
+  updated. See MIGRATING.md.
+- The package's minimum platforms are now iOS 16 and macOS 14, up from iOS 13 and macOS 12, and the
+  `libzcashlc` XCFramework is built for the same minimums. An app or package whose deployment target is
+  lower no longer builds against the SDK: raise it to at least iOS 16 / macOS 14; see `MIGRATING.md`.
+- `RustErrorKind` has a new case, `anchorNotFound`: creating transactions from a proposal failed
+  because the wallet has not scanned to a height it can anchor them on. Such failures were reported
+  as `proposalInvalid`, and a wallet could only tell them apart by the upstream error text, which
+  redaction now removes; the new case lets it say "scan further and retry". An exhaustive `switch`
+  over `RustErrorKind` stops compiling until the new case is handled.
+- `migrationProgress(accountUUID:)` and `recordImmediateMigration(accountUUID:txid:)` use a record
+  that `prepare()` now creates, so on a wallet upgraded from an earlier SDK version they throw until
+  the synchronizer has been prepared with this version.
+- `ZcashError` and `ZcashErrorCode` gain `rustDescribeUnifiedFullViewingKey` (`ZRUST0172`), which
+  only `DerivationTool.describeUnifiedFullViewingKey(_:)` throws, `rustFindAccountKeyOverlap`
+  (`ZRUST0170`) and `accountKeyOverlapMultipleAccounts` (`ZRUST0171`), which only
+  `Synchronizer.findAccountSharingKeyComponents(_:)` throws, and `rustSetAccountName` (`ZRUST0173`),
+  which only `Synchronizer.renameAccount(_:name:)` throws. An exhaustive `switch` over either stops
+  compiling until they are handled; see `MIGRATING.md`.
+- `Synchronizer.listAccounts()`, and every other API that returns an `Account`, now sets `ufvk` and
+  `uivk` for an account imported without derivation data, such as a hardware-wallet or view-only
+  account; they were `nil`. Code that recognises such an account by `ufvk == nil` no longer finds
+  it: test `hdAccountIndex == nil` instead, which stays `nil` for it, as `seedFingerprint` does.
+  Whatever a wallet derives from `account.ufvk` changes for these accounts. Given `account.ufvk`,
+  `AccountMetadataKey.derivePrivateUseMetadataKey(ufvk:privateUseSubject:)` now derives different
+  keys for them, so metadata written under the keys that `ufvk: nil` gave becomes unreachable; to
+  keep it, go on passing `ufvk: nil` for an imported account that already has metadata. Such an
+  `Account` no longer equals, or hashes like, the value an earlier version returned, so match
+  accounts by `id`. Its `Codable` encoding now includes both keys, so an `Account` a wallet stores
+  or sends carries the account's viewing key. See `MIGRATING.md`.
+- `SlipstreamEngine.stop()` returns a `SlipstreamStopReport` instead of a `Bool`. The old `Bool` is
+  the report's `isQuiescent`: code that tested the result stops compiling until it reads that
+  property. A call that discards the result needs no change. See `MIGRATING.md`.
+- `ZcashError.slipstreamEngineNotQuiescent` (`ZRUST0155`) now carries the `SlipstreamStopReport` of
+  the stop that refused the operation, and its `errorDescription`, so its `localizedDescription`,
+  ends with the report's `refusalReason` in parentheses, for instance `ZRUST0155: … the mutation
+  was refused. (a sync pass was still running after 10.0 s)`. `ZcashError.detail` returns the same
+  text. It is built from the report's two verdicts and two waits alone and names no account, key or
+  address. Code that constructs the case, or compares an error with `==` against it, stops
+  compiling until it passes a report or compares `code`; `case .slipstreamEngineNotQuiescent:` and
+  `catch ZcashError.slipstreamEngineNotQuiescent` keep compiling. See `MIGRATING.md`.
+
+## Removed
+
+- `ZcashEip681Backend` and the `zcashlc_eip681_*` FFI are gone. `PaymentURIParser` now handles
+  every `ethereum:` URI, so the two parse paths no longer disagree about a request's
+  `schemaPrefix`. This matches the Android SDK, which retired its EIP-681 path in the same way.
+  One behaviour is lost with it: non-`ethereum:` EIP-681 scheme prefixes such as `celo:` are no
+  longer accepted, and a URI's own scheme text is normalised to `"ethereum"`.
+
+## Fixed
+
+- Transaction submission through `Broadcaster` now treats a server rejection as accepted when that
+  same server confirms it already knows the transaction. No caller changes are required.
+- The migration APIs no longer create a wallet database, or any table in one, when called for a
+  wallet whose database does not exist or was never initialized; they throw instead. Such a call
+  used to leave behind a database file holding a single table, which a wallet could mistake for
+  an existing one.
+- The `libzcashlc` XCFramework's C objects claimed the Xcode SDK version they were built with as their
+  minimum OS, above the package's platforms, so linking it could warn that objects were "built for
+  newer version". They now claim iOS 16 / macOS 14. No caller changes are required.
+- Errors from importing or decoding a unified viewing key no longer contain the key. The `rustError`
+  of `ZcashError.rustImportAccountUfvk`, `rustDeriveAddressFromUfvk` and `rustSlipstreamStart` used
+  to repeat the value that failed to decode, followed by the decoder's description of it; it is now
+  a fixed sentence.
+- `SlipstreamSynchronizer.importAccount`, `deleteAccount`, `rewind(_:)`, `wipe()`,
+  `switchTo(endpoint:)` and `restartSync(at:)`, and the synchronizer's own stall recovery, now stop
+  the engine with `stopForWalletChange()`, which ends the scan at its next block. Importing several
+  accounts in quick succession no longer fails with `ZcashError.slipstreamEngineNotQuiescent`
+  (`ZRUST0155`) because a scan finishing its whole chunk outlasted the ten-second stop budget. The
+  next pass scans the interrupted blocks again. `stop()` and `stopAndWait()` still let a scan call
+  finish its chunk.
+- With the Slipstream engine, a sync pass that was stopped, a chain reorg, or an account import
+  could leave the wallet's note commitment tree with leaves at the wrong positions, or keep part of
+  it out of the tree, so a later spend could fail to find its anchor or witness. The engine now
+  resumes, checks and rewinds the tree data it buffers by position, and rescans what it cannot
+  check. A wallet an earlier version already left in that state is not repaired by this change.
+  Nothing changes at the call site.
+
+## Checkpoints
+
+Mainnet
+
+````
+Sources/ZODLSwiftWalletSDK/Resources/checkpoints/mainnet/3525000.json
+````
+
+# 5.2.2 - 2026-10-20
+
+## Fixed
+
+- TLS connections that the SDK's Rust core opens, such as those to lightwalletd servers and HTTP
+  endpoints over Tor, no longer trust the "emSign ECC Root CA - G3" root, and reject certificate
+  chains through a small set of intermediate keys that are now distrusted over specific security
+  concerns (`webpki-roots` 1.0.10, `rustls-webpki` 0.103.16). A server whose certificate chains to
+  either now fails the TLS handshake. No caller changes are required.
+
+## Checkpoints
+
+Mainnet
+
+````
+Sources/ZcashLightClientKit/Resources/checkpoints/mainnet/3517500.json
+...
+Sources/ZcashLightClientKit/Resources/checkpoints/mainnet/3522500.json
+````
+
+Testnet
+
+````
+Sources/ZcashLightClientKit/Resources/checkpoints/testnet/4510000.json
+...
+Sources/ZcashLightClientKit/Resources/checkpoints/testnet/4520000.json
+````
+
 # 5.2.1 - 2026-10-14
 
 ## Changed

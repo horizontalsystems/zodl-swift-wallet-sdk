@@ -8,6 +8,14 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `zcashlc_slipstream_stop_for_wallet_change(handle)`, the stop to call right before changing the
+  wallet (adding or removing an account, a rewind, a wipe, or reopening a handle on the same
+  wallet). It asks the running session to end its scan at the next block, then stops exactly as
+  `zcashlc_slipstream_stop` does and returns the same `FfiSlipstreamStopReport`. Refuse the change
+  unless `settled` and `drained` are both 1. `zcashlc_slipstream_stop` lets a scan call in progress
+  run to the end of its chunk first, which can outlast its ten-second budget.
+- `zcashlc_payment_uri_parse` validates supported cross-chain payment request URIs and returns an
+  internal JSON envelope for SDK bindings.
 - `zcashlc_parse_gift_card_link(link, error_out)` reads a gift card link — any `https` URL whose
   fragment carries a `v=1` card (`#v=1&key=…&height=…`) or the legacy JSON payment-link encoding at
   `/payment-links/open#vN=` — without touching a database or the network, and returns an
@@ -411,9 +419,51 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Failed override starts and releases are logged through `tracing`, and a failed release is
   counted — that worker stays boosted for the process lifetime. Non-Apple targets track the
   session refcount but apply no QoS override.
+- `ErrorKind::AnchorNotFound` (`21`): `zcashlc_take_last_error_report` reports it when creating
+  transactions from a proposal (`zcashlc_create_proposed_transactions`) fails because the wallet
+  has not scanned to a height it can anchor them on. Such failures were reported as
+  `ProposalInvalid` (`17`).
+- `zcashlc_describe_unified_full_viewing_key` reports which items (P2PKH, P2SH, Sapling, Orchard,
+  unknown) a unified full viewing key carries. It takes the key as a null-terminated string and a
+  `network_id`, ignores whitespace around the key, and returns a bitmask of the items: `1` P2PKH,
+  `2` P2SH, `4` Sapling, `8` Orchard, and `16` for an item of a typecode the library does not
+  recognize. It returns `-1`, with no last error set, when the input is not a unified full viewing
+  key for `network_id`, and `-2`, with the last error set, on an internal failure: a null pointer,
+  input that is not UTF-8, an invalid `network_id`, or a panic. The last error never contains any
+  part of the key.
+- `zcashlc_find_account_key_overlap(db_data, db_data_len, ufvk, network_id)` finds the account in
+  the wallet that shares an incoming viewing key component (Orchard, Sapling or transparent P2PKH)
+  with a unified full viewing key, and reports what importing that key with
+  `zcashlc_import_account_ufvk` would do to it. It opens the wallet database read-only and ignores
+  whitespace around the key. It returns an `FfiAccountKeyOverlap`, freed with
+  `zcashlc_free_account_key_overlap`, whose `kind` is an `FfiAccountKeyOverlapKind`:
+  - `None` (`0`): no account shares a component, so the import adds an account.
+  - `AlreadyImported` (`1`): the account's viewing key already covers every item of the key, so
+    the import fails.
+  - `WouldUpgrade` (`2`): the key carries every incoming viewing key item of the account and
+    something its viewing key does not cover, so the import adds no account: it replaces the
+    account's viewing key with the key instead.
+  - `Conflicting` (`3`): the key shares a component with the account but lacks or changes
+    another, so the import fails.
+  - `MultipleAccounts` (`4`): the key's components match more than one account, so the import
+    fails.
+
+  Its `account` is that `FfiAccount`. For `None` and `MultipleAccounts` it is the value
+  `zcashlc_get_account` returns for an unknown account, with all-zero `uuid_bytes` and null
+  strings. The function returns null, with the last error set, on any other outcome: a null key, a
+  key that is not UTF-8 or not a unified full viewing key for `network_id`, an invalid
+  `network_id`, a wallet database that cannot be read, or a panic. The last error never contains
+  any part of the key.
+- `zcashlc_set_account_name(db_data, db_data_len, network_id, account_uuid_bytes, name)` sets the
+  name of an account, replacing any name it had; the account's keys and all other state are
+  unchanged. `name` is a null-terminated UTF-8 string. It returns `true` on success, and `false`
+  with the last error set when no account has `account_uuid_bytes`, when `name` is null or not
+  UTF-8, or when the wallet database cannot be written.
 
 ### Changed
 
+- `libzcashlc` is built for minimum iOS 16 and macOS 14 on every slice (the iOS simulator included);
+  its C objects previously claimed the building Xcode SDK's version.
 - `zcashlc_set_custom_network` takes a trailing `nu7` activation height. As for the other
   heights, a negative value means "not activated on this network".
 - `zcashlc_create_proposed_transactions` takes a trailing `ovk_policy: u32`: `0` encrypts the
@@ -430,10 +480,16 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   zero the wallet database reports for every non-stabilized note until that range is scanned. A
   pass that stalls before scanning it, or that never queues a ChainTip-priority range, keeps
   `tip_fresh = 0` until it reaches Done. The field and its type are unchanged.
-- `zcashlc_slipstream_stop` now returns `false` while any aborted pass is still unwinding or an
-  in-flight wallet commit has not drained within its bounded budget, and a pass that outlived an
-  earlier stop or start stays on record so a later stop keeps reporting `false` until it has
-  actually finished; previously it returned `true` regardless.
+- `zcashlc_slipstream_stop` returns an `FfiSlipstreamStopReport` by value instead of `bool`. Its
+  `settled` (`uint8_t`) is 0 while any aborted pass is still unwinding when the stop's ten-second
+  budget runs out, and `drained` is 0 while an in-flight wallet commit has not drained within its
+  own ten-second budget; each is 1 otherwise. `settle_ms` and `drain_ms` (`uint64_t`) say how long
+  each wait took. A pass that outlived an earlier stop or start stays on record, so a later stop
+  keeps reporting `settled = 0` until that pass has actually finished. A stop that cannot run, on a
+  null handle for instance, returns all zeros. The `bool` was `true` only when both waits finished
+  within their budgets, and `false` when either ran out or the stop could not run. A caller that
+  read the `bool` must read the struct: the wallet file was proved quiescent only when `settled`
+  and `drained` are both 1.
 - `zcashlc_propose_transfer`, `zcashlc_propose_transfer_from_uri`,
   `zcashlc_propose_send_max_transfer`, and `zcashlc_create_proposed_transactions` classify their
   failures instead of flattening them into a string. Their last-error text now reads
@@ -604,9 +660,7 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Terminal rejection evidence is reported to the upstream engine, whose satisfiability oracle
   returns `Reevaluate` or `Replan`; the FFI projects those onto its existing `Attend` case. The
   `ext_zcashlc_orchard_ironwood_migration_invalid_marks` extension table is retired: its schema
-  migration is no longer registered. On the first migration call, surviving rejection rows are
-  replayed at the current scanned height, funding-spent rows are left for the oracle to rediscover,
-  and the table is dropped.
+  migration is no longer registered.
 - The estimated-tip due-ness split is owned by the upstream engine (`DuenessTargets`) instead of
   hand-rolled SDK twins of the upstream predicates; behaviour additionally gains upstream's
   doomed-broadcast withhold (above).
@@ -648,7 +702,7 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   therefore trail a just-mined broadcast by at most one such pass. Reads no longer contend with
   proving.
 - The crate now builds against the NU7 pre-release generation of the `librustzcash` crates and
-  the `zodl-slipstream` 0.4.0-pre.1 engine.
+  the `zodl-slipstream` 0.4.0-pre.2 engine.
 - Every unified address, UFVK and UIVK string a `zcashlc_*` function returns is ZIP 316
   revision 0, with every receiver or item the value carries, as before the NU7 move. Revision 2
   is used only for a value revision 0 cannot represent (one with expiry metadata, a P2SH
@@ -662,6 +716,31 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (valargroup/vote-nullifier-pir#173), and `zakura-wallet-lib`
   (zakura-core/wallet-libraries#83). Each entry is replaced by the release that contains its
   pull request. The `zcashlc_voting_*` C surface is unchanged.
+- `[patch.crates-io]` takes the librustzcash crates from `zcash/librustzcash@68b2cf1f`: the
+  `zcash_client_sqlite` 0.23.0-pre.1 release plus a backport of zcash/librustzcash#3139, which adds
+  `WalletWrite::set_account_name` and which upstream has merged as `357359a4`.
+  `zcashlc_set_account_name` calls that trait method. Their versions are unchanged, and the patch is
+  replaced by the release that contains that pull request.
+- `zodl-slipstream` is now required as `=0.4.0-pre.2`, and `[patch.crates-io]` takes it from
+  `zodl-inc/slipstream@58647969`: the 0.4.0-pre.2 release plus zodl-inc/slipstream#30 and the engine
+  facades' implementation of `WalletWrite::set_account_name`. That revision is built against the
+  librustzcash revision above, and the patch is replaced by the release that contains them. #30
+  fixes stale graft-buffer rows that could put commitment-tree leaves at the wrong position, or keep
+  a shard out of the tree, after a stopped pass, a reorg or an account import.
+- `zcashlc_slipstream_stop` and `zcashlc_slipstream_start` now call the engine for the bounded
+  stop that proves the wallet file quiescent, which zodl-inc/slipstream#28 moved into the engine;
+  that change also adds the stop for a wallet change.
+- `zcashlc_init_data_database` now creates the
+  `ext_zcashlc_orchard_ironwood_migration_immediate_runs` extension table, moving into it any
+  records held by the `sdk_immediate_runs` table that read-write `zcashlc_migration_*` calls used
+  to create on demand, and dropping that table. `zcashlc_migration_record_immediate_run` and
+  `zcashlc_migration_progress` read and write only the new table, so `zcashlc_init_data_database`
+  must have run with this version before either is called.
+- `zcashlc_init_data_database` drops the retired
+  `ext_zcashlc_orchard_ironwood_migration_invalid_marks` table, and read-write
+  `zcashlc_migration_*` calls no longer replay its rows into the migration state first. Rejection
+  marks a wallet never replayed are discarded; the engine re-adjudicates the affected transfers on
+  their next broadcast attempt.
 
 ### Removed
 - The step-by-step coinholder-voting C surface is gone: `zcash_voting` absorbed the
@@ -764,6 +843,15 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `migration_finalize::extract_tx`, goes with it — the FFI entry point was its only caller.
 
 ### Fixed
+- `zcashlc_payment_uri_parse` rejects Ethereum native recipients, ERC-20 recipients, and token
+  contracts whose hexadecimal address is not exactly 40 digits, instead of trusting the pinned
+  EIP-681 parser's over-length address result.
+- `zcashlc_payment_uri_parse` folds all-uppercase Bitcoin and Litecoin bech32 addresses before
+  upstream validation without changing Litecoin's case-sensitive BIP-21 query-key semantics.
+- `zcashlc_payment_uri_parse` rejects overflowing explicit ERC-20 chain IDs and conflicting native
+  Ethereum payment parameters before the pinned parser can erase them from its typed result.
+- `zcashlc_payment_uri_parse` rejects SPL-token amounts that cannot fit the `u64` used by any SPL
+  transfer instruction.
 - `zcashlc_extract_and_store_from_pczt` now records the transaction's Ironwood
   outputs in the stored sent transaction. Every Ironwood output was previously
   omitted, so for a post-NU6.3 PCZT delivering its payment through the Ironwood
@@ -805,6 +893,11 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `zcashlc_slipstream_wallet_summary` no longer returns the empty sentinel during the ~30 s gap after
   a restore completes, and once NU6.3 is active reports the collapsed recovery balance in the
   Ironwood pool rather than Orchard.
+- `zcashlc_migration_*` read-write entry points no longer create the wallet database, or any table
+  in it, when asked about a wallet that does not exist or was never initialized; they return an
+  error instead (a stray table used to make an empty file look like a wallet).
+- Decode errors from `zcashlc_import_account_ufvk`, `zcashlc_derive_address_from_ufvk`,
+  `zcashlc_derive_address_from_uivk` and `zcashlc_slipstream_start` no longer contain the key.
 
 ## 2.8.0-rc.2 - 2026-07-28
 

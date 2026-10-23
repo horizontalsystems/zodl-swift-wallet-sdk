@@ -2,7 +2,7 @@ import Combine
 import Foundation
 import XCTest
 @testable import TestUtils
-@testable import ZcashLightClientKit
+@testable import ZODLSwiftWalletSDK
 
 final class AwaitableStopSynchronizerTests: ZcashTestCase {
     func testClassicStopAndWaitCompletesAfterProcessorStop() async throws {
@@ -118,7 +118,7 @@ final class AwaitableStopSynchronizerTests: ZcashTestCase {
 
     func testSlipstreamUnpreparedRepeatedAndNonQuiescentStopsComplete() async throws {
         let engine = GatedFakeSlipstreamEngine()
-        engine.stopQuiescent = false
+        engine.stopReport = .passStillRunning
         let sync = try makeSlipstreamSynchronizer(engine: engine)
         await sync.stopAndWait()
         await sync.stopAndWait()

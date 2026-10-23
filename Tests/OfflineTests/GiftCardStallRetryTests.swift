@@ -1,7 +1,7 @@
 import Combine
 import XCTest
 @testable import TestUtils
-@testable import ZcashLightClientKit
+@testable import ZODLSwiftWalletSDK
 
 final class GiftCardStallRetryTests: ZcashTestCase {
     // Losing retained give-up state strands the second check on the exhausted syncing pass.
@@ -148,7 +148,7 @@ final class GiftCardStallRetryTests: ZcashTestCase {
             XCTFail("Cleanup must retain the held restart")
         } catch ZcashError.giftCardCleanupTimedOut { }
         let heldCalls = await fixture.engine.calls.dropFirst(before)
-        XCTAssertFalse(heldCalls.contains("stop"))
+        XCTAssertFalse(heldCalls.contains(where: GatedFakeSlipstreamEngine.isStop))
         XCTAssertFalse(heldCalls.contains("close"))
         XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
         XCTAssertThrowsError(try GiftCardRedeemer(

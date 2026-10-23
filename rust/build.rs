@@ -63,17 +63,12 @@ fn main() {
         .rename_item("SingleUseTaddr", "FfiSingleUseTaddr")
         .rename_item("AddressCheckResult", "FfiAddressCheckResult")
         .rename_item("ZecUsdExchange", "FfiZecUsdExchange")
-        .rename_item("Eip681TransactionRequest", "FfiEip681TransactionRequest")
-        .rename_item(
-            "Eip681TransactionRequestType",
-            "FfiEip681TransactionRequestType",
-        )
         .rename_item("ErrorReport", "FfiErrorReport")
-        .rename_item("Eip681NativeRequest", "FfiEip681NativeRequest")
-        .rename_item("Eip681Erc20Request", "FfiEip681Erc20Request")
         .rename_item("GiftCardLink", "FfiGiftCardLink")
         .rename_item("GiftCardOrigin", "FfiGiftCardOrigin")
         .rename_item("GiftCardLinkError", "FfiGiftCardLinkError")
+        .rename_item("AccountKeyOverlap", "FfiAccountKeyOverlap")
+        .rename_item("AccountKeyOverlapKind", "FfiAccountKeyOverlapKind")
         .generate()
     {
         b.write_to_file("target/Headers/zcashlc.h");
