@@ -170,10 +170,13 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     whether it knows the transaction, and the transactions after it `.notAttempted`. `Broadcaster.submit(transaction:to:)` reports
     `TransactionSubmissionOutcome.rejected(code:message:)` when no endpoint accepted and at least one refused or rejected the
     transaction. No block can include a refused transaction as it is: create it again.
-  - When the server's height cannot be read, or the transaction cannot be judged, nothing is submitted. A stream throws the
-    error of the height read (`ZcashError.serviceLatestBlockHeightFailed(_:)`, for instance) or
-    `ZcashError.rustCheckTransactionSubmittable(_:)`. An endpoint whose height cannot be read counts as unreachable, like one
-    that cannot be connected to. Background resubmission skips the transaction and tries it again in a later pass.
+  - When the server's height cannot be read, nothing is submitted. The height is the first request of a submission, so this is
+    reported like any other failure to reach the server: a stream reports `TransactionSubmitResult.grpcFailure(txId:error:)` for the
+    transaction, with the ones after it `.notAttempted`, where `error` is the service error of the read over a direct connection and a
+    generic service error around the Tor connection's error over Tor, as for a submit. An endpoint of `Broadcaster.submit` whose
+    height cannot be read counts as unreachable, like one that cannot be connected to. When the transaction cannot be judged at all,
+    because it does not parse or the wallet database is missing, which no retry fixes, nothing is submitted either and a stream throws
+    `ZcashError.rustCheckTransactionSubmittable(_:)`. Background resubmission skips either and tries again in a later pass.
 - `ZcashError` and `ZcashErrorCode` gain `rustCheckTransactionSubmittable(_:)` (`ZRUST0163`), whose payload is the rust layer's
   message, and `TransactionEncoderError` gains `notSubmittable(_:)`, whose payload is the `TransactionSubmissionRefusal`. An
   exhaustive `switch` over any of the three types stops compiling until the new case is handled; see `MIGRATING.md`. The

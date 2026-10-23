@@ -1696,10 +1696,12 @@ case .submitFailure(let txId, let code, let description):
 ```
 
 `Broadcaster.submit` reports the same refusal as `TransactionSubmissionOutcome.rejected(code:message:)` when no endpoint accepted
-the transaction, so the check above applies to its `code` as well. When the server's height cannot be read, or the transaction cannot be
-judged, nothing is submitted either: an endpoint of `Broadcaster.submit` whose height cannot be read counts as unreachable, and a
-stream throws the error of the read, such as `ZcashError.serviceLatestBlockHeightFailed(_:)`, instead of reporting a result for the
-transaction.
+the transaction, so the check above applies to its `code` as well. When the server's height cannot be read, nothing is submitted either.
+The height is the first request of a submission, so this is reported like any other failure to reach the server, and a caller that
+handles that needs no change: a stream reports `TransactionSubmitResult.grpcFailure(txId:error:)` for the transaction, with the ones
+after it `.notAttempted`, and an endpoint of `Broadcaster.submit` counts as unreachable. A transaction the check cannot judge at all, because
+it does not parse or the wallet database is missing, is not submitted and ends a stream with `ZcashError.rustCheckTransactionSubmittable`
+(below).
 
 Two enums gained a case, so an exhaustive `switch` over either stops compiling until it is handled. `ZcashError` and `ZcashErrorCode` have
 `rustCheckTransactionSubmittable` (`ZRUST0163`), whose payload is the rust layer's message: the transaction could not be judged, so it was

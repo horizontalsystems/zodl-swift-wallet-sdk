@@ -158,7 +158,8 @@ final class EndpointSubmitterTests: ZcashTestCase {
         do {
             try await submitter.submit(transaction: makeTransaction(), to: service.endpoint)
             XCTFail("A transaction whose destination height cannot be read must not be submitted")
-        } catch ZcashError.serviceLatestBlockHeightFailed {
+        } catch ZcashError.serviceSubmitFailed {
+            // The height is the first request of the attempt: a read that fails is an attempt that could not reach the endpoint.
         }
 
         XCTAssertEqual(rustBackend.checkTransactionSubmittableSubmissionServerHeightCallsCount, 0, "nothing is judged against a guess")
@@ -172,7 +173,7 @@ final class EndpointSubmitterTests: ZcashTestCase {
         do {
             try await submitter.submit(transaction: makeTransaction(), to: service.endpoint)
             XCTFail("A height above Int32.max is not one to judge by")
-        } catch ZcashError.serviceLatestBlockHeightFailed {
+        } catch ZcashError.serviceSubmitFailed {
         }
 
         XCTAssertEqual(rustBackend.checkTransactionSubmittableSubmissionServerHeightCallsCount, 0)

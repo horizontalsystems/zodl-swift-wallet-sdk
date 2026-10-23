@@ -2473,7 +2473,8 @@ public enum RewindPolicy {
 /// The result of submitting a transaction to the network.
 ///
 /// - success: the transaction was successfully submitted to the mempool.
-/// - grpcFailure: the transaction failed to reach the lightwalletd server.
+/// - grpcFailure: the transaction failed to reach the lightwalletd server. The first request of a submission reads the latest
+///   block height of that server, so a server that cannot be asked for it is reported here too, and nothing was submitted.
 /// - submitFailure: the transaction reached the lightwalletd server but failed to enter the mempool, or the SDK refused to
 ///   submit it because it cannot be valid in the next block (see ``TransactionSubmissionRefusal``). A refusal is reported
 ///   under the local `code` of the refusal, `-9101` for a transaction built for another consensus branch than the next
@@ -2482,7 +2483,9 @@ public enum RewindPolicy {
 /// - notAttempted: the transaction was created and is in the local wallet, but was not submitted to the network.
 ///
 /// Before it submits a transaction, the SDK reads the latest block height of the server the transaction goes to. If that
-/// height cannot be read, nothing is submitted and the stream throws the error of the read.
+/// height cannot be read, nothing is submitted, and the transaction is reported as `grpcFailure` like one that could not reach
+/// the server, with the ones after it `notAttempted`. A transaction the SDK cannot judge at all (it does not parse, or the wallet
+/// database is missing) is not submitted either, and the stream throws ``ZcashError/rustCheckTransactionSubmittable(_:)``.
 public enum TransactionSubmitResult: Equatable {
     case success(txId: Data)
     case grpcFailure(txId: Data, error: LightWalletServiceError)

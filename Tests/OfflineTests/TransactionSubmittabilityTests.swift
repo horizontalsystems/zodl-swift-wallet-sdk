@@ -61,10 +61,34 @@ final class TransactionSubmittabilityTests: ZcashTestCase {
         do {
             try await encoder.submit(transaction: EncodedTransaction(transactionId: txId, raw: raw))
             XCTFail("A transaction whose destination height cannot be read must not be submitted")
-        } catch ZcashError.serviceLatestBlockHeightFailed {
+        } catch ZcashError.serviceSubmitFailed(let error) {
+            // The height is the first request of the submission: a read that fails is a submission that could not reach the
+            // server, and fails the way the submit after it would have, with the failure of the read inside.
+            XCTAssertEqual(error, .timeOut)
         }
 
         XCTAssertEqual(backend.checkTransactionSubmittableSubmissionServerHeightCallsCount, 0, "nothing is judged against a guess")
+        XCTAssertEqual(service.submitSpendTransactionModeCallsCount, 0)
+    }
+
+    func testEncoderReportsAnyOtherHeightReadErrorLikeAFailedSubmit() async throws {
+        // Over Tor the read throws the error of the Tor connection, unwrapped, where the service's own submit wraps all of them.
+        let torError = ZcashError.rustTorLwdLatestBlockHeight("no circuit")
+        service.latestBlockHeightModeClosure = { _ in throw torError }
+        let encoder = try makeEncoder()
+
+        do {
+            try await encoder.submit(transaction: EncodedTransaction(transactionId: txId, raw: raw))
+            XCTFail("A transaction whose destination height cannot be read must not be submitted")
+        } catch ZcashError.serviceSubmitFailed(let error) {
+            guard case .genericError(let underlying) = error else {
+                XCTFail("Expected a generic service error but got \(error)")
+                return
+            }
+            XCTAssertEqual(underlying as? ZcashError, torError)
+        }
+
+        XCTAssertEqual(backend.checkTransactionSubmittableSubmissionServerHeightCallsCount, 0)
         XCTAssertEqual(service.submitSpendTransactionModeCallsCount, 0)
     }
 
@@ -182,46 +206,66 @@ final class TransactionSubmittabilityTests: ZcashTestCase {
         XCTAssertEqual(service.latestBlockHeightModeCallsCount, 2, "each transaction is judged at the height read for it")
     }
 
-    func testSubmitTransactionsPropagatesAnUnreadableHeight() async throws {
+    /// The height is the first request of a submission, so a server that cannot be asked for it is a server that cannot be
+    /// reached: the stream reports it as it always reported that, as a `.grpcFailure` for the transaction, with the ones after it
+    /// not attempted. A throw would end the stream without a result for transactions the wallet has already stored, and a caller
+    /// that shows a throw as "the send failed" invites the user to pay again while the original goes out in a later pass.
+    func testSubmitTransactionsReportsAnUnreadableHeightAsAGrpcFailure() async throws {
+        let first = makeCreatedTransaction(seed: 0x01)
+        let second = makeCreatedTransaction(seed: 0x02)
         service.latestBlockHeightModeClosure = { _ in
             throw ZcashError.serviceLatestBlockHeightFailed(LightWalletServiceError.timeOut)
         }
+        stubUnexpectedServerProbe(on: service)
+        let synchronizer = try makeSDKSynchronizer()
+
+        let results = try await collect(synchronizer.submitTransactions([first, second]))
+
+        XCTAssertEqual(results, [.grpcFailure(txId: first.txId, error: .timeOut), .notAttempted(txId: second.txId)])
+        assertNothingWasJudgedSubmittedOrAskedAbout(service: service, readsOfTheHeight: 1)
+    }
+
+    func testSubmitTransactionsReportsAnyOtherHeightReadErrorAsAGrpcFailureToo() async throws {
+        let first = makeCreatedTransaction(seed: 0x01)
+        let second = makeCreatedTransaction(seed: 0x02)
+        let torError = ZcashError.rustTorLwdLatestBlockHeight("no circuit")
+        service.latestBlockHeightModeClosure = { _ in throw torError }
+        stubUnexpectedServerProbe(on: service)
+        let synchronizer = try makeSDKSynchronizer()
+
+        let results = try await collect(synchronizer.submitTransactions([first, second]))
+
+        try assertTorReadFailureThenNotAttempted(results, first: first, second: second, torError: torError)
+        assertNothingWasJudgedSubmittedOrAskedAbout(service: service, readsOfTheHeight: 1)
+    }
+
+    /// A transaction the check cannot judge (it does not parse, the wallet database is missing) is another thing than a server
+    /// that cannot be reached: no retry fixes it, and it keeps ending the stream with its own error.
+    func testSubmitTransactionsPropagatesATransactionTheCheckCannotJudge() async throws {
+        backend.checkTransactionSubmittableSubmissionServerHeightThrowableError = ZcashError.rustCheckTransactionSubmittable("unparseable")
+        stubUnexpectedServerProbe(on: service)
         let synchronizer = try makeSDKSynchronizer()
 
         do {
             _ = try await collect(synchronizer.submitTransactions([makeCreatedTransaction(seed: 0x01)]))
-            XCTFail("An unreadable height must not be mistaken for a submittable transaction")
-        } catch ZcashError.serviceLatestBlockHeightFailed {
+            XCTFail("A transaction that cannot be judged must not be mistaken for a submittable one")
+        } catch ZcashError.rustCheckTransactionSubmittable(let message) {
+            XCTAssertEqual(message, "unparseable")
         }
 
         XCTAssertEqual(service.submitSpendTransactionModeCallsCount, 0)
+        XCTAssertEqual(service.fetchTransactionTxIdModeCallsCount, 0)
     }
 
     func testSlipstreamSubmitTransactionsMapsARefusalToSubmitFailure() async throws {
         let first = makeCreatedTransaction(seed: 0x01)
         let second = makeCreatedTransaction(seed: 0x02)
-        backend.createProposedTransactionsProposalUskOvkPolicyReturnValue = [first.txId, second.txId]
-        backend.getTransactionTxIdClosure = { txId in
-            TransactionData(txId: txId, raw: txId == first.txId ? first.raw : second.raw, expiryHeight: 3_600_000)
-        }
         backend.checkTransactionSubmittableSubmissionServerHeightClosure = { raw, _ in
             raw == first.raw ? TransactionSubmissionRefusal.expired : nil
         }
-        stubUnexpectedServerProbe(on: service)
-        let repository = TransactionRepositoryMock()
-        // The enrichment of the created transactions from the history view finds nothing, and carries on.
-        repository.findRawIDThrowableError = ZcashError.transactionRepositoryEntityNotFound
-        let synchronizer = SlipstreamSynchronizer(
-            initializer: try makeInitializer(repository: repository),
-            alternateEndpoints: [],
-            engine: GatedFakeSlipstreamEngine()
-        )
+        let synchronizer = try makeSlipstreamSynchronizer(creating: [first, second])
 
-        let stream = try await synchronizer.createProposedTransactions(
-            proposal: Proposal.testOnlyFakeProposal(totalFee: 10),
-            spendingKey: TestsData(networkType: .testnet).spendingKey
-        )
-        let results = try await collect(stream)
+        let results = try await createProposedTransactions(with: synchronizer)
 
         XCTAssertEqual(
             results,
@@ -230,6 +274,48 @@ final class TransactionSubmittabilityTests: ZcashTestCase {
                 .notAttempted(txId: second.txId)
             ]
         )
+        XCTAssertEqual(service.submitSpendTransactionModeCallsCount, 0)
+        XCTAssertEqual(service.fetchTransactionTxIdModeCallsCount, 0)
+    }
+
+    func testSlipstreamSubmitTransactionsReportsAnUnreadableHeightAsAGrpcFailure() async throws {
+        let first = makeCreatedTransaction(seed: 0x01)
+        let second = makeCreatedTransaction(seed: 0x02)
+        service.latestBlockHeightModeClosure = { _ in
+            throw ZcashError.serviceLatestBlockHeightFailed(LightWalletServiceError.timeOut)
+        }
+        let synchronizer = try makeSlipstreamSynchronizer(creating: [first, second])
+
+        let results = try await createProposedTransactions(with: synchronizer)
+
+        XCTAssertEqual(results, [.grpcFailure(txId: first.txId, error: .timeOut), .notAttempted(txId: second.txId)])
+        assertNothingWasJudgedSubmittedOrAskedAbout(service: service, readsOfTheHeight: 1)
+    }
+
+    func testSlipstreamSubmitTransactionsReportsAnyOtherHeightReadErrorAsAGrpcFailureToo() async throws {
+        let first = makeCreatedTransaction(seed: 0x01)
+        let second = makeCreatedTransaction(seed: 0x02)
+        let torError = ZcashError.rustTorLwdLatestBlockHeight("no circuit")
+        service.latestBlockHeightModeClosure = { _ in throw torError }
+        let synchronizer = try makeSlipstreamSynchronizer(creating: [first, second])
+
+        let results = try await createProposedTransactions(with: synchronizer)
+
+        try assertTorReadFailureThenNotAttempted(results, first: first, second: second, torError: torError)
+        assertNothingWasJudgedSubmittedOrAskedAbout(service: service, readsOfTheHeight: 1)
+    }
+
+    func testSlipstreamSubmitTransactionsPropagatesATransactionTheCheckCannotJudge() async throws {
+        backend.checkTransactionSubmittableSubmissionServerHeightThrowableError = ZcashError.rustCheckTransactionSubmittable("unparseable")
+        let synchronizer = try makeSlipstreamSynchronizer(creating: [makeCreatedTransaction(seed: 0x01)])
+
+        do {
+            _ = try await createProposedTransactions(with: synchronizer)
+            XCTFail("A transaction that cannot be judged must not be mistaken for a submittable one")
+        } catch ZcashError.rustCheckTransactionSubmittable(let message) {
+            XCTAssertEqual(message, "unparseable")
+        }
+
         XCTAssertEqual(service.submitSpendTransactionModeCallsCount, 0)
         XCTAssertEqual(service.fetchTransactionTxIdModeCallsCount, 0)
     }
@@ -277,6 +363,77 @@ final class TransactionSubmittabilityTests: ZcashTestCase {
             saplingParamsSourceURL: SaplingParamsSourceURL.tests,
             isTorEnabled: false,
             isExchangeRateEnabled: false
+        )
+    }
+
+    /// A `SlipstreamSynchronizer` whose `createProposedTransactions` creates `transactions` and submits them through the real
+    /// `WalletTransactionEncoder` over the test's stubbed service and check. The server is asked nothing it could answer, so that
+    /// a probe the SDK should not make is counted by the test instead of crashing it on the mock's unstubbed answer.
+    private func makeSlipstreamSynchronizer(creating transactions: [CreatedTransaction]) throws -> SlipstreamSynchronizer {
+        backend.createProposedTransactionsProposalUskOvkPolicyReturnValue = transactions.map(\.txId)
+        backend.getTransactionTxIdClosure = { txId in
+            TransactionData(txId: txId, raw: transactions.first { $0.txId == txId }?.raw ?? Data(), expiryHeight: 3_600_000)
+        }
+        stubUnexpectedServerProbe(on: service)
+        let repository = TransactionRepositoryMock()
+        // The enrichment of the created transactions from the history view finds nothing, and carries on.
+        repository.findRawIDThrowableError = ZcashError.transactionRepositoryEntityNotFound
+
+        return SlipstreamSynchronizer(
+            initializer: try makeInitializer(repository: repository),
+            alternateEndpoints: [],
+            engine: GatedFakeSlipstreamEngine()
+        )
+    }
+
+    private func createProposedTransactions(with synchronizer: SlipstreamSynchronizer) async throws -> [TransactionSubmitResult] {
+        let stream = try await synchronizer.createProposedTransactions(
+            proposal: Proposal.testOnlyFakeProposal(totalFee: 10),
+            spendingKey: TestsData(networkType: .testnet).spendingKey
+        )
+
+        return try await collect(stream)
+    }
+
+    /// The Tor connection's error is not a `LightWalletServiceError` and does not compare, so the result is taken apart.
+    private func assertTorReadFailureThenNotAttempted(
+        _ results: [TransactionSubmitResult],
+        first: CreatedTransaction,
+        second: CreatedTransaction,
+        torError: ZcashError
+    ) throws {
+        XCTAssertEqual(results.count, 2)
+        guard case let .grpcFailure(txId, error) = try XCTUnwrap(results.first), case let .genericError(underlying) = error else {
+            XCTFail("Expected a grpcFailure with a generic service error but got \(results)")
+            return
+        }
+        XCTAssertEqual(txId, first.txId)
+        XCTAssertEqual(underlying as? ZcashError, torError)
+        XCTAssertEqual(results.last, .notAttempted(txId: second.txId))
+    }
+
+    /// A read of the height that failed leaves nothing to judge a transaction by, to submit it to, or to ask the server about.
+    private func assertNothingWasJudgedSubmittedOrAskedAbout(
+        service: LightWalletServiceMock,
+        readsOfTheHeight: Int,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertEqual(service.latestBlockHeightModeCallsCount, readsOfTheHeight, file: file, line: line)
+        XCTAssertEqual(
+            backend.checkTransactionSubmittableSubmissionServerHeightCallsCount,
+            0,
+            "nothing is judged against a guess",
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(service.submitSpendTransactionModeCallsCount, 0, file: file, line: line)
+        XCTAssertEqual(
+            service.fetchTransactionTxIdModeCallsCount,
+            0,
+            "nothing was sent, so there is nothing to ask the server about",
+            file: file,
+            line: line
         )
     }
 

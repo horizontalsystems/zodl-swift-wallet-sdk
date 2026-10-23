@@ -569,6 +569,7 @@ public class SDKSynchronizer: AwaitableStopSynchronizer {
                     try await self.transactionEncoder.submit(transaction: transaction.encodedTransaction)
                     return TransactionSubmitResult.success(txId: transaction.txId)
                 } catch ZcashError.serviceSubmitFailed(let error) {
+                    // The server could not be reached. That includes its height not being readable, the first request of a submission.
                     submitFailed = true
                     return TransactionSubmitResult.grpcFailure(txId: transaction.txId, error: error)
                 } catch TransactionEncoderError.submitError(let code, let message) {
