@@ -23,6 +23,12 @@
 //!   PER-RUN — "the stored run is fully mined (or terminal)", never "nothing left to migrate".
 //!   After completion the platform asks `zcashlc_migration_propose_transfers` whether anything
 //!   remains (an empty schedule means no).
+//! - The one answer the engine does not give is the NU7 network-upgrade gate's
+//!   ([`crate::migration_gate`]): where the gate says the migration may not act,
+//!   [`zcashlc_migration_advance_step`] answers
+//!   [`ZCASHLC_ADVANCE_STEP_PAUSED_FOR_NETWORK_UPGRADE`] in place of the engine's step, and for a
+//!   run the upgrade has stranded [`ZCASHLC_ADVANCE_STEP_INTERRUPTED_BY_NETWORK_UPGRADE`]. The
+//!   engine's own determinations are persisted either way.
 //! - Mined-ness is DERIVED, never reported: this layer never marks a transaction mined. The
 //!   engine promotes every in-flight transaction its scan has seen mine, inside
 //!   `advance_migration` — including one whose broadcast THIS process failed to record, which it
@@ -117,6 +123,9 @@ use crate::migration_engine::{
     planning_inputs, stored_orchard_fvk,
 };
 use crate::migration_finalize;
+use crate::migration_gate::{
+    GatePhase, UpgradeVerdict, gate_phase, nu7_activation, upgrade_verdict,
+};
 use crate::migration_plan_cache;
 use crate::{
     NETWORK_ID_MAINNET, NETWORK_ID_TESTNET, NetworkParams, account_uuid_from_bytes,
@@ -326,6 +335,17 @@ impl CallCtx {
             .chain_height()
             .map_err(|e| anyhow!("chain height lookup failed: {e}"))?
             .ok_or_else(|| anyhow!("the wallet has no chain tip yet; sync first"))
+    }
+
+    /// The height the wallet has scanned every block up to, or `None` before it has scanned
+    /// contiguously from its birthday. The wallet reports it from the metadata it recorded for the
+    /// block at that height, as `zcashlc_fully_scanned_height` does.
+    fn fully_scanned_height(&self) -> anyhow::Result<Option<BlockHeight>> {
+        Ok(self
+            .wallet
+            .block_fully_scanned()
+            .map_err(|e| anyhow!("fully-scanned height lookup failed: {e}"))?
+            .map(|meta| meta.block_height()))
     }
 
     /// The engine's target height (`tip + 1`; see [`target_from_tip`]): a transaction may be
@@ -1606,6 +1626,15 @@ pub const ZCASHLC_ADVANCE_STEP_COMPLETE: u32 = 4;
 // it would let a stale header decode one vocabulary as the other.
 pub const ZCASHLC_ADVANCE_STEP_REPLAN: u32 = 6;
 pub const ZCASHLC_ADVANCE_STEP_REEVALUATE: u32 = 7;
+/// The migration is paused for the NU7 network upgrade: the engine's step is one the gate holds
+/// back, so the platform is to do nothing now and wait. The step names no transaction and carries
+/// no outlook; [`FfiMigrationAdvanceStep::network_upgrade_height`] is the activation height.
+pub const ZCASHLC_ADVANCE_STEP_PAUSED_FOR_NETWORK_UPGRADE: u32 = 8;
+/// The run was interrupted by the NU7 network upgrade: a transaction of it that is not mined was
+/// built for the branch before the activation, so it never can be. The platform cancels the run
+/// and offers a new migration. The step names no transaction and carries no outlook;
+/// [`FfiMigrationAdvanceStep::network_upgrade_height`] is the activation height.
+pub const ZCASHLC_ADVANCE_STEP_INTERRUPTED_BY_NETWORK_UPGRADE: u32 = 9;
 
 /// The step-kind discriminants of [`FfiMigrationAdvanceStep::next_kind`], a verbatim export of
 /// upstream `state::StepKind` (the outlook's kind — WHICH transaction a wake-up serves is decided
@@ -1686,7 +1715,7 @@ pub struct FfiMigrationAdvanceStep {
     /// The step discriminant (see the `ZCASHLC_ADVANCE_STEP_*` constants).
     pub step: u32,
     /// The engine's raw transaction id for Broadcast/Rebuild/Attend; `0` for Prove (the batch
-    /// entries carry their own ids) and for Waiting/Complete.
+    /// entries carry their own ids), for Waiting/Complete, and for the network-upgrade steps.
     pub id: u32,
     /// Heap array of `prove_targets_len` batch entries when `step == 0` (Prove) — the WHOLE
     /// provable set, earliest-ready first, never empty for a served Prove; null/0 otherwise.
@@ -1702,6 +1731,10 @@ pub struct FfiMigrationAdvanceStep {
     /// The kind of that upcoming work (see the `ZCASHLC_STEP_KIND_*` constants); meaningful only
     /// when `next_height >= 0`.
     pub next_kind: u32,
+    /// The NU7 activation height the network-upgrade gate is waiting on, for
+    /// [`ZCASHLC_ADVANCE_STEP_PAUSED_FOR_NETWORK_UPGRADE`] and
+    /// [`ZCASHLC_ADVANCE_STEP_INTERRUPTED_BY_NETWORK_UPGRADE`]; `-1` for every other step.
+    pub network_upgrade_height: i64,
 }
 
 impl FfiMigrationAdvanceStep {
@@ -1719,6 +1752,7 @@ impl FfiMigrationAdvanceStep {
             prove_targets_len: 0,
             next_height,
             next_kind,
+            network_upgrade_height: -1,
         }))
     }
 
@@ -1732,6 +1766,24 @@ impl FfiMigrationAdvanceStep {
             prove_targets_len: 0,
             next_height,
             next_kind,
+            network_upgrade_height: -1,
+        }))
+    }
+
+    /// A step the network-upgrade gate answers in place of the engine's own: `step` is
+    /// [`ZCASHLC_ADVANCE_STEP_PAUSED_FOR_NETWORK_UPGRADE`] or
+    /// [`ZCASHLC_ADVANCE_STEP_INTERRUPTED_BY_NETWORK_UPGRADE`], and `activation` the NU7 height
+    /// the gate is waiting on. It names no transaction and carries no outlook: the engine's own
+    /// outlook describes work the platform is not to do.
+    fn network_upgrade(step: u32, activation: BlockHeight) -> *mut Self {
+        Box::into_raw(Box::new(FfiMigrationAdvanceStep {
+            step,
+            id: 0,
+            prove_targets: ptr::null_mut(),
+            prove_targets_len: 0,
+            next_height: -1,
+            next_kind: 0,
+            network_upgrade_height: i64::from(u32::from(activation)),
         }))
     }
 
@@ -1784,6 +1836,7 @@ impl FfiMigrationAdvanceStep {
             prove_targets_len,
             next_height,
             next_kind,
+            network_upgrade_height: -1,
         }))
     }
 }
@@ -2500,6 +2553,33 @@ pub(crate) fn advance_config<P: Parameters>(params: &P, tip: BlockHeight) -> Adv
     )
 }
 
+/// The NU7 activation height the network-upgrade gate pauses the engine's `step` until in `phase`,
+/// or `None` when the gate lets the step through.
+///
+/// While the activation is far off ([`GatePhase::PausedUntil`]) the scheduled lane builds nothing
+/// new, so the steps that would build a transaction are held back: a rebuild signs a replacement
+/// and a re-plan starts a new run, and either would be built for the branch before the activation
+/// and stranded by it. In the cutoff window ([`GatePhase::Cutoff`]) nothing moves at all, so a
+/// broadcast or a proof is held back as well: a transaction sent now could still be in flight when
+/// the branch changes. The steps that ask nothing of the platform but a sync, a wait or a stop
+/// are never held back.
+fn paused_until(phase: GatePhase, step: &AdvanceStep) -> Option<BlockHeight> {
+    match phase {
+        GatePhase::Open => None,
+        GatePhase::PausedUntil { activation } => {
+            matches!(step, AdvanceStep::Rebuild { .. } | AdvanceStep::Replan).then_some(activation)
+        }
+        GatePhase::Cutoff { activation } => matches!(
+            step,
+            AdvanceStep::Broadcast { .. }
+                | AdvanceStep::Prove { .. }
+                | AdvanceStep::Rebuild { .. }
+                | AdvanceStep::Replan
+        )
+        .then_some(activation),
+    }
+}
+
 /// One verified crank of the engine's drive: builds the store adapter, judges dueness at the
 /// scanned target plus the FFI's optional `estimated_tip` (`-1` = none), and returns the
 /// engine's `Advance` with every determination it made already persisted.
@@ -2554,6 +2634,29 @@ fn drive_advance(
 /// chain-tip lookup — the same answer `next_step` would give, available on a wallet that never
 /// saw a chain tip.)
 ///
+/// # The network-upgrade gate
+///
+/// The engine's answer then passes through the NU7 network-upgrade gate
+/// ([`crate::migration_gate`]), after the drive has persisted every determination it makes. The
+/// gate is judged at the wallet's own next height, `tip + 1`, and never at `estimated_tip`, which
+/// only brings scheduled work forward. On a network with no NU7 height it never applies.
+///
+/// - A run the upgrade has stranded — once the next block is under NU7, an unmined transaction of
+///   it is built for another consensus branch — answers
+///   [`ZCASHLC_ADVANCE_STEP_INTERRUPTED_BY_NETWORK_UPGRADE`]. When every such transaction was
+///   already sent, it may have been mined before the activation at a block the wallet's scan has
+///   not reached; the answer is then [`ZCASHLC_ADVANCE_STEP_REEVALUATE`], to sync and ask again,
+///   until the scan has reached the block before the activation.
+/// - Otherwise a step the gate holds back answers
+///   [`ZCASHLC_ADVANCE_STEP_PAUSED_FOR_NETWORK_UPGRADE`]: Rebuild and Replan while the activation
+///   is far off, and Broadcast, Prove, Rebuild and Replan in the 48 blocks before it.
+///
+/// Both answers carry the activation height in
+/// [`FfiMigrationAdvanceStep::network_upgrade_height`], name no transaction and carry no outlook.
+///
+/// `upgrade_gate_bypass` is for internal builds: it lifts the pause and the cutoff, and leaves the
+/// interruption in force, since a stranded run cannot complete however the host asks.
+///
 /// # Safety
 /// See [`open`]. Free the returned pointer with [`zcashlc_free_migration_advance_step`].
 #[unsafe(no_mangle)]
@@ -2563,6 +2666,7 @@ pub unsafe extern "C" fn zcashlc_migration_advance_step(
     account_uuid_bytes: *const u8,
     network_id: u32,
     estimated_tip: i64,
+    upgrade_gate_bypass: bool,
 ) -> *mut FfiMigrationAdvanceStep {
     let res = catch_panic(|| {
         let mut ctx = unsafe {
@@ -2601,12 +2705,63 @@ pub unsafe extern "C" fn zcashlc_migration_advance_step(
                 None,
             ));
         }
-        let targets = dueness_targets(ctx.tip()?, estimated_tip);
+        let tip = ctx.tip()?;
+        let next_height = target_from_tip(tip);
+        let targets = dueness_targets(tip, estimated_tip);
         // librustzcash #2936: the advance returns the verified step plus a next-wake OUTLOOK
         // (`Advance::next`) — this conduit marshals both, the step via the borrow `.step()`
         // returns and the outlook via `.next()`, onto every arm below.
         let advance = drive_advance(&mut system_rng(), &mut ctx, &mut state, estimated_tip)?;
         let next = advance.next();
+        // THE NETWORK-UPGRADE GATE (`crate::migration_gate`), applied to the engine's answer once
+        // the drive has made, and persisted, every determination it makes. It is judged at the
+        // WALLET's next height and never at the wall-clock estimate, which only feeds `targets`
+        // above: a guess must not pause work that is valid at the tip, nor declare over a run the
+        // chain has not yet stranded.
+        //
+        // First, whether the upgrade has stranded the run. The drive has already promoted every
+        // transaction the scan has seen mined, so the rows judged are the unmined remainder. The
+        // bypass does not apply: it opts out of the pause, not out of noticing that a run can no
+        // longer complete.
+        match upgrade_verdict(
+            &ctx.network,
+            state
+                .transactions()
+                .iter()
+                .map(|row| (row.state(), row.pczt().as_slice())),
+            next_height,
+            ctx.fully_scanned_height()?,
+        ) {
+            UpgradeVerdict::Clear => {}
+            // A transaction of the old branch may have been mined before the activation without
+            // the scan having seen its block: the platform is to sync, as for a rejected
+            // broadcast, and ask again.
+            UpgradeVerdict::AwaitScan => {
+                return Ok(FfiMigrationAdvanceStep::bare(
+                    ZCASHLC_ADVANCE_STEP_REEVALUATE,
+                    None,
+                ));
+            }
+            UpgradeVerdict::Interrupted => {
+                let activation = nu7_activation(&ctx.network).ok_or_else(|| {
+                    anyhow!("the upgrade gate interrupted a run on a network with no NU7 height")
+                })?;
+                return Ok(FfiMigrationAdvanceStep::network_upgrade(
+                    ZCASHLC_ADVANCE_STEP_INTERRUPTED_BY_NETWORK_UPGRADE,
+                    activation,
+                ));
+            }
+        }
+        // Then the phase: what the migration may do at the next height, which the bypass opens.
+        if let Some(activation) = paused_until(
+            gate_phase(&ctx.network, next_height, upgrade_gate_bypass),
+            advance.step(),
+        ) {
+            return Ok(FfiMigrationAdvanceStep::network_upgrade(
+                ZCASHLC_ADVANCE_STEP_PAUSED_FOR_NETWORK_UPGRADE,
+                activation,
+            ));
+        }
         Ok(match advance.step() {
             // Both are BARE: neither upstream step names a transaction — Replan is a verdict
             // about the RUN (its unsatisfiable share passed the committed threshold), Reevaluate
@@ -8719,6 +8874,7 @@ mod tests {
                 account.as_ptr(),
                 NETWORK_ID_MAINNET,
                 -1,
+                false,
             )
         };
         assert!(
@@ -8842,6 +8998,7 @@ mod tests {
                 account.as_ptr(),
                 NETWORK_ID_MAINNET,
                 -1,
+                false,
             )
         };
         assert!(
@@ -9420,6 +9577,18 @@ mod tests {
     fn minimal_pczt_bytes() -> Vec<u8> {
         pczt::roles::creator::Creator::new(u32::from(BranchId::Nu6_3), 10_000, 133, None, None)
             .expect("an NU6.3 PCZT creator")
+            .build()
+            .expect("an empty v6 PCZT builds")
+            .serialize()
+            .expect("an empty v6 PCZT serializes")
+    }
+
+    /// [`minimal_pczt_bytes`] built for NU7: a stored run's PCZTs, for a wallet whose tip is past
+    /// the activation. The advance step reads each unmined row's branch, and a row of NU6.3 there
+    /// is a run the upgrade has stranded.
+    fn minimal_nu7_pczt_bytes() -> Vec<u8> {
+        pczt::roles::creator::Creator::new(u32::from(BranchId::Nu7), 10_000, 133, None, None)
+            .expect("an NU7 PCZT creator")
             .build()
             .expect("an empty v6 PCZT builds")
             .serialize()
@@ -11397,6 +11566,7 @@ mod tests {
                 account.as_ptr(),
                 NETWORK_ID_MAINNET,
                 estimated_tip,
+                false,
             )
         };
         assert!(
@@ -11807,6 +11977,7 @@ mod tests {
                 account.as_ptr(),
                 NETWORK_ID_MAINNET,
                 -1,
+                false,
             )
         };
         let outcome = if ptr.is_null() {
@@ -11877,6 +12048,666 @@ mod tests {
             advance_step_for_a_broadcast_anchored_at(3_600_000, 3_543_000, 3_542_970),
             "an anchor 30 blocks back is judged while the tip is past the activation",
         );
+    }
+
+    // ----- advance step: the NU7 network-upgrade gate -----
+    //
+    // `zcashlc_migration_advance_step` answers PAUSED_FOR_NETWORK_UPGRADE or
+    // INTERRUPTED_BY_NETWORK_UPGRADE in place of the engine's own step where `crate::migration_gate`
+    // says the migration may not act, judged at the WALLET's tip alone. Mainnet fixtures: NU7
+    // activates at 3,543,405, so the cutoff window holds the next heights 3,543,357..=3,543,404 and
+    // a wallet tip is judged one block on. Tips up to 3,543,355 are before the cutoff, 3,543,356
+    // through 3,543,403 are inside it, and 3,543,404 is the last tip before the activation.
+
+    /// Everything one advance-step read hands back, copied out of the DTO before it is freed.
+    #[derive(Debug)]
+    struct GatedStep {
+        step: u32,
+        id: u32,
+        batch_len: usize,
+        next_height: i64,
+        network_upgrade_height: i64,
+    }
+
+    /// Reads one advance step over the FFI at `estimated_tip` and `bypass`, asserting success, and
+    /// frees the DTO after copying it out.
+    fn read_gated_step(
+        path_bytes: &[u8],
+        account: &[u8; 16],
+        estimated_tip: i64,
+        bypass: bool,
+    ) -> GatedStep {
+        let ptr = unsafe {
+            zcashlc_migration_advance_step(
+                path_bytes.as_ptr(),
+                path_bytes.len(),
+                account.as_ptr(),
+                NETWORK_ID_MAINNET,
+                estimated_tip,
+                bypass,
+            )
+        };
+        assert!(
+            !ptr.is_null(),
+            "a stored run must yield a step, not NULL: {:?}",
+            ffi_helpers::error_handling::error_message()
+        );
+        let dto = unsafe { &*ptr };
+        let read = GatedStep {
+            step: dto.step,
+            id: dto.id,
+            batch_len: dto.prove_targets_len,
+            next_height: dto.next_height,
+            network_upgrade_height: dto.network_upgrade_height,
+        };
+        unsafe { zcashlc_free_migration_advance_step(ptr) };
+        read
+    }
+
+    /// Moves the fixture wallet's chain tip to `tip`.
+    fn set_fixture_tip_at(path_bytes: &[u8], tip: u32) {
+        assert!(
+            unsafe {
+                crate::zcashlc_update_chain_tip(
+                    path_bytes.as_ptr(),
+                    path_bytes.len(),
+                    tip as i32,
+                    NETWORK_ID_MAINNET,
+                )
+            },
+            "chain-tip update must succeed"
+        );
+    }
+
+    /// Records the block at `height` in the wallet's `blocks` table, which is where
+    /// `WalletRead::block_fully_scanned` finds the metadata of the fully scanned height. Scanning
+    /// writes the row; [`mark_fixture_scanned_through`] only writes the scan queue the store's
+    /// oracle reads, so a fixture that needs the wallet to REPORT its scanned height adds the row.
+    fn record_fixture_block(path: &std::path::Path, height: u32) {
+        let conn = Connection::open(path).expect("the wallet connection opens");
+        conn.execute(
+            "INSERT OR REPLACE INTO blocks (height, hash, time, sapling_tree, \
+             sapling_commitment_tree_size) VALUES (?1, ?2, 0, x'00', 0)",
+            rusqlite::params![height, &[0x11u8; 32][..]],
+        )
+        .expect("the scanned block records");
+    }
+
+    /// A mainnet fixture wallet whose chain tip and scanned height are both `tip`, and whose
+    /// oracle can vouch for the placeholder spend nullifier every [`tx_row`] carries: what the
+    /// engine needs before it offers a prove, a broadcast or a rebuild.
+    fn gate_fixture(prefix: &str, tip: u32) -> (PathBuf, [u8; 16]) {
+        let path = init_fixture_db(prefix);
+        let account = create_fixture_account(&path);
+        mark_fixture_scanned_through(&path, tip);
+        set_fixture_tip_at(path.to_str().unwrap().as_bytes(), tip);
+        seed_placeholder_received_note(&path, [0u8; 32]);
+        (path, account)
+    }
+
+    /// A stored run that makes the engine answer a given step at a given wallet tip.
+    #[derive(Clone, Copy, Debug)]
+    enum GateRun {
+        Rebuild,
+        Replan,
+        Broadcast,
+        Prove,
+        Waiting,
+        Complete,
+    }
+
+    impl GateRun {
+        /// The discriminant the engine's answer to [`Self::state`] marshals onto.
+        fn engine_step(self) -> u32 {
+            match self {
+                GateRun::Rebuild => ZCASHLC_ADVANCE_STEP_REBUILD,
+                GateRun::Replan => ZCASHLC_ADVANCE_STEP_REPLAN,
+                GateRun::Broadcast => ZCASHLC_ADVANCE_STEP_BROADCAST,
+                GateRun::Prove => ZCASHLC_ADVANCE_STEP_PROVE,
+                GateRun::Waiting => ZCASHLC_ADVANCE_STEP_WAITING,
+                GateRun::Complete => ZCASHLC_ADVANCE_STEP_COMPLETE,
+            }
+        }
+
+        /// The stored run, for a wallet whose chain tip and scanned height are `tip`. Every row
+        /// carries the one-byte placeholder PCZT, from which no branch can be read, so the run is
+        /// gated by its phase alone. The transfer is id 7, which tells a step that names it from
+        /// one that names nothing.
+        fn state(self, tip: u32) -> MigrationState {
+            let transfer = |scheduled: u32, expiry: u32, boundary: u32, state: MigrationTxState| {
+                tx_row(
+                    7,
+                    MigrationTxKind::Transfer { crossing: 0 },
+                    &[],
+                    scheduled,
+                    expiry,
+                    Some(boundary),
+                    state,
+                )
+            };
+            let rows = match self {
+                // Signed, and expired before the next block: its remedy is the rebuild.
+                GateRun::Rebuild => {
+                    vec![transfer(
+                        tip - 200,
+                        tip - 10,
+                        tip - 300,
+                        MigrationTxState::Signed,
+                    )]
+                }
+                // The preparation expired before the next block, and the transfer that waits on
+                // it can never mine either: no live work is left, so the run is to be re-planned.
+                GateRun::Replan => vec![
+                    tx_row(
+                        0,
+                        MigrationTxKind::Preparation { layer: 0, index: 0 },
+                        &[],
+                        tip - 200,
+                        tip - 10,
+                        None,
+                        MigrationTxState::Signed,
+                    ),
+                    tx_row(
+                        7,
+                        MigrationTxKind::Transfer { crossing: 0 },
+                        &[0],
+                        tip - 100,
+                        4_000_000,
+                        Some(tip - 300),
+                        MigrationTxState::Signed,
+                    ),
+                ],
+                // Proved, and due at the next block.
+                GateRun::Broadcast => {
+                    vec![transfer(
+                        tip + 1,
+                        4_000_000,
+                        tip - 100,
+                        MigrationTxState::Proved,
+                    )]
+                }
+                // Signed with its boundary settled and its broadcast far off: only its proof is
+                // due.
+                GateRun::Prove => vec![transfer(
+                    tip + 1_000,
+                    4_000_000,
+                    tip - 100,
+                    MigrationTxState::Signed,
+                )],
+                // Signed with its boundary still to settle: nothing is actionable, but the
+                // engine can say when something will be.
+                GateRun::Waiting => vec![transfer(
+                    tip + 1_000,
+                    4_000_000,
+                    tip + 900,
+                    MigrationTxState::Signed,
+                )],
+                GateRun::Complete => vec![transfer(tip - 200, 4_000_000, tip - 300, MINED)],
+            };
+            custom_state(MigrationStatus::InProgress, rows)
+        }
+    }
+
+    /// The step read from a fresh wallet at `tip` whose stored run is `run`. `tag` keeps the
+    /// database apart from the other tests', which run in parallel.
+    fn gated_step(tag: &str, run: GateRun, tip: u32, bypass: bool) -> GatedStep {
+        let (path, account) =
+            gate_fixture(&format!("zcashlc_gate_{tag}_{run:?}_{tip}_{bypass}"), tip);
+        store_fixture_state(&path, &account, &run.state(tip));
+        let read = read_gated_step(path.to_str().unwrap().as_bytes(), &account, -1, bypass);
+        let _ = std::fs::remove_file(&path);
+        read
+    }
+
+    /// A funded fixture wallet holding a REAL run, committed at the wallet tip `commit_tip`: the
+    /// pattern of [`commit_or_resume_succeeds_with_the_cached_plans_own_handle`], which calls
+    /// `commit_or_resume` directly and so passes through no gate. Every transaction of the run is
+    /// built for the consensus branch of the block after `commit_tip`.
+    fn committed_run_fixture(tag: &str, commit_tip: u32) -> (PathBuf, [u8; 16]) {
+        let path = init_fixture_db(&format!("zcashlc_gate_run_{tag}"));
+        let (account, usk_bytes) = create_fixture_account_with_usk(&path);
+        fund_fixture_account_with_orchard_note(&path, &usk_bytes, 1_234_567_890);
+        let path_bytes = path.to_str().unwrap().as_bytes();
+        set_fixture_tip_at(path_bytes, commit_tip);
+
+        let mut ctx = unsafe {
+            open(
+                system_rng(),
+                path_bytes.as_ptr(),
+                path_bytes.len(),
+                account.as_ptr(),
+                NETWORK_ID_MAINNET,
+            )
+        }
+        .expect("the fixture context opens");
+        let (_plan, _reference_height, handle) = plan_and_cache(&mut system_rng(), &mut ctx, false)
+            .expect("planning must succeed")
+            .expect("the funded account has a real migration plan");
+        let usk = unsafe { crate::decode_usk(usk_bytes.as_ptr(), usk_bytes.len()) }
+            .expect("the fixture usk decodes");
+        commit_or_resume(
+            &mut system_rng(),
+            &mut ctx,
+            Some(usk.orchard()),
+            false,
+            handle,
+        )
+        .expect("the fixture run commits");
+        (path, account)
+    }
+
+    /// The step discriminants are an ABI hosts may match on by number: 8 and 9 are new, and 5 is
+    /// the retired Attend hole that stays unused.
+    #[test]
+    fn advance_step_discriminants_are_stable() {
+        assert_eq!(ZCASHLC_ADVANCE_STEP_PROVE, 0);
+        assert_eq!(ZCASHLC_ADVANCE_STEP_BROADCAST, 1);
+        assert_eq!(ZCASHLC_ADVANCE_STEP_REBUILD, 2);
+        assert_eq!(ZCASHLC_ADVANCE_STEP_WAITING, 3);
+        assert_eq!(ZCASHLC_ADVANCE_STEP_COMPLETE, 4);
+        assert_eq!(ZCASHLC_ADVANCE_STEP_REPLAN, 6);
+        assert_eq!(ZCASHLC_ADVANCE_STEP_REEVALUATE, 7);
+        assert_eq!(ZCASHLC_ADVANCE_STEP_PAUSED_FOR_NETWORK_UPGRADE, 8);
+        assert_eq!(ZCASHLC_ADVANCE_STEP_INTERRUPTED_BY_NETWORK_UPGRADE, 9);
+    }
+
+    /// Every constructor of an engine step sets the new field to its `-1` "none" sentinel, so a
+    /// host never reads an activation height off a step the gate did not answer.
+    #[test]
+    fn engine_steps_carry_no_network_upgrade_height() {
+        let state = test_state(
+            MigrationStatus::InProgress,
+            &[],
+            &[MigrationTxState::Signed],
+            50,
+            10_000,
+        );
+        let steps = [
+            FfiMigrationAdvanceStep::bare(ZCASHLC_ADVANCE_STEP_WAITING, None),
+            FfiMigrationAdvanceStep::with_id(
+                ZCASHLC_ADVANCE_STEP_BROADCAST,
+                MigrationTransferId::new(3),
+                None,
+            ),
+            FfiMigrationAdvanceStep::prove(&state, &[], DuenessTargets::at(h(100)), None),
+        ];
+        for ptr in steps {
+            assert_eq!(unsafe { &*ptr }.network_upgrade_height, -1);
+            unsafe { zcashlc_free_migration_advance_step(ptr) };
+        }
+    }
+
+    /// The gate holds back exactly the steps it names, in each phase, and nothing else: before the
+    /// cutoff only the work that builds something new, inside it the work that moves anything.
+    #[test]
+    fn the_upgrade_gate_withholds_exactly_the_steps_it_names() {
+        let activation = h(3_543_405);
+        let id = MigrationTransferId::new(1);
+        // (step, withheld before the cutoff, withheld in the cutoff window)
+        let steps = [
+            (
+                AdvanceStep::Prove {
+                    transactions: Vec::new(),
+                },
+                false,
+                true,
+            ),
+            (AdvanceStep::Broadcast { id }, false, true),
+            (AdvanceStep::Rebuild { id }, true, true),
+            (AdvanceStep::Replan, true, true),
+            (AdvanceStep::Reevaluate, false, false),
+            (AdvanceStep::Waiting, false, false),
+            (AdvanceStep::Complete, false, false),
+        ];
+        for (step, before_cutoff, in_cutoff) in steps {
+            assert_eq!(
+                paused_until(GatePhase::PausedUntil { activation }, &step),
+                before_cutoff.then_some(activation),
+                "before the cutoff: {step:?}"
+            );
+            assert_eq!(
+                paused_until(GatePhase::Cutoff { activation }, &step),
+                in_cutoff.then_some(activation),
+                "in the cutoff window: {step:?}"
+            );
+            assert_eq!(
+                paused_until(GatePhase::Open, &step),
+                None,
+                "with the gate open: {step:?}"
+            );
+        }
+    }
+
+    /// Before the cutoff, only work that BUILDS something new is held back: a rebuild signs a
+    /// replacement for the branch of the next block, so while the activation is far off the
+    /// platform is told to wait, with the activation height to wait for. The pause carries no
+    /// outlook: it ends when the chain reaches the upgrade, at no height the drive can name.
+    #[test]
+    fn advance_step_pauses_a_rebuild_before_the_cutoff() {
+        let paused = gated_step("pauses", GateRun::Rebuild, 3_543_000, false);
+        assert_eq!(
+            paused.step, ZCASHLC_ADVANCE_STEP_PAUSED_FOR_NETWORK_UPGRADE,
+            "{paused:?}"
+        );
+        assert_eq!(paused.network_upgrade_height, 3_543_405);
+        assert_eq!(paused.next_height, -1, "a paused step carries no outlook");
+        assert_eq!(paused.id, 0, "a paused step names no transaction");
+
+        // The bypass hands the engine's own answer back.
+        let bypassed = gated_step("pauses", GateRun::Rebuild, 3_543_000, true);
+        assert_eq!(bypassed.step, ZCASHLC_ADVANCE_STEP_REBUILD, "{bypassed:?}");
+        assert_eq!(bypassed.id, 7, "the engine names the expired transfer");
+        assert_eq!(bypassed.network_upgrade_height, -1);
+    }
+
+    /// A re-plan builds a new run, so it is held back before the cutoff as a rebuild is.
+    #[test]
+    fn advance_step_pauses_a_replan_before_the_cutoff() {
+        let paused = gated_step("pauses", GateRun::Replan, 3_543_000, false);
+        assert_eq!(
+            paused.step, ZCASHLC_ADVANCE_STEP_PAUSED_FOR_NETWORK_UPGRADE,
+            "{paused:?}"
+        );
+        assert_eq!(paused.network_upgrade_height, 3_543_405);
+        assert_eq!(paused.next_height, -1);
+
+        let bypassed = gated_step("pauses", GateRun::Replan, 3_543_000, true);
+        assert_eq!(bypassed.step, ZCASHLC_ADVANCE_STEP_REPLAN, "{bypassed:?}");
+        assert_eq!(bypassed.network_upgrade_height, -1);
+    }
+
+    /// Before the cutoff the transactions already built keep moving: a valid one is still
+    /// proved and broadcast, up to the last tip before the window.
+    #[test]
+    fn advance_step_passes_broadcast_and_prove_through_before_the_cutoff() {
+        // 3,543,355 is judged at the next height 3,543,356, one short of the window.
+        for tip in [3_543_000, 3_543_355] {
+            let broadcast = gated_step("passes", GateRun::Broadcast, tip, false);
+            assert_eq!(
+                broadcast.step, ZCASHLC_ADVANCE_STEP_BROADCAST,
+                "tip {tip}: {broadcast:?}"
+            );
+            assert_eq!(broadcast.id, 7);
+            assert_eq!(broadcast.network_upgrade_height, -1);
+
+            let prove = gated_step("passes", GateRun::Prove, tip, false);
+            assert_eq!(
+                prove.step, ZCASHLC_ADVANCE_STEP_PROVE,
+                "tip {tip}: {prove:?}"
+            );
+            assert_eq!(prove.batch_len, 1);
+            assert_eq!(prove.network_upgrade_height, -1);
+        }
+    }
+
+    /// In the cutoff window nothing is sent or proved: a broadcast started now could still be in
+    /// flight when the branch changes. The window runs from the tip before its first next height
+    /// (3,543,356) to the one before the activation's (3,543,403); the bypass lifts it.
+    #[test]
+    fn advance_step_pauses_broadcast_and_prove_in_the_cutoff_window() {
+        for tip in [3_543_356, 3_543_403] {
+            for run in [GateRun::Broadcast, GateRun::Prove] {
+                let paused = gated_step("window", run, tip, false);
+                assert_eq!(
+                    paused.step, ZCASHLC_ADVANCE_STEP_PAUSED_FOR_NETWORK_UPGRADE,
+                    "tip {tip}, {run:?}: {paused:?}"
+                );
+                assert_eq!(paused.network_upgrade_height, 3_543_405);
+                assert_eq!(paused.next_height, -1);
+                assert_eq!(
+                    paused.batch_len, 0,
+                    "a paused step hands out no prove batch"
+                );
+
+                let bypassed = gated_step("window", run, tip, true);
+                assert_eq!(
+                    bypassed.step,
+                    run.engine_step(),
+                    "tip {tip}, {run:?}: {bypassed:?}"
+                );
+                assert_eq!(bypassed.network_upgrade_height, -1);
+            }
+        }
+    }
+
+    /// The window holds the build steps back as well, whatever is left of the run.
+    #[test]
+    fn advance_step_pauses_a_rebuild_and_a_replan_in_the_cutoff_window() {
+        for tip in [3_543_356, 3_543_403] {
+            for run in [GateRun::Rebuild, GateRun::Replan] {
+                let paused = gated_step("window", run, tip, false);
+                assert_eq!(
+                    paused.step, ZCASHLC_ADVANCE_STEP_PAUSED_FOR_NETWORK_UPGRADE,
+                    "tip {tip}, {run:?}: {paused:?}"
+                );
+                assert_eq!(paused.network_upgrade_height, 3_543_405);
+            }
+        }
+    }
+
+    /// A step that asks nothing of the platform is the engine's own in every phase, outlook
+    /// included: the gate names what it holds back, and waiting or being done is neither.
+    #[test]
+    fn advance_step_leaves_waiting_and_complete_alone_in_the_cutoff_window() {
+        for run in [GateRun::Waiting, GateRun::Complete] {
+            let in_window = gated_step("alone", run, 3_543_380, false);
+            let bypassed = gated_step("alone", run, 3_543_380, true);
+            assert_eq!(in_window.step, run.engine_step(), "{run:?}: {in_window:?}");
+            assert_eq!(in_window.network_upgrade_height, -1);
+            assert_eq!(
+                in_window.next_height, bypassed.next_height,
+                "{run:?}: the outlook is the engine's"
+            );
+        }
+        assert!(
+            gated_step("alone", GateRun::Waiting, 3_543_380, false).next_height >= 0,
+            "a waiting run has an outlook for the gate to leave in place"
+        );
+    }
+
+    /// A run built before the activation is built for the old branch, so once the next block is the
+    /// activation block no transaction of it that is not mined can be mined any more: the run is
+    /// over. The run here is REAL, committed at 3,543,000 and so built for NU6.3, with every
+    /// transaction of it still unmined. The block before the activation is still under NU6.3 and
+    /// can hold them, so the run stands until the wallet's tip is that block.
+    #[test]
+    fn advance_step_interrupts_an_nu6_3_built_run_at_activation() {
+        let (path, account) = committed_run_fixture("interrupts", 3_543_000);
+        let path_bytes = path.to_str().unwrap().as_bytes();
+
+        // The next block, 3,543,404, is still under NU6.3.
+        set_fixture_tip_at(path_bytes, 3_543_403);
+        let before = read_gated_step(path_bytes, &account, -1, false);
+        assert_ne!(
+            before.step, ZCASHLC_ADVANCE_STEP_INTERRUPTED_BY_NETWORK_UPGRADE,
+            "{before:?}"
+        );
+
+        // The next block is the activation block.
+        set_fixture_tip_at(path_bytes, 3_543_404);
+        let interrupted = read_gated_step(path_bytes, &account, -1, false);
+        assert_eq!(
+            interrupted.step, ZCASHLC_ADVANCE_STEP_INTERRUPTED_BY_NETWORK_UPGRADE,
+            "{interrupted:?}"
+        );
+        assert_eq!(interrupted.network_upgrade_height, 3_543_405);
+        assert_eq!(interrupted.next_height, -1);
+        assert_eq!(interrupted.id, 0);
+
+        // The bypass lifts the pause and the cutoff, never this.
+        let bypassed = read_gated_step(path_bytes, &account, -1, true);
+        assert_eq!(
+            bypassed.step, ZCASHLC_ADVANCE_STEP_INTERRUPTED_BY_NETWORK_UPGRADE,
+            "{bypassed:?}"
+        );
+        assert_eq!(bypassed.network_upgrade_height, 3_543_405);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A run committed under NU7 is for the branch the chain is on, so the upgrade strands nothing
+    /// of it, from the activation block on.
+    #[test]
+    fn advance_step_does_not_interrupt_an_nu7_built_run() {
+        for commit_tip in [3_543_404, 3_600_000] {
+            let (path, account) =
+                committed_run_fixture(&format!("nu7_built_{commit_tip}"), commit_tip);
+            let path_bytes = path.to_str().unwrap().as_bytes();
+
+            let step = read_gated_step(path_bytes, &account, -1, false);
+            assert!(
+                ![
+                    ZCASHLC_ADVANCE_STEP_PAUSED_FOR_NETWORK_UPGRADE,
+                    ZCASHLC_ADVANCE_STEP_INTERRUPTED_BY_NETWORK_UPGRADE,
+                    ZCASHLC_ADVANCE_STEP_REEVALUATE,
+                ]
+                .contains(&step.step),
+                "committed at {commit_tip}: {step:?}"
+            );
+            assert_eq!(step.network_upgrade_height, -1);
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    /// A `Proved` transaction of the old branch may already have been mined before the activation,
+    /// at a block the wallet's scan has not reached yet: the wallet cannot tell a stranded run from
+    /// a finished one until it has scanned the block before the activation. Until then the drive
+    /// asks for a sync, and only then declares the run over. The bypass changes neither.
+    #[test]
+    fn advance_step_waits_for_the_scan_before_interrupting_a_proved_old_branch_row() {
+        let path = init_fixture_db("zcashlc_gate_await_scan");
+        let path_bytes = path.to_str().unwrap().as_bytes();
+        let account = create_fixture_account(&path);
+        // A hand-built Proved row of NU6.3 (`minimal_pczt_bytes`), not due for long after the
+        // activation, so the engine itself has nothing to say.
+        let state = custom_state(
+            MigrationStatus::InProgress,
+            vec![provable_tx_row(
+                7,
+                MigrationTxKind::Transfer { crossing: 0 },
+                3_600_000,
+                4_000_000,
+                Some(3_500_000),
+                MigrationTxState::Proved,
+            )],
+        );
+        store_fixture_state(&path, &account, &state);
+
+        // The chain is one block short of the activation, but the scan stands at 3,543,000.
+        mark_fixture_scanned_through(&path, 3_543_000);
+        record_fixture_block(&path, 3_543_000);
+        set_fixture_tip_at(path_bytes, 3_543_404);
+        for bypass in [false, true] {
+            let waiting = read_gated_step(path_bytes, &account, -1, bypass);
+            assert_eq!(
+                waiting.step, ZCASHLC_ADVANCE_STEP_REEVALUATE,
+                "bypass {bypass}: {waiting:?}"
+            );
+            assert_eq!(waiting.next_height, -1);
+            assert_eq!(waiting.network_upgrade_height, -1);
+        }
+
+        // The scan reaches the block before the activation, and the row is not in it.
+        mark_fixture_scanned_through(&path, 3_543_404);
+        record_fixture_block(&path, 3_543_404);
+        for bypass in [false, true] {
+            let interrupted = read_gated_step(path_bytes, &account, -1, bypass);
+            assert_eq!(
+                interrupted.step, ZCASHLC_ADVANCE_STEP_INTERRUPTED_BY_NETWORK_UPGRADE,
+                "bypass {bypass}: {interrupted:?}"
+            );
+            assert_eq!(interrupted.network_upgrade_height, 3_543_405);
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The verdict judges what the drive leaves of the run. A transaction of the old branch that the
+    /// wallet's scan has seen mined is promoted by the drive first, and a mined transaction is
+    /// settled whichever branch it was built for, so a run whose old-branch transactions have all
+    /// mined is complete, not interrupted. Until the scan reaches the block that holds it, the same
+    /// row is still in flight.
+    #[test]
+    fn advance_step_does_not_interrupt_a_run_whose_old_branch_rows_have_mined() {
+        let path = init_fixture_db("zcashlc_gate_mined_old_branch");
+        let path_bytes = path.to_str().unwrap().as_bytes();
+        let account = create_fixture_account(&path);
+        let txid = [3u8; 32];
+        let mined_at = 3_543_100u32;
+        // The wallet's own view: this txid mined at `mined_at`, which the engine acts on only
+        // once the scan has passed that block.
+        {
+            let conn = Connection::open(&path).expect("the wallet connection opens");
+            conn.execute(
+                "INSERT INTO transactions (txid, mined_height, min_observed_height) \
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![&txid[..], mined_at, mined_at],
+            )
+            .expect("the fixture mined-transaction row inserts");
+        }
+        // A Broadcast row of NU6.3 (`minimal_pczt_bytes`) with no anchor boundary, which would
+        // send the drive's own reorg check through the stored empty PCZT.
+        let state = custom_state(
+            MigrationStatus::InProgress,
+            vec![provable_tx_row(
+                7,
+                MigrationTxKind::Transfer { crossing: 0 },
+                3_100_000,
+                4_000_000,
+                None,
+                MigrationTxState::Broadcast {
+                    txid: TxId::from_bytes(txid),
+                },
+            )],
+        );
+        store_fixture_state(&path, &account, &state);
+
+        // The scan stops short of the block that holds the transaction, so as far as the wallet
+        // knows it is still in flight, and may have been mined where the scan has not been.
+        mark_fixture_scanned_through(&path, 3_543_000);
+        record_fixture_block(&path, 3_543_000);
+        set_fixture_tip_at(path_bytes, 3_543_404);
+        let in_flight = read_gated_step(path_bytes, &account, -1, false);
+        assert_eq!(
+            in_flight.step, ZCASHLC_ADVANCE_STEP_REEVALUATE,
+            "{in_flight:?}"
+        );
+
+        // The scan passes the block: the drive promotes the row, and nothing of the run is left
+        // for the upgrade to strand.
+        mark_fixture_scanned_through(&path, 3_543_404);
+        record_fixture_block(&path, 3_543_404);
+        let settled = read_gated_step(path_bytes, &account, -1, false);
+        assert_eq!(
+            settled.step, ZCASHLC_ADVANCE_STEP_COMPLETE,
+            "a mined row is settled whichever branch it was built for: {settled:?}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The wall-clock estimate only ever brings scheduled work forward; the gate is judged at the
+    /// wallet's own chain tip. An estimate inside the cutoff window does not pause a broadcast
+    /// that is valid at the tip, and one past the activation does not declare a run over that the
+    /// chain has not yet stranded.
+    #[test]
+    fn advance_step_judges_the_phase_at_the_wallet_tip_not_the_estimate() {
+        let (path, account) = gate_fixture("zcashlc_gate_estimate_broadcast", 3_543_000);
+        let path_bytes = path.to_str().unwrap().as_bytes();
+        store_fixture_state(&path, &account, &GateRun::Broadcast.state(3_543_000));
+        let broadcast = read_gated_step(path_bytes, &account, 3_543_400, false);
+        assert_eq!(
+            broadcast.step, ZCASHLC_ADVANCE_STEP_BROADCAST,
+            "an estimate in the cutoff window must not pause a broadcast: {broadcast:?}"
+        );
+        assert_eq!(broadcast.id, 7);
+        let _ = std::fs::remove_file(&path);
+
+        let (path, account) = committed_run_fixture("estimate", 3_543_000);
+        let path_bytes = path.to_str().unwrap().as_bytes();
+        let run = read_gated_step(path_bytes, &account, 3_600_000, false);
+        assert_ne!(
+            run.step, ZCASHLC_ADVANCE_STEP_INTERRUPTED_BY_NETWORK_UPGRADE,
+            "an estimate past the activation must not interrupt a run: {run:?}"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     // ----- progress (`zcashlc_migration_progress` — the standalone derivation) -----
@@ -12911,16 +13742,21 @@ mod tests {
         // Three transfers, all scheduled far below the scanned target (3,600,001) — the wallet
         // slept through the whole window. Their drawn gaps are 100 and 200 blocks, which below
         // mainnet's NU7 activation at 3,543,405 are also 100 and 200 reference blocks.
+        // Built for NU7, the branch the wallet's tip is under: a run still built for NU6.3 here
+        // is one the upgrade has stranded, and the drive would interrupt it instead.
         let transfer = |id: u32, scheduled: u32| {
-            provable_tx_row(
-                id,
+            test_transaction_from_parts(
+                MigrationTransferId::new(id),
                 MigrationTxKind::Transfer {
                     crossing: id as usize,
                 },
-                scheduled,
-                4_000_000,
-                Some(3_400_000),
+                minimal_nu7_pczt_bytes(),
+                Vec::new(),
+                h(scheduled),
+                h(4_000_000),
+                Some(h(3_400_000)),
                 MigrationTxState::Signed,
+                None,
             )
         };
         let state = custom_state(

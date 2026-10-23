@@ -19,6 +19,11 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `Equatable` (equal for equal network types). A custom network used before its `Initializer`
   registered it fails an assertion in debug builds and follows the 75-second schedule in release builds.
 - `ZcashSDK.nu7ConsensusBranchID` (`0x77190ad9`) is the consensus branch ID of NU7, next to `nu63ConsensusBranchID`.
+- `Synchronizer.setMigrationNetworkUpgradeGateBypass(_:)` turns the NU7 network-upgrade gate's bypass on or
+  off for the synchronizer's migrations. It is for internal builds only: a production build must never turn it
+  on. It is off by default. With it on, `migrationAdvanceStep(accountUUID:)` never answers
+  `pausedForNetworkUpgrade(activationHeight:)`; it does not disable the detection of an interrupted run. A
+  conformer that does not support migration gets a no-op default.
 
 ## Changed
 
@@ -47,6 +52,21 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does; `switchTo(endpoint:)` reports it as `synchronizerServerSwitch`, and `SlipstreamSynchronizer`
   never reports it. An exhaustive `switch` over either type stops compiling until the new case is
   handled; see `MIGRATING.md`.
+- `MigrationAdvanceStep` has two new cases, `pausedForNetworkUpgrade(activationHeight:)` and
+  `interruptedByNetworkUpgrade(activationHeight:)`, so an exhaustive `switch` over it stops compiling until
+  both are handled; see `MIGRATING.md`. `migrationAdvanceStep(accountUUID:)` answers them from the wallet's own
+  chain tip, in front of the engine's step, around the NU7 activation, whose height `activationHeight` is. Neither
+  names a transaction or carries an outlook, and a network with no NU7 activation height is never gated.
+  - `pausedForNetworkUpgrade`: do nothing now, no broadcast, proof, rebuild or re-plan, and ask again as the
+    chain advances. It replaces a rebuild or a re-plan while the next height is more than 48 blocks before the
+    activation, and a broadcast, a proof, a rebuild or a re-plan in the 48 blocks (about an hour) before it.
+  - `interruptedByNetworkUpgrade`: the run cannot complete, because a transaction of it that is not mined was
+    built for the consensus branch before the activation, which no block accepts any more. Cancel the run and
+    offer a new migration.
+  - `reevaluate` is also the answer, around the activation, while the wallet's scan has not reached the last
+    block before it and every unmined transaction built for the old branch may already have been sent: sync and
+    ask again, and the answer becomes `interruptedByNetworkUpgrade` once the scan has passed that block without
+    finding them.
 
 ## Deprecated
 

@@ -75,6 +75,9 @@ pub(crate) fn gate_phase<P: Parameters>(
 }
 
 /// Why a transaction may not be submitted.
+// Nothing outside the tests refuses a submission with this yet: the submission checks are its
+// first users, as they are of `check_submittable` and `SubmissionRefusal::code` below.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SubmissionRefusal {
     /// The transaction is built for another consensus branch than the next block is under.
@@ -87,6 +90,7 @@ pub(crate) enum SubmissionRefusal {
     Cutoff,
 }
 
+#[allow(dead_code)]
 impl SubmissionRefusal {
     /// The stable text the refusal is reported under. Callers outside this crate match on it, so
     /// it must not change.
@@ -108,6 +112,7 @@ impl SubmissionRefusal {
 /// [`SubmissionRefusal::WrongBranch`]. An `expiry_height` of 0 means the transaction does not
 /// expire; otherwise it has expired when `expiry_height < next_height`, since it can still be
 /// mined in the block at its expiry height.
+#[allow(dead_code)]
 pub(crate) fn check_submittable<P: Parameters>(
     params: &P,
     branch_id: Option<u32>,

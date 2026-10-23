@@ -818,6 +818,49 @@ final class MigrationFFITests: XCTestCase {
         XCTAssertNil(makeAdvanceStep(step: 5, id: 1).unsafeToMigrationAdvance())
     }
 
+    /// The two network-upgrade steps decode to their cases carrying the activation height the
+    /// step reports, with no outlook (neither names a transaction or carries one). A negative
+    /// height on either is the `-1` "none" sentinel where an activation must be, so the step is
+    /// malformed and decodes to `nil` like any other defensive failure. On every other step the
+    /// field is not read.
+    func testAdvanceStepDecodeMapsPausedAndInterrupted() throws {
+        let paused = makeAdvanceStep(
+            step: UInt32(ZCASHLC_ADVANCE_STEP_PAUSED_FOR_NETWORK_UPGRADE),
+            id: 0,
+            networkUpgradeHeight: 3_543_405
+        )
+        let pausedAdvance = try XCTUnwrap(paused.unsafeToMigrationAdvance())
+        XCTAssertEqual(pausedAdvance.step, .pausedForNetworkUpgrade(activationHeight: 3_543_405))
+        XCTAssertNil(pausedAdvance.next)
+
+        let interrupted = makeAdvanceStep(
+            step: UInt32(ZCASHLC_ADVANCE_STEP_INTERRUPTED_BY_NETWORK_UPGRADE),
+            id: 0,
+            networkUpgradeHeight: 3_543_405
+        )
+        let interruptedAdvance = try XCTUnwrap(interrupted.unsafeToMigrationAdvance())
+        XCTAssertEqual(interruptedAdvance.step, .interruptedByNetworkUpgrade(activationHeight: 3_543_405))
+        XCTAssertNil(interruptedAdvance.next)
+
+        for step in [ZCASHLC_ADVANCE_STEP_PAUSED_FOR_NETWORK_UPGRADE, ZCASHLC_ADVANCE_STEP_INTERRUPTED_BY_NETWORK_UPGRADE] {
+            XCTAssertNil(
+                makeAdvanceStep(step: UInt32(step), id: 0, networkUpgradeHeight: -1).unsafeToMigrationAdvance(),
+                "a network-upgrade step without an activation height is malformed"
+            )
+        }
+
+        let waiting = makeAdvanceStep(
+            step: UInt32(ZCASHLC_ADVANCE_STEP_WAITING),
+            id: 0,
+            networkUpgradeHeight: 3_543_405
+        )
+        XCTAssertEqual(
+            waiting.unsafeToMigrationAdvance()?.step,
+            .waiting,
+            "the activation height means nothing on a step the gate did not answer"
+        )
+    }
+
     /// A multi-entry Prove batch marshals every row, ordered and typed, mixing preparation and
     /// transfer kinds in one batch (upstream #2939); an EMPTY batch is a malformed step (upstream
     /// documents the batch never empty), so it decodes to `nil` rather than an empty-transactions
@@ -1198,6 +1241,7 @@ final class MigrationFFITests: XCTestCase {
                 accountUUID: accountUUID,
                 torDirURL: storageDirectory.appendingPathComponent("tor", isDirectory: true),
                 generalStorageURL: storageDirectory,
+                upgradeGateBypass: MigrationUpgradeGateBypass(),
                 loggingPolicy: .noLogging
             )
         }
@@ -1268,12 +1312,14 @@ final class MigrationFFITests: XCTestCase {
     /// Builds an `FfiMigrationAdvanceStep` with no Prove batch (`prove_targets: nil`,
     /// `prove_targets_len: 0`) — every step but Prove, mirroring the FFI contract. `nextHeight`/
     /// `nextKind` default to the no-outlook sentinel (`-1`/`0`); override them for the outlook
-    /// decode tests below.
+    /// decode tests below. `networkUpgradeHeight` defaults to the `-1` "none" sentinel every step
+    /// but the two network-upgrade steps carries.
     private func makeAdvanceStep(
         step: UInt32,
         id: UInt32,
         nextHeight: Int64 = -1,
-        nextKind: UInt32 = 0
+        nextKind: UInt32 = 0,
+        networkUpgradeHeight: Int64 = -1
     ) -> FfiMigrationAdvanceStep {
         FfiMigrationAdvanceStep(
             step: step,
@@ -1281,7 +1327,8 @@ final class MigrationFFITests: XCTestCase {
             prove_targets: nil,
             prove_targets_len: 0,
             next_height: nextHeight,
-            next_kind: nextKind
+            next_kind: nextKind,
+            network_upgrade_height: networkUpgradeHeight
         )
     }
 
@@ -1305,7 +1352,8 @@ final class MigrationFFITests: XCTestCase {
             prove_targets: pointer,
             prove_targets_len: UInt(targets.count),
             next_height: -1,
-            next_kind: 0
+            next_kind: 0,
+            network_upgrade_height: -1
         )
     }
 

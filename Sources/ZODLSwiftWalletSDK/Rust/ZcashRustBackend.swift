@@ -94,6 +94,12 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
     let networkType: NetworkType
     let sdkFlags: SDKFlags
 
+    /// The host's opt-out of the NU7 network-upgrade gate, read on every gated FFI call. The holder
+    /// is shared by reference with whoever else was given it (the migration host hands one to every
+    /// per-account backend it builds), so a switch made there reaches this backend's next call; a
+    /// backend nobody shares one with keeps its own, which stays off.
+    let migrationUpgradeGateBypass: MigrationUpgradeGateBypass
+
     /// Guards the one-time Rust initialization (`initializeRust(logLevel:)` / `zcashlc_init_on_load`)
     /// against concurrent first construction. The underlying FFI call panics if invoked more than
     /// once (tracing's `.init()` plus rayon's `build_global().expect`), and an unwind across the FFI
@@ -124,6 +130,10 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
     ///     **Important note:** this will enable the tracing **for all instances** of ZcashRustBackend, not only for this one.
     ///     This is ignored after the first ZcashRustBackend instance is created -- first caller wins the log
     ///     level, even when two instances are constructed concurrently from different call sites.
+    ///   - sdkFlags: the SDK feature flags.
+    ///   - migrationUpgradeGateBypass: the holder this backend reads the NU7 network-upgrade gate's bypass from
+    ///     on every gated FFI call. Pass the one the other backends of the same host share; the default is a holder of
+    ///     its own, which is never turned on.
     init(
         dbData: URL,
         fsBlockDbRoot: URL,
@@ -131,7 +141,8 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
         outputParamsPath: URL,
         networkType: NetworkType,
         logLevel: RustLogging = RustLogging.off,
-        sdkFlags: SDKFlags
+        sdkFlags: SDKFlags,
+        migrationUpgradeGateBypass: MigrationUpgradeGateBypass = MigrationUpgradeGateBypass()
     ) {
         self.dbData = dbData.osStr()
         self.fsBlockDbRoot = fsBlockDbRoot.osPathStr()
@@ -140,6 +151,7 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
         self.networkType = networkType
         self.keyDeriving = ZcashKeyDerivationBackend(networkType: networkType)
         self.sdkFlags = sdkFlags
+        self.migrationUpgradeGateBypass = migrationUpgradeGateBypass
 
         Self.rustInitLock.lock()
         defer { Self.rustInitLock.unlock() }
@@ -1716,7 +1728,8 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
             dbData.1,
             account.id,
             networkType.networkId,
-            estimatedTip.map(Int64.init) ?? -1
+            estimatedTip.map(Int64.init) ?? -1,
+            migrationUpgradeGateBypass.isBypassed
         )
 
         // NULL with no recorded error is the benign "no migration run is stored" answer (the
@@ -3361,7 +3374,8 @@ extension FfiMigrationAdvanceStep {
     /// Converts an [`FfiMigrationAdvanceStep`] into a [`MigrationAdvance`], or `nil` for an
     /// unrecognized step discriminant (should not happen; defensive only), an EMPTY Prove batch
     /// (`prove_targets_len == 0` — upstream documents the batch never empty, so this is a
-    /// malformed step, not the ordinary "nothing to prove" answer, which is `.waiting`), or an
+    /// malformed step, not the ordinary "nothing to prove" answer, which is `.waiting`), a
+    /// network-upgrade step without a non-negative `network_upgrade_height`, or an
     /// unrecognized `next_kind` while `next_height >= 0` (a malformed outlook — same defensive
     /// contract as the step discriminant). The per-kind payload fields
     /// (`kind_layer`/`kind_index`/`kind_crossing`) live on each `FfiProveTarget` row rather than on
@@ -3406,6 +3420,14 @@ extension FfiMigrationAdvanceStep {
             step = .replan
         case ZCASHLC_ADVANCE_STEP_REEVALUATE:
             step = .reevaluate
+        case ZCASHLC_ADVANCE_STEP_PAUSED_FOR_NETWORK_UPGRADE:
+            // Both network-upgrade steps carry the activation height they wait on, so the `-1`
+            // "none" sentinel in its place is a malformed step.
+            guard network_upgrade_height >= 0 else { return nil }
+            step = .pausedForNetworkUpgrade(activationHeight: BlockHeight(network_upgrade_height))
+        case ZCASHLC_ADVANCE_STEP_INTERRUPTED_BY_NETWORK_UPGRADE:
+            guard network_upgrade_height >= 0 else { return nil }
+            step = .interruptedByNetworkUpgrade(activationHeight: BlockHeight(network_upgrade_height))
         default:
             return nil
         }

@@ -83,6 +83,9 @@ actor OrchardMigration {
         let torDirURL: URL
         /// Directory for the SDK's general storage; the per-account sync-gate file lives here.
         let generalStorageURL: URL
+        /// The holder of the NU7 network-upgrade gate's bypass, which this migration's backend reads
+        /// on every gated FFI call. The host passes the one it shares with every migration it builds.
+        let upgradeGateBypass: MigrationUpgradeGateBypass
         /// The logging policy, mirroring ``Initializer``'s.
         let loggingPolicy: Initializer.LoggingPolicy
 
@@ -97,6 +100,7 @@ actor OrchardMigration {
         ///   - accountUUID: the account this migration is bound to.
         ///   - torDirURL: the main Tor directory.
         ///   - generalStorageURL: directory for the per-account sync-gate file.
+        ///   - upgradeGateBypass: the holder of the network-upgrade gate's bypass the backend reads.
         ///   - loggingPolicy: the logging policy.
         init(
             dataDbURL: URL,
@@ -107,6 +111,7 @@ actor OrchardMigration {
             accountUUID: AccountUUID,
             torDirURL: URL,
             generalStorageURL: URL,
+            upgradeGateBypass: MigrationUpgradeGateBypass,
             loggingPolicy: Initializer.LoggingPolicy = Initializer.LoggingPolicy.default(.debug)
         ) {
             self.dataDbURL = dataDbURL
@@ -117,6 +122,7 @@ actor OrchardMigration {
             self.accountUUID = accountUUID
             self.torDirURL = torDirURL
             self.generalStorageURL = generalStorageURL
+            self.upgradeGateBypass = upgradeGateBypass
             self.loggingPolicy = loggingPolicy
         }
     }
@@ -216,7 +222,8 @@ actor OrchardMigration {
             logLevel: config.loggingPolicy.makeRustLogging(),
             // Migration welding calls are data-db operations that never consult these flags; the
             // dedicated broadcaster owns all migration networking.
-            sdkFlags: SDKFlags(torEnabled: false, exchangeRateEnabled: false)
+            sdkFlags: SDKFlags(torEnabled: false, exchangeRateEnabled: false),
+            migrationUpgradeGateBypass: config.upgradeGateBypass
         )
         let accountUUID = config.accountUUID
         let now: @Sendable () -> Date = { Date() }

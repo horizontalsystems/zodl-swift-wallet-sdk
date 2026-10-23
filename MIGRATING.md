@@ -1510,6 +1510,56 @@ case .broadcast(let instruction): ...
 Existing call sites that only pattern-matched the step's cases now unwrap `.step` first (or switch
 over `advance?.step` directly, as above); the outlook is additive and safe to ignore.
 
+## `MigrationAdvanceStep` gained two cases — `pausedForNetworkUpgrade` and `interruptedByNetworkUpgrade`
+
+`MigrationAdvanceStep` is a public enum, so an exhaustive `switch` over the `.step` of
+`migrationAdvanceStep(accountUUID:)` stops compiling until both new cases are handled:
+`switch must be exhaustive`. `if case`, and a `switch` with a `default`, are unaffected.
+
+Both come from the gate that keeps the migration from acting across the NU7 network upgrade, and both
+are answered from the wallet's own chain tip, in front of the engine's step:
+
+- `.pausedForNetworkUpgrade(activationHeight:)` — the engine's step is one the gate holds back: a rebuild or a
+  re-plan while the activation is more than 48 blocks away, and a broadcast, a proof, a rebuild or a re-plan in
+  the 48 blocks before it. Do nothing now and ask again as the chain advances. Nothing is handed out to
+  execute, and there is no outlook.
+- `.interruptedByNetworkUpgrade(activationHeight:)` — the wallet is past the activation and a transaction of
+  the run that is not mined was built for the branch before it, so the run cannot complete. Cancel the run
+  and offer the user a new migration.
+
+`.reevaluate` has a second meaning around the activation: the wallet's scan has not reached the last block
+before it, so it cannot yet tell a stranded run from a finished one. Sync and ask again, as for a rejected
+broadcast.
+
+```swift
+// Before
+switch try await synchronizer.migrationAdvanceStep(accountUUID: account)?.step {
+case .prove(let instruction): ...
+case .broadcast(let instruction): ...
+case .rebuild: ...
+case .replan, .reevaluate, .waiting, .complete, nil:
+    break
+}
+
+// After
+switch try await synchronizer.migrationAdvanceStep(accountUUID: account)?.step {
+case .prove(let instruction): ...
+case .broadcast(let instruction): ...
+case .rebuild: ...
+case .pausedForNetworkUpgrade(let activationHeight):
+    // Nothing to perform. Show the run as paused for the upgrade that activates at `activationHeight`.
+    break
+case .interruptedByNetworkUpgrade(let activationHeight):
+    // The run cannot complete: cancel it and offer a new migration.
+    break
+case .replan, .reevaluate, .waiting, .complete, nil:
+    break
+}
+```
+
+`Synchronizer` also gained `setMigrationNetworkUpgradeGateBypass(_:)`, which has a default implementation, so a
+custom conformer needs no change.
+
 ## The pool-migration surface rides the final engine
 
 The Orchard→Ironwood migration group (never in a released SDK) is rewired onto the final engine

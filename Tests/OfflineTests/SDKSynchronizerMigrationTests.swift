@@ -64,7 +64,9 @@ final class SDKSynchronizerMigrationTests: ZcashTestCase {
             MigrationAdvance(step: .waiting, next: MigrationNextWork(height: 850_000, kind: .broadcast)),
             MigrationAdvance(step: .complete, next: nil),
             MigrationAdvance(step: .replan, next: nil),
-            MigrationAdvance(step: .reevaluate, next: nil)
+            MigrationAdvance(step: .reevaluate, next: nil),
+            MigrationAdvance(step: .pausedForNetworkUpgrade(activationHeight: 3_543_405), next: nil),
+            MigrationAdvance(step: .interruptedByNetworkUpgrade(activationHeight: 3_543_405), next: nil)
         ]
 
         for expectedAdvance in cases {
@@ -75,6 +77,26 @@ final class SDKSynchronizerMigrationTests: ZcashTestCase {
             XCTAssertEqual(advance, expectedAdvance)
             XCTAssertEqual(welding.migrationAdvanceStepForEstimatedTipReceivedArguments?.account, accountUUID)
         }
+    }
+
+    /// The bypass setter lands on the host's one holder, which every migration the host builds
+    /// shares: a migration built before the call and the setter agree, and the switch can be
+    /// turned off again.
+    func testSetMigrationNetworkUpgradeGateBypassReachesTheHostsHolder() async throws {
+        let recorder = FactoryInvocationRecorder()
+        let synchronizer = try makeSynchronizer(
+            migrationHost: makeHost(welding: ZcashRustBackendWeldingMock(), factoryRecorder: recorder)
+        )
+
+        // Cranking the account builds its migration; the mock welding answers "no run stored".
+        _ = try await synchronizer.migrationAdvanceStep(accountUUID: accountUUID)
+        XCTAssertEqual(recorder.bypasses.map(\.isBypassed), [false], "the bypass is off by default")
+
+        await synchronizer.setMigrationNetworkUpgradeGateBypass(true)
+        XCTAssertEqual(recorder.bypasses.map(\.isBypassed), [true])
+
+        await synchronizer.setMigrationNetworkUpgradeGateBypass(false)
+        XCTAssertEqual(recorder.bypasses.map(\.isBypassed), [false])
     }
 
     func testPrepareNoteSplitForwardsToTheAccountsActor() async throws {
@@ -956,8 +978,8 @@ final class SDKSynchronizerMigrationTests: ZcashTestCase {
             now: { Date() },
             logger: logger,
             spacing: TargetBlockSpacing(networkType: .testnet),
-            actorFactory: { accountUUID, broadcaster in
-                factoryRecorder?.recordCall()
+            actorFactory: { accountUUID, broadcaster, upgradeGateBypass in
+                factoryRecorder?.recordCall(upgradeGateBypass: upgradeGateBypass)
                 return OrchardMigration(
                     welding: welding,
                     accountUUID: accountUUID,
@@ -996,8 +1018,11 @@ final class SDKSynchronizerMigrationTests: ZcashTestCase {
 /// are mutated in this codebase's generated mocks.
 private final class FactoryInvocationRecorder {
     private(set) var callCount = 0
+    /// The bypass holder each invocation received, in build order.
+    private(set) var bypasses: [MigrationUpgradeGateBypass] = []
 
-    func recordCall() {
+    func recordCall(upgradeGateBypass: MigrationUpgradeGateBypass) {
         callCount += 1
+        bypasses.append(upgradeGateBypass)
     }
 }

@@ -3024,6 +3024,21 @@ class SynchronizerMock: Synchronizer {
         }
     }
 
+    // MARK: - setMigrationNetworkUpgradeGateBypass
+
+    var setMigrationNetworkUpgradeGateBypassCallsCount = 0
+    var setMigrationNetworkUpgradeGateBypassCalled: Bool {
+        return setMigrationNetworkUpgradeGateBypassCallsCount > 0
+    }
+    var setMigrationNetworkUpgradeGateBypassReceivedIsBypassed: Bool?
+    var setMigrationNetworkUpgradeGateBypassClosure: ((Bool) async -> Void)?
+
+    func setMigrationNetworkUpgradeGateBypass(_ isBypassed: Bool) async {
+        setMigrationNetworkUpgradeGateBypassCallsCount += 1
+        setMigrationNetworkUpgradeGateBypassReceivedIsBypassed = isBypassed
+        await setMigrationNetworkUpgradeGateBypassClosure!(isBypassed)
+    }
+
     // MARK: - migrationProgress
 
     var migrationProgressAccountUUIDThrowableError: Error?

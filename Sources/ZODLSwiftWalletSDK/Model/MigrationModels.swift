@@ -20,6 +20,12 @@ import Foundation
 /// re-plans, and a proven, due transaction broadcasts ahead of any new proving work (its
 /// broadcast window is the scarcer resource; proving can happen on any later wake-up).
 ///
+/// The NU7 network-upgrade gate answers around that order, judged at the wallet's own chain tip
+/// alone: ``interruptedByNetworkUpgrade(activationHeight:)`` once the upgrade has stranded the run
+/// (``reevaluate`` while the wallet's scan cannot yet say whether it has), and
+/// ``pausedForNetworkUpgrade(activationHeight:)`` in place of a step the gate holds back. Neither
+/// carries an outlook.
+///
 /// Evaluated with both the wallet's fully-scanned target and its wall-clock tip estimate. Upstream
 /// uses the estimate only for reversible scheduling/withholding; persisted or destructive
 /// judgments remain anchored to scanned data. It is also memoryless about sessions: it reports
@@ -56,6 +62,11 @@ import Foundation
 /// - ``waiting`` → nothing is actionable now: register OS wake-ups at the heights
 ///   `migrationSyncWakeups(accountUUID:)` returns, plus each status row's
 ///   ``MigrationTransactionStatus/scheduledHeight`` for the broadcast windows.
+/// - ``pausedForNetworkUpgrade(activationHeight:)`` → do nothing now: no broadcast, proof,
+///   rebuild or re-plan, and no retry loop. Sync as usual, show the run as paused for the network
+///   upgrade, and crank again as the wallet's chain tip advances.
+/// - ``interruptedByNetworkUpgrade(activationHeight:)`` → the run cannot complete: cancel it with
+///   `cancelMigrationRun(accountUUID:)` and offer the user a new migration.
 ///
 /// ``complete`` is terminal for the STORED run — including a CANCELLED one, which the engine also
 /// reports as complete rather than ever driving it further — and means "stop polling this run".
@@ -97,7 +108,37 @@ public enum MigrationAdvanceStep: Equatable, Sendable {
     /// wallet's scan, and the engine will not adjudicate on stale data. Names no transaction and
     /// asks for nothing but a sync; the engine keeps answering this until the scan reaches the
     /// tip the rejecting node reported. See the type doc's discharge mapping.
+    ///
+    /// It is also the answer around the NU7 network upgrade while the wallet's scan has not
+    /// reached the last block before the activation, and every transaction of the run that is
+    /// built for the consensus branch before it and not yet mined may already have been sent: the
+    /// wallet cannot yet tell a finished run from a stranded one. Sync and ask again; the answer
+    /// becomes ``interruptedByNetworkUpgrade(activationHeight:)`` once the scan has passed that
+    /// block without finding them.
     case reevaluate
+    /// The migration is PAUSED for the NU7 network upgrade, which activates at `activationHeight`:
+    /// do NOT broadcast, prove, rebuild or re-plan now.
+    ///
+    /// The engine's next step is one the upgrade gate holds back at the wallet's chain tip. While
+    /// the activation is far off, that is a rebuild or a re-plan: whatever it built would be built
+    /// for the consensus branch before the activation, and be stranded by it. The run's
+    /// transactions that are already built keep being proved and broadcast. In the last 48 blocks
+    /// before the activation (about an hour) it is every step that moves, a broadcast and a proof
+    /// as well, so that nothing is still in flight when the branch changes.
+    ///
+    /// The step names no transaction and carries no outlook (``MigrationAdvance/next`` is `nil`):
+    /// there is no executor to hand it to. Show the run as paused for the network upgrade, sync as
+    /// usual, and crank again as the wallet's chain tip advances. See the type doc's discharge
+    /// mapping.
+    case pausedForNetworkUpgrade(activationHeight: BlockHeight)
+    /// The run was INTERRUPTED by the NU7 network upgrade, which activated at `activationHeight`:
+    /// a transaction of it that is not mined was built for the consensus branch before the
+    /// activation, which no block accepts any more, so the run cannot complete.
+    ///
+    /// Cancel the run with `cancelMigrationRun(accountUUID:)` and offer the user a new migration,
+    /// which is built for the branch the chain is on. The step names no transaction and carries no
+    /// outlook (``MigrationAdvance/next`` is `nil`). See the type doc's discharge mapping.
+    case interruptedByNetworkUpgrade(activationHeight: BlockHeight)
 }
 
 /// The drive's instruction to broadcast one transaction — the payload of

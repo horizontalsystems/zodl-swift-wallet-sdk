@@ -248,6 +248,16 @@ final class SynchronizerMigrationDefaultsTests: XCTestCase {
         XCTAssertNil(outlook, "the inert default must report no retained outlook")
     }
 
+    /// The bypass setter is non-throwing and has no state to hold on a conformer without
+    /// migration support, so the inert default simply returns; nothing else it exposes changes.
+    func testSetMigrationNetworkUpgradeGateBypassDefaultIsANoOp() async {
+        await synchronizer.setMigrationNetworkUpgradeGateBypass(true)
+        await synchronizer.setMigrationNetworkUpgradeGateBypass(false)
+
+        let blocked = await synchronizer.isMigrationSyncBlocked()
+        XCTAssertFalse(blocked, "the no-op default must leave the other inert defaults alone")
+    }
+
     func testIsMigrationSyncBlockedDefaultReturnsFalse() async {
         let blocked = await synchronizer.isMigrationSyncBlocked()
         XCTAssertFalse(blocked, "the inert default must report unblocked (sync allowed)")

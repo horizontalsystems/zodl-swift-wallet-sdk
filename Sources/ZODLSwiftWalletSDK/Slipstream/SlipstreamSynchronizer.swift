@@ -2352,6 +2352,11 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         try await migrationHost.migration(for: accountUUID).advanceStep()
     }
 
+    public func setMigrationNetworkUpgradeGateBypass(_ isBypassed: Bool) async {
+        // Wallet-scoped: the host's one holder is shared by every account's migration.
+        await migrationHost.setUpgradeGateBypass(isBypassed)
+    }
+
     public func migrationProgress(accountUUID: AccountUUID) async throws -> MigrationProgress? {
         try await migrationHost.migration(for: accountUUID).migrationProgress()
     }

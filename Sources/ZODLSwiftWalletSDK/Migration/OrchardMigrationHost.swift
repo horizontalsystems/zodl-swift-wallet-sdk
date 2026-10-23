@@ -30,10 +30,18 @@ actor OrchardMigrationHost {
     /// The network's target spacing schedule, which the wallet-scope estimates project on.
     private let spacing: TargetBlockSpacing
 
-    /// Builds a per-account ``OrchardMigration`` bound to `accountUUID`, wired to the given shared
-    /// broadcaster. Injected so tests can substitute mock-welded actors; production builds each from
-    /// the initializer's config via ``OrchardMigration/init(config:sharedBroadcaster:)``.
-    private let actorFactory: (AccountUUID, any MigrationBroadcasting) -> OrchardMigration
+    /// Builds a per-account ``OrchardMigration`` bound to the given account, wired to the given shared
+    /// broadcaster and to the host's one NU7 gate bypass holder.
+    typealias ActorFactory = (AccountUUID, any MigrationBroadcasting, MigrationUpgradeGateBypass) -> OrchardMigration
+
+    /// Injected so tests can substitute mock-welded actors; production builds each from the
+    /// initializer's config via ``OrchardMigration/init(config:sharedBroadcaster:)``.
+    private let actorFactory: ActorFactory
+
+    /// The host's NU7 network-upgrade gate bypass, handed to every migration it builds. One holder
+    /// for the host's lifetime, so a switch made through ``setUpgradeGateBypass(_:)`` reaches the
+    /// migrations that already exist and those built later. Off until a host turns it on.
+    private let upgradeGateBypass = MigrationUpgradeGateBypass()
 
     /// The wallet-scope reactive stream machinery. A separate, self-synchronized object (like
     /// ``MigrationSyncGate``) so ``syncBlockedStream`` can be `nonisolated`.
@@ -67,7 +75,7 @@ actor OrchardMigrationHost {
         let generalStorageURL = initializer.generalStorageURL
         let logger = initializer.logger
 
-        let factory: (AccountUUID, any MigrationBroadcasting) -> OrchardMigration = { accountUUID, broadcaster in
+        let factory: ActorFactory = { accountUUID, broadcaster, upgradeGateBypass in
             OrchardMigration(
                 config: OrchardMigration.Config(
                     dataDbURL: dataDbURL,
@@ -78,6 +86,7 @@ actor OrchardMigrationHost {
                     accountUUID: accountUUID,
                     torDirURL: torDirURL,
                     generalStorageURL: generalStorageURL,
+                    upgradeGateBypass: upgradeGateBypass,
                     loggingPolicy: Initializer.LoggingPolicy.custom(logger)
                 ),
                 sharedBroadcaster: broadcaster
@@ -99,7 +108,8 @@ actor OrchardMigrationHost {
     /// Injecting initializer for tests: supply the welding, the shared broadcaster, the storage
     /// directory the gate files live in, the ticker interval and clock, the logger, the network's
     /// target spacing schedule, and the per-account actor factory directly — mirroring
-    /// ``OrchardMigration``'s own injecting init.
+    /// ``OrchardMigration``'s own injecting init. The factory is handed the host's gate bypass
+    /// holder along with the shared broadcaster, for the migration it builds to share.
     init(
         welding: ZcashRustBackendWelding,
         sharedBroadcaster: any MigrationBroadcasting,
@@ -108,7 +118,7 @@ actor OrchardMigrationHost {
         now: @escaping @Sendable () -> Date,
         logger: Logger,
         spacing: TargetBlockSpacing,
-        actorFactory: @escaping (AccountUUID, any MigrationBroadcasting) -> OrchardMigration
+        actorFactory: @escaping ActorFactory
     ) {
         self.welding = welding
         self.sharedBroadcaster = sharedBroadcaster
@@ -150,11 +160,18 @@ actor OrchardMigrationHost {
             return existing
         }
 
-        let migration = actorFactory(accountUUID, sharedBroadcaster)
+        let migration = actorFactory(accountUUID, sharedBroadcaster, upgradeGateBypass)
         migrations[accountUUID] = migration
         blockedPublisher.watchBroadcastSignal(migration.syncBlockedStream)
         liveGateRegistry.register(accountUUID) { migration.liveInFlightUntil() }
         return migration
+    }
+
+    /// Turns the NU7 network-upgrade gate's bypass on or off for every migration this host builds
+    /// or has built, from their next gated call on. For internal builds only; a production build
+    /// never turns it on. See ``MigrationUpgradeGateBypass``.
+    func setUpgradeGateBypass(_ isBypassed: Bool) {
+        upgradeGateBypass.setBypassed(isBypassed)
     }
 
     /// Whether ordinary wallet sync should currently be paused for *any* migrating account.

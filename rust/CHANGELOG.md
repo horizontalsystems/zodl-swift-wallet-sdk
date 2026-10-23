@@ -774,6 +774,27 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `zcashlc_migration_*` calls no longer replay its rows into the migration state first. Rejection
   marks a wallet never replayed are discarded; the engine re-adjudicates the affected transfers on
   their next broadcast attempt.
+- `zcashlc_migration_advance_step` holds back the engine's step around the NU7 network upgrade,
+  judged at the height after the wallet's own chain tip and never at `estimated_tip`, and takes a
+  trailing `upgrade_gate_bypass: bool`. `FfiMigrationAdvanceStep` gains a final field,
+  `network_upgrade_height: i64`, which a caller that builds the struct itself must now provide. Two
+  steps are new, exported as `ZCASHLC_ADVANCE_STEP_PAUSED_FOR_NETWORK_UPGRADE` (`8`) and
+  `ZCASHLC_ADVANCE_STEP_INTERRUPTED_BY_NETWORK_UPGRADE` (`9`). Both carry the NU7 activation height in
+  `network_upgrade_height` (`-1` on every other step), name no transaction (`id` is `0`) and carry no
+  outlook (`next_height` is `-1`), so a `switch` over `step` needs an arm for each. A network with no
+  NU7 activation height is never gated.
+  - `PAUSED_FOR_NETWORK_UPGRADE` answers in place of a Rebuild or a Replan while the next height is
+    more than 48 blocks below the activation, and in place of a Broadcast, a Prove, a Rebuild or a
+    Replan in the 48 blocks before it. Do nothing, and ask again as the chain advances.
+  - `INTERRUPTED_BY_NETWORK_UPGRADE` answers from the activation on when a transaction of the stored
+    run that is not mined was built for another consensus branch than the next block's, so the run
+    cannot complete. While every such transaction is `Proved` or `Broadcast`, one of them may have
+    been mined before the activation at a block the wallet has not scanned yet, and the call answers
+    `ZCASHLC_ADVANCE_STEP_REEVALUATE` instead, to sync and ask again, until the wallet has scanned the
+    block before the activation.
+  - `upgrade_gate_bypass` is for internal builds: `true` lifts the pause and the 48-block window, so
+    the engine's own step is returned at every height, and never lifts the interruption. Pass `false`
+    to enforce the gate.
 
 ### Removed
 - The step-by-step coinholder-voting C surface is gone: `zcash_voting` absorbed the

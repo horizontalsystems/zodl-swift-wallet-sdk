@@ -945,7 +945,9 @@ public protocol Synchronizer: AnyObject {
     ///     _ = try await synchronizer.performMigrationBroadcast(accountUUID: account, instruction, options: options)
     /// case .rebuild:
     ///     _ = try await synchronizer.refreshStaleMigrationTransfers(accountUUID: account, usk: usk)
-    /// case .replan, .reevaluate, .waiting, .complete, nil:
+    /// case .interruptedByNetworkUpgrade:
+    ///     break // cancel the run and offer a new migration; see the per-step notes below
+    /// case .replan, .reevaluate, .waiting, .complete, .pausedForNetworkUpgrade, nil:
     ///     break // nothing to perform; see the per-step notes below
     /// }
     /// ```
@@ -954,6 +956,9 @@ public protocol Synchronizer: AnyObject {
     /// - `.reevaluate` — surfaced first, before any actionable step, while a broadcast-rejection
     ///   report is open → sync and call this again so the engine can adjudicate against the newly
     ///   scanned data; it keeps answering this until the scan reaches the rejecting node's tip.
+    ///   Around the NU7 activation it is also the answer while the wallet's scan has not reached
+    ///   the last block before it, and the run's unmined transactions built for the branch before
+    ///   it may already have been sent → sync and call this again.
     /// - `.replan` — the run's plan was undercut past the committed threshold and the verdict is
     ///   already persisted (no sync changes it) → surface the re-plan UX over the
     ///   ``MigrationTransactionStatus/State/invalid(reason:)`` row(s), then
@@ -977,8 +982,36 @@ public protocol Synchronizer: AnyObject {
     ///   "stop polling" (its outlook is always `nil`). It is per-run, never "nothing left to
     ///   migrate": whether a migratable balance remains is answered by
     ///   ``proposeMigrationTransfers(accountUUID:)`` (an empty schedule means no).
+    /// - `.pausedForNetworkUpgrade` — the engine's step is one the NU7 network-upgrade gate holds
+    ///   back at the wallet's chain tip → do nothing now: no broadcast, proof, rebuild or re-plan,
+    ///   and no retry loop. Show the run as paused for the upgrade, sync as usual, and call this
+    ///   again as the chain tip advances. The step carries the activation height and no outlook.
+    /// - `.interruptedByNetworkUpgrade` — the upgrade has stranded the run: a transaction of it
+    ///   that is not mined was built for the branch before the activation, so no block can include
+    ///   it → cancel the run with `cancelMigrationRun(accountUUID:)` and offer a new migration.
+    ///   The step carries the activation height and no outlook.
     /// - Parameter accountUUID: the account whose next step is of interest.
     func migrationAdvanceStep(accountUUID: AccountUUID) async throws -> MigrationAdvance?
+
+    /// For INTERNAL builds only: turns the NU7 network-upgrade gate's bypass on or off, so the
+    /// migration can be exercised on a network before the upgrade activates. A production build
+    /// must never turn it on.
+    ///
+    /// Off by default. The switch belongs to this synchronizer and applies to every account's
+    /// migration it drives, from the next call on. With the bypass on,
+    /// ``migrationAdvanceStep(accountUUID:)`` never answers
+    /// ``MigrationAdvanceStep/pausedForNetworkUpgrade(activationHeight:)``: it hands out the
+    /// engine's own step at every height. A run committed that way is built for the consensus
+    /// branch of the block it is committed under, so one still unmined when the upgrade
+    /// activates is stranded by it.
+    ///
+    /// The bypass does not lift the check that keeps a transaction the next block cannot include
+    /// from being submitted, nor the detection of such a stranded run
+    /// (``MigrationAdvanceStep/interruptedByNetworkUpgrade(activationHeight:)``).
+    ///
+    /// A conformer without migration support ignores the call.
+    /// - Parameter isBypassed: `true` to bypass the gate, `false` to enforce it again.
+    func setMigrationNetworkUpgradeGateBypass(_ isBypassed: Bool) async
 
     /// Live migration progress for `accountUUID`, or `nil` when no snapshot is reportable:
     /// present only while an engine run is ACTIVE (not terminal) or a recorded immediate sweep is
@@ -1881,13 +1914,17 @@ public extension Synchronizer {
     // source-breaking change for downstream/stacked conformers (in particular the
     // `SlipstreamSynchronizer` stack, until it carries its own implementations). Conformers with
     // migration support (`SDKSynchronizer`) override every one of these; conformers that don't fall
-    // through here. The throwing members all throw `MigrationUnimplemented`; the four non-throwing
+    // through here. The throwing members all throw `MigrationUnimplemented`; the five non-throwing
     // members get inert defaults instead, documented below — conformers must override them to offer
     // real migration behavior.
 
     func migrationAdvanceStep(accountUUID: AccountUUID) async throws -> MigrationAdvance? {
         throw MigrationUnimplemented(member: #function)
     }
+
+    /// Inert default: a conformer without migration support has no gate to opt out of. Conformers
+    /// with migration support must override it.
+    func setMigrationNetworkUpgradeGateBypass(_ isBypassed: Bool) async { }
 
     func migrationProgress(accountUUID: AccountUUID) async throws -> MigrationProgress? {
         throw MigrationUnimplemented(member: #function)

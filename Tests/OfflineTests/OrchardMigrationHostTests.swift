@@ -85,7 +85,7 @@ final class OrchardMigrationHostTests: ZcashTestCase {
         // Task start, which has to cross B's own mocked advance/serve calls first too.
         let accountBReachedTheBroadcaster = expectation(description: "account B's actor reached the point just before calling the shared broadcaster")
         // A fresh mock per account keeps the two concurrent broadcast flows off a shared mutable mock.
-        let perAccountFactory: (AccountUUID, any MigrationBroadcasting) -> OrchardMigration = { [testGeneralStorageDirectory, clock, accountB] accountUUID, broadcaster in
+        let perAccountFactory: OrchardMigrationHost.ActorFactory = { [testGeneralStorageDirectory, clock, accountB] accountUUID, broadcaster, _ in
             let accountWelding = ZcashRustBackendWeldingMock()
             accountWelding.migrationTakeBroadcastTransactionIdForClosure = { _, _ in
                 if accountUUID == accountB {
@@ -223,7 +223,7 @@ final class OrchardMigrationHostTests: ZcashTestCase {
         let directory = testGeneralStorageDirectory!
         let clockValue = clock!
         var capturedGates: [MigrationSyncGate] = []
-        let capturingFactory: (AccountUUID, any MigrationBroadcasting) -> OrchardMigration = { accountUUID, broadcaster in
+        let capturingFactory: OrchardMigrationHost.ActorFactory = { accountUUID, broadcaster, _ in
             let gate = MigrationSyncGate(
                 directory: directory,
                 accountUUID: accountUUID,
@@ -557,10 +557,10 @@ final class OrchardMigrationHostTests: ZcashTestCase {
     private func makeActorFactory(
         welding: ZcashRustBackendWeldingMock,
         gateTickInterval: TimeInterval
-    ) -> (AccountUUID, any MigrationBroadcasting) -> OrchardMigration {
+    ) -> OrchardMigrationHost.ActorFactory {
         let storage = testGeneralStorageDirectory!
         let clockValue = clock!
-        return { accountUUID, broadcaster in
+        return { accountUUID, broadcaster, _ in
             OrchardMigration(
                 welding: welding,
                 accountUUID: accountUUID,

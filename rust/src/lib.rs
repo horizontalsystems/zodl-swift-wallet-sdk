@@ -117,8 +117,6 @@ mod ledger;
 mod migration;
 mod migration_engine;
 mod migration_finalize;
-// The FFI wiring that calls the gate lands in the next change, so nothing uses it yet.
-#[allow(dead_code)]
 mod migration_gate;
 mod migration_keystone;
 mod migration_plan_cache;
