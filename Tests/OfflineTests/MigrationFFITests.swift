@@ -1796,7 +1796,7 @@ final class MigrationFFITests: XCTestCase {
                 torDirURL: storageDirectory.appendingPathComponent("tor", isDirectory: true),
                 generalStorageURL: storageDirectory,
                 upgradeGateBypass: MigrationUpgradeGateBypass(),
-                submissionHeight: { 4_000_000 },
+                submissionHeight: { _ in 4_000_000 },
                 loggingPolicy: .noLogging
             )
         }

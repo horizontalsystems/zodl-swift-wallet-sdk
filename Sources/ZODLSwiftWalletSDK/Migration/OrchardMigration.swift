@@ -90,9 +90,12 @@ actor OrchardMigration {
         /// Reads the latest block height of the synchronizer's own lightwalletd server, for the one
         /// submission check that has no connection of its own to read it on: a preparation retrieved
         /// with ``OrchardMigration/takePreparation(byTxid:)`` is submitted by the host, possibly to
-        /// several servers, so there is no single submission server to ask. See
+        /// several servers, so there is no single submission server to ask. It is handed the txid of
+        /// the preparation being taken, so that the read can go over a connection that belongs to
+        /// that transaction alone, as every other request the SDK makes about one does, and not over
+        /// a connection the wallet uses for anything else. See
         /// ``OrchardMigration/takePreparation(byTxid:)``.
-        let submissionHeight: @Sendable () async throws -> BlockHeight
+        let submissionHeight: @Sendable (_ txid: Data) async throws -> BlockHeight
         /// The logging policy, mirroring ``Initializer``'s.
         let loggingPolicy: Initializer.LoggingPolicy
 
@@ -108,7 +111,8 @@ actor OrchardMigration {
         ///   - torDirURL: the main Tor directory.
         ///   - generalStorageURL: directory for the per-account sync-gate file.
         ///   - upgradeGateBypass: the holder of the network-upgrade gate's bypass the backend reads.
-        ///   - submissionHeight: reads the synchronizer's lightwalletd server's latest block height.
+        ///   - submissionHeight: reads the synchronizer's lightwalletd server's latest block height,
+        ///     for the txid of the preparation being taken.
         ///   - loggingPolicy: the logging policy.
         init(
             dataDbURL: URL,
@@ -120,7 +124,7 @@ actor OrchardMigration {
             torDirURL: URL,
             generalStorageURL: URL,
             upgradeGateBypass: MigrationUpgradeGateBypass,
-            submissionHeight: @escaping @Sendable () async throws -> BlockHeight,
+            submissionHeight: @escaping @Sendable (_ txid: Data) async throws -> BlockHeight,
             loggingPolicy: Initializer.LoggingPolicy = Initializer.LoggingPolicy.default(.debug)
         ) {
             self.dataDbURL = dataDbURL
@@ -157,9 +161,9 @@ actor OrchardMigration {
     private let broadcaster: any MigrationBroadcasting
     private let syncGate: MigrationSyncGate
     private let logger: Logger
-    /// Reads the synchronizer's lightwalletd server's latest block height, for
-    /// ``takePreparation(byTxid:)``.
-    private let submissionHeight: @Sendable () async throws -> BlockHeight
+    /// Reads the synchronizer's lightwalletd server's latest block height for the txid it is given,
+    /// for ``takePreparation(byTxid:)``.
+    private let submissionHeight: @Sendable (_ txid: Data) async throws -> BlockHeight
     /// The network's target spacing schedule, which the estimate-consulting paths project on.
     private let spacing: TargetBlockSpacing
 
@@ -269,7 +273,7 @@ actor OrchardMigration {
         logger: Logger,
         spacing: TargetBlockSpacing,
         now: @escaping @Sendable () -> Date = { Date() },
-        submissionHeight: @escaping @Sendable () async throws -> BlockHeight = OrchardMigration.unreadableSubmissionHeight
+        submissionHeight: @escaping @Sendable (_ txid: Data) async throws -> BlockHeight = OrchardMigration.unreadableSubmissionHeight
     ) {
         self.welding = welding
         self.accountUUID = accountUUID
@@ -283,7 +287,7 @@ actor OrchardMigration {
 
     /// A ``Config/submissionHeight`` for a migration with no server to ask: it always fails, so the
     /// take that needs a height fails closed.
-    static let unreadableSubmissionHeight: @Sendable () async throws -> BlockHeight = {
+    static let unreadableSubmissionHeight: @Sendable (_ txid: Data) async throws -> BlockHeight = { _ in
         throw ZcashError.serviceLatestBlockHeightFailed(
             LightWalletServiceError.generalError(message: "No server was given to read the submission height from.")
         )
@@ -447,12 +451,14 @@ actor OrchardMigration {
     /// refused before the seam records it in the wallet. The host submits through machinery of its
     /// own, possibly to several servers, so there is no single submission server to ask for the
     /// height the check needs: this reads it from the synchronizer's own lightwalletd server
-    /// (``Config/submissionHeight``), with one request of its own, and a height that cannot be read
-    /// fails closed — the error propagates and nothing is taken. The next block is the one after the
-    /// higher of that height and the wallet's chain tip; the preparation must be built for its
-    /// consensus branch and not have expired by it, and the migration takes nothing in the blocks
-    /// just before the NU7 network upgrade. A host that submits to servers other than the
-    /// synchronizer's should judge the result against each one's own height as well.
+    /// (``Config/submissionHeight``), with one request of its own, made for `txid` so that it can
+    /// ride a connection of that transaction's own (with Tor on, the Tor group the SDK submits that
+    /// transaction in, never the default circuit the sync keeps for the wallet), and a height that
+    /// cannot be read fails closed — the error propagates and nothing is taken. The next block is
+    /// the one after the higher of that height and the wallet's chain tip; the preparation must be
+    /// built for its consensus branch and not have expired by it, and the migration takes nothing
+    /// in the blocks just before the NU7 network upgrade. A host that submits to servers other than
+    /// the synchronizer's should judge the result against each one's own height as well.
     /// - Parameter txid: a txid ``MigrationProveOutcome/preparationTxids`` named, in the SDK's
     ///   raw/internal byte order.
     /// - Throws: the error of the height read when the synchronizer's server cannot be reached;
@@ -463,7 +469,7 @@ actor OrchardMigration {
     ///   for the readiness refusal of a preparation that is not proved — which a host discharges by
     ///   proving again rather than retrying this.
     func takePreparation(byTxid txid: Data) async throws -> PreparedMigrationTransfer {
-        let serverHeight = try await submissionHeight()
+        let serverHeight = try await submissionHeight(txid)
         return try await welding.migrationTakePreparation(
             txid: txid,
             submissionServerHeight: serverHeight,

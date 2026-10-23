@@ -138,12 +138,14 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the executor refuses it with `ZcashError.rustMigrationTakeBroadcastTransaction(_:)`. A call that finds the run
   already ended (cancelled, completed, failed or superseded) throws that same error; see Fixed.
 - `takeMigrationPreparation(accountUUID:byTxid:)` keeps its signature but now makes one network request of its
-  own: it reads the latest block height of the synchronizer's own lightwalletd server, in the mode the sync's
-  chain-tip updates use, and checks the preparation against the next block as above before the wallet records it.
-  It throws `ZcashError.migrationSubmissionRefused(_:)` for a preparation that cannot be valid there, and the error
-  of the height read (`ZcashError.serviceLatestBlockHeightFailed(_:)`, for instance) when the server cannot be
-  asked, in which case nothing is taken. An app that submits the bytes it gets to other servers than the
-  synchronizer's should judge them against those servers' own heights as well.
+  own: it reads the latest block height of the synchronizer's own lightwalletd server and checks the preparation
+  against the next block as above before the wallet records it. With Tor enabled the request goes over the Tor
+  group the SDK submits that transaction in (the one named after `txid`), never over the circuit the sync uses
+  and shared with no other transaction, so it does not tie the preparation's submission to the wallet's sync;
+  without Tor it is a direct request. It throws `ZcashError.migrationSubmissionRefused(_:)` for a preparation that
+  cannot be valid there, and the error of the height read (`ZcashError.serviceLatestBlockHeightFailed(_:)`, for
+  instance) when the server cannot be asked, in which case nothing is taken. An app that submits the bytes it gets
+  to other servers than the synchronizer's should judge them against those servers' own heights as well.
 - `ZcashError` and `ZcashErrorCode` gain `migrationSubmissionRefused(_:)` (`ZRUST0162`), whose payload is the
   `TransactionSubmissionRefusal` that says why. `performMigrationBroadcast`, `submitNoteSplit` and
   `takeMigrationPreparation` throw it. An exhaustive `switch` over either type stops compiling until it is

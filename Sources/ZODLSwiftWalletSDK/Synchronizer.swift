@@ -1126,11 +1126,13 @@ public protocol Synchronizer: AnyObject {
     /// consensus branch of the next block, must not have expired by it, and is not served in the
     /// blocks just before the NU7 network upgrade. The next block is the one after the higher of
     /// the wallet's chain tip and the latest block height of the synchronizer's own lightwalletd
-    /// server, which this call therefore reads, with one network request of its own (in the mode
-    /// the sync's own chain-tip updates use). A preparation that fails the check is not recorded
-    /// in the wallet, and a height that cannot be read fails the call without taking anything. An
-    /// app that submits the bytes to other servers than the synchronizer's, or to several, should
-    /// judge them against each of those servers' own heights as well.
+    /// server, which this call therefore reads, with one network request of its own. With Tor
+    /// enabled that request goes over the Tor group the SDK submits this transaction in (the one
+    /// named after `txid`): never over the circuit the sync uses, and shared with no other
+    /// transaction. Without Tor it is a direct request. A preparation that fails the check is not
+    /// recorded in the wallet, and a height that cannot be read fails the call without taking
+    /// anything. An app that submits the bytes to other servers than the synchronizer's, or to
+    /// several, should judge them against each of those servers' own heights as well.
     /// - Parameters:
     ///   - accountUUID: the account whose preparation is being retrieved.
     ///   - txid: a txid ``MigrationProveOutcome/preparationTxids`` named, in the SDK's

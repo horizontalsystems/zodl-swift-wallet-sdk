@@ -18,6 +18,7 @@
 
 import Combine
 import Foundation
+import os
 @testable import TestUtils
 import XCTest
 @_spi(Testing) @testable import ZODLSwiftWalletSDK
@@ -976,7 +977,9 @@ final class SDKSynchronizerMigrationTests: ZcashTestCase {
     }
 
     /// The retrieval is checked against the height the host's provider reads (the synchronizer's
-    /// own server), and the height reaches the engine call: the surface adds one request for it.
+    /// own server), and the height reaches the engine call: the surface adds one request for it,
+    /// made for the txid being retrieved (the production provider reads over a Tor group of that
+    /// txid's own).
     func testTakeMigrationPreparationReadsTheSubmissionHeight() async throws {
         let txid = Data(repeating: 0x5A, count: 32)
         let welding = ZcashRustBackendWeldingMock()
@@ -985,7 +988,16 @@ final class SDKSynchronizerMigrationTests: ZcashTestCase {
             txid: txid,
             pczt: Data([0x01])
         )
-        let synchronizer = try makeSynchronizer(migrationHost: makeHost(welding: welding, submissionHeight: { 4_321_000 }))
+        let heightReadFor = OSAllocatedUnfairLock<[Data]>(initialState: [])
+        let synchronizer = try makeSynchronizer(
+            migrationHost: makeHost(
+                welding: welding,
+                submissionHeight: { readFor in
+                    heightReadFor.withLock { $0.append(readFor) }
+                    return 4_321_000
+                }
+            )
+        )
 
         _ = try await synchronizer.takeMigrationPreparation(accountUUID: accountUUID, byTxid: txid)
 
@@ -993,6 +1005,7 @@ final class SDKSynchronizerMigrationTests: ZcashTestCase {
             welding.migrationTakePreparationTxidSubmissionServerHeightForReceivedArguments?.submissionServerHeight,
             4_321_000
         )
+        XCTAssertEqual(heightReadFor.withLock { $0 }, [txid], "one height read, for the txid being retrieved")
     }
 
     /// A height that cannot be read fails the retrieval closed, before the engine is asked.
@@ -1008,7 +1021,7 @@ final class SDKSynchronizerMigrationTests: ZcashTestCase {
         let synchronizer = try makeSynchronizer(
             migrationHost: makeHost(
                 welding: welding,
-                submissionHeight: { throw ZcashError.serviceLatestBlockHeightFailed(LightWalletServiceError.timeOut) }
+                submissionHeight: { _ in throw ZcashError.serviceLatestBlockHeightFailed(LightWalletServiceError.timeOut) }
             )
         )
 
@@ -1180,12 +1193,12 @@ final class SDKSynchronizerMigrationTests: ZcashTestCase {
     /// production one does: the engine call a broadcasting member makes runs from within the
     /// broadcaster, so a broadcaster that fails closed first would never let these tests' stubbed
     /// engine answers reach the caller. `submissionHeight` is the provider a preparation retrieval
-    /// reads its height from.
+    /// reads its height from, given the txid being retrieved.
     private func makeHost(
         welding: ZcashRustBackendWeldingMock,
         broadcaster: any MigrationBroadcasting = ScriptedBroadcaster(script: .outcome(.submitted)),
         tickInterval: TimeInterval = 3600,
-        submissionHeight: @escaping @Sendable () async throws -> BlockHeight = { 4_000_000 },
+        submissionHeight: @escaping @Sendable (Data) async throws -> BlockHeight = { _ in 4_000_000 },
         factoryRecorder: FactoryInvocationRecorder? = nil
     ) -> OrchardMigrationHost {
         // `isSyncBlocked()`/`syncBlockedStream`/`start()`'s privacy gate unconditionally read

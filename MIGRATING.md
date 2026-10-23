@@ -1660,7 +1660,9 @@ These calls also change how they reach the network, with no signature change. `p
 wallet, so `ZcashError.migrationTorUnavailable` now arrives before the wallet is touched, and a server whose height
 cannot be read yields `MigrationTransferResult.networkError(retryable: true)` with nothing submitted or recorded.
 `takeMigrationPreparation` makes one network request of its own, to the synchronizer's lightwalletd server, and
-throws the request's error when it fails. See `CHANGELOG.md`.
+throws the request's error when it fails. With Tor enabled that request uses the Tor group the SDK submits the
+transaction in (named after its txid), not the circuit the sync uses; no change is needed in the app. See
+`CHANGELOG.md`.
 
 ## The pool-migration surface rides the final engine
 

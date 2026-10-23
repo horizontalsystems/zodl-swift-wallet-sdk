@@ -593,10 +593,10 @@ final class OrchardMigrationHostTests: ZcashTestCase {
     // MARK: - The preparation height provider (production wiring)
 
     /// The production host reads a preparation's submission height from the synchronizer's own
-    /// lightwalletd service, in the mode the sync's chain-tip updates use (`.direct` when Tor is
-    /// off, the default Tor connection when it is on), and looks the service up when the read is
-    /// made: `switchTo(endpoint:)` replaces the initializer's service, and the read must follow it
-    /// rather than keep asking the server the wallet no longer syncs from.
+    /// lightwalletd service, directly when Tor is off and over the preparation's own Tor group when
+    /// it is on (see the Tor test below), and looks the service up when the read is made:
+    /// `switchTo(endpoint:)` replaces the initializer's service, and the read must follow it rather
+    /// than keep asking the server the wallet no longer syncs from.
     ///
     /// Driven through the real host and the real per-account actor: the wallet database does not
     /// exist, so the take fails in rust, AFTER the height was read, which is how the test sees that
@@ -624,16 +624,61 @@ final class OrchardMigrationHostTests: ZcashTestCase {
         XCTAssertEqual(first.latestBlockHeightModeCallsCount, 1, "the replaced service is not asked again")
     }
 
-    func testProductionHostReadsThePreparationHeightOverTheDefaultTorConnectionWhenTorIsOn() async throws {
+    /// With Tor on, the height is read over the Tor group the SDK submits that same transaction in
+    /// (`submit-<txid>`), never over the default circuit the sync keeps for the wallet. Every
+    /// preparation request the SDK makes for one transaction rides a circuit of that transaction's
+    /// own, so that nothing the server sees links the transaction to the wallet's sync identity or
+    /// to another transaction; a read on the default circuit would put a request tied to the txid on
+    /// the sync's circuit, once per preparation, right before its submit.
+    ///
+    /// The mode is derived from the txid being taken, so two preparations get two groups.
+    func testProductionHostReadsThePreparationHeightOnThePreparationsOwnSubmitGroupWhenTorIsOn() async throws {
         let service = LightWalletServiceMock()
-        service.latestBlockHeightModeReturnValue = 4_000_001
+        let modesRead = OSAllocatedUnfairLock<[ServiceMode]>(initialState: [])
+        service.latestBlockHeightModeClosure = { mode in
+            modesRead.withLock { $0.append(mode) }
+            return 4_000_001
+        }
         let initializer = try makeProductionInitializer(service: service, torEnabled: true)
         let host = OrchardMigrationHost(initializer: initializer)
         let migration = await host.migration(for: accountA)
+        let firstTxid = Data(repeating: 0x5A, count: 32)
+        let secondTxid = Data(repeating: 0xA5, count: 32)
 
-        await assertTakePreparationFailsInRustAfterReadingTheHeight(migration)
+        await assertTakePreparationFailsInRustAfterReadingTheHeight(migration, txid: firstTxid)
+        await assertTakePreparationFailsInRustAfterReadingTheHeight(migration, txid: secondTxid)
 
-        XCTAssertEqual(service.latestBlockHeightModeReceivedMode, ServiceMode.defaultTor)
+        XCTAssertEqual(
+            modesRead.withLock { $0 },
+            [
+                ServiceMode.txIdGroup(prefix: "submit", txId: firstTxid),
+                ServiceMode.txIdGroup(prefix: "submit", txId: secondTxid)
+            ],
+            "each read is on the submit group of the txid being taken: not the sync's default circuit, not shared between preparations"
+        )
+        XCTAssertFalse(
+            modesRead.withLock { $0.contains(ServiceMode.defaultTor) },
+            "the sync's default circuit is never used for a read that is tied to a txid"
+        )
+    }
+
+    /// Without Tor there are no circuits to keep apart: the read is a direct request, whichever
+    /// preparation it is for.
+    func testProductionHostReadsThePreparationHeightDirectlyWhenTorIsOffForAnyTxid() async throws {
+        let service = LightWalletServiceMock()
+        let modesRead = OSAllocatedUnfairLock<[ServiceMode]>(initialState: [])
+        service.latestBlockHeightModeClosure = { mode in
+            modesRead.withLock { $0.append(mode) }
+            return 4_000_001
+        }
+        let initializer = try makeProductionInitializer(service: service, torEnabled: false)
+        let host = OrchardMigrationHost(initializer: initializer)
+        let migration = await host.migration(for: accountA)
+
+        await assertTakePreparationFailsInRustAfterReadingTheHeight(migration, txid: Data(repeating: 0x5A, count: 32))
+        await assertTakePreparationFailsInRustAfterReadingTheHeight(migration, txid: Data(repeating: 0xA5, count: 32))
+
+        XCTAssertEqual(modesRead.withLock { $0 }, [ServiceMode.direct, ServiceMode.direct])
     }
 
     /// An unreadable server height fails the production retrieval closed: the service's error
@@ -675,9 +720,12 @@ final class OrchardMigrationHostTests: ZcashTestCase {
         )
     }
 
-    private func assertTakePreparationFailsInRustAfterReadingTheHeight(_ migration: OrchardMigration) async {
+    private func assertTakePreparationFailsInRustAfterReadingTheHeight(
+        _ migration: OrchardMigration,
+        txid: Data = Data(repeating: 0x5A, count: 32)
+    ) async {
         do {
-            _ = try await migration.takePreparation(byTxid: Data(repeating: 0x5A, count: 32))
+            _ = try await migration.takePreparation(byTxid: txid)
             XCTFail("a wallet with no database has no preparation to serve")
         } catch ZcashError.rustMigrationTakePreparation {
             // expected: the take reached the engine, so the height read succeeded

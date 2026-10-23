@@ -80,20 +80,24 @@ actor OrchardMigrationHost {
 
         // The synchronizer's own lightwalletd server's latest block height, which a preparation's
         // submission check is judged against (see ``OrchardMigration/takePreparation(byTxid:)``).
-        // It is read in the mode the sync's own chain-tip updates use (`UpdateChainTipAction`,
-        // `LatestBlocksDataProvider`): the same request over the same connection the wallet already
-        // makes to that server all the time, so it is not a new kind of traffic to it, which a
-        // connection of a mode of its own would be. The service is looked up when the height is read
-        // and not held: `switchTo(endpoint:)` replaces the initializer's service, and holding the
-        // current one would read a server the wallet no longer syncs from. The initializer is held
-        // weakly, as the container registration of this host does, so that initializer -> container
-        // -> host -> this closure -> initializer is not a cycle.
+        // With Tor on it is read over the Tor group the SDK submits that preparation in
+        // (`submit-<txid>`), like the SDK's other requests that name a transaction, each of which
+        // gets a circuit of that transaction's own so that nothing the server sees ties one
+        // transaction to another or to the wallet's sync identity. It is never read over the default
+        // circuit the sync keeps for the wallet: a request there moments before every preparation is
+        // submitted would tie each of those submissions to the sync. Without Tor it is a direct
+        // request, which is what the sync's own are. The service is looked up when the height is
+        // read and not held: `switchTo(endpoint:)` replaces the initializer's service, and holding
+        // the current one would read a server the wallet no longer syncs from. The initializer is
+        // held weakly, as the container registration of this host does, so that initializer ->
+        // container -> host -> this closure -> initializer is not a cycle.
         let sdkFlags = initializer.container.resolve(SDKFlags.self)
-        let submissionHeight: @Sendable () async throws -> BlockHeight = { [weak initializer] in
+        let submissionHeight: @Sendable (Data) async throws -> BlockHeight = { [weak initializer] txid in
             guard let initializer else {
                 throw ZcashError.synchronizerNotPrepared
             }
-            return try await initializer.lightWalletService.latestBlockHeight(mode: await sdkFlags.ifTor(.defaultTor))
+            let mode = await sdkFlags.ifTor(ServiceMode.txIdGroup(prefix: "submit", txId: txid))
+            return try await initializer.lightWalletService.latestBlockHeight(mode: mode)
         }
 
         let factory: ActorFactory = { accountUUID, broadcaster, upgradeGateBypass in

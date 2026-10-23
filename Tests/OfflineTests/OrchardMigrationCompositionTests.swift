@@ -471,16 +471,17 @@ final class OrchardMigrationCompositionTests: ZcashTestCase {
 
     /// A preparation the host retrieves is checked against the synchronizer's own server, since the
     /// host submits it by itself, possibly to several servers: the height comes from the injected
-    /// provider and reaches the take, for the txid asked for and the actor's account. The provider is
-    /// the only thing asked, and the broadcaster plays no part.
+    /// provider, which is asked about the txid being taken (so that it can read over a connection
+    /// that belongs to that transaction alone), and reaches the take, for the txid asked for and the
+    /// actor's account. The provider is the only thing asked, and the broadcaster plays no part.
     func testTakePreparationUsesTheSubmissionHeightProvider() async throws {
         let txid = Data(repeating: 0xCD, count: 32)
         let prepared = PreparedMigrationTransfer(id: 3, txid: txid, pczt: Data([0x0A, 0x0B]))
         welding.migrationTakePreparationTxidSubmissionServerHeightForReturnValue = prepared
         let broadcaster = ScriptedBroadcaster(script: .throwing(StubEngineError()))
-        let heightReads = OSAllocatedUnfairLock(initialState: 0)
-        let migration = makeMigration(broadcaster: broadcaster) {
-            heightReads.withLock { $0 += 1 }
+        let heightReadFor = OSAllocatedUnfairLock<[Data]>(initialState: [])
+        let migration = makeMigration(broadcaster: broadcaster) { readFor in
+            heightReadFor.withLock { $0.append(readFor) }
             return 4_242
         }
 
@@ -491,8 +492,37 @@ final class OrchardMigrationCompositionTests: ZcashTestCase {
         XCTAssertEqual(received.txid, txid)
         XCTAssertEqual(received.submissionServerHeight, 4_242)
         XCTAssertEqual(received.account, accountA)
-        XCTAssertEqual(heightReads.withLock { $0 }, 1, "one request for the height per take")
+        XCTAssertEqual(heightReadFor.withLock { $0 }, [txid], "one request for the height per take, for the txid being taken")
         XCTAssertTrue(broadcaster.receivedCalls.isEmpty, "a retrieval never touches the migration broadcaster")
+    }
+
+    /// Every take asks the provider again, about its own txid, and hands the take the height that
+    /// answer gave: nothing is cached across preparations, which would put one preparation's read
+    /// on another's connection or judge it at a height read for a different moment.
+    func testTakePreparationAsksTheSubmissionHeightProviderForEachTxidTaken() async throws {
+        let firstTxid = Data(repeating: 0xC1, count: 32)
+        let secondTxid = Data(repeating: 0xC2, count: 32)
+        welding.migrationTakePreparationTxidSubmissionServerHeightForClosure = { txid, _, _ in
+            PreparedMigrationTransfer(id: 3, txid: txid, pczt: Data([0x0A]))
+        }
+        let heightReadFor = OSAllocatedUnfairLock<[Data]>(initialState: [])
+        let migration = makeMigration(broadcaster: ScriptedBroadcaster(script: .throwing(StubEngineError()))) { readFor in
+            heightReadFor.withLock { reads in
+                reads.append(readFor)
+                return BlockHeight(4_000 + reads.count)
+            }
+        }
+
+        _ = try await migration.takePreparation(byTxid: firstTxid)
+        let afterTheFirst = try XCTUnwrap(welding.migrationTakePreparationTxidSubmissionServerHeightForReceivedArguments)
+        _ = try await migration.takePreparation(byTxid: secondTxid)
+        let afterTheSecond = try XCTUnwrap(welding.migrationTakePreparationTxidSubmissionServerHeightForReceivedArguments)
+
+        XCTAssertEqual(heightReadFor.withLock { $0 }, [firstTxid, secondTxid])
+        XCTAssertEqual(afterTheFirst.txid, firstTxid)
+        XCTAssertEqual(afterTheFirst.submissionServerHeight, 4_001)
+        XCTAssertEqual(afterTheSecond.txid, secondTxid)
+        XCTAssertEqual(afterTheSecond.submissionServerHeight, 4_002)
     }
 
     /// A height that cannot be read fails the retrieval closed: the provider's error reaches the
@@ -501,7 +531,7 @@ final class OrchardMigrationCompositionTests: ZcashTestCase {
         // Stubbed so that a regression that takes anyway fails the assertion below instead of
         // crashing the process on the mock's un-stubbed return value.
         welding.migrationTakePreparationTxidSubmissionServerHeightForReturnValue = makePreparedTransfer(id: 3)
-        let migration = makeMigration(broadcaster: ScriptedBroadcaster(script: .throwing(StubEngineError()))) {
+        let migration = makeMigration(broadcaster: ScriptedBroadcaster(script: .throwing(StubEngineError()))) { _ in
             throw ZcashError.serviceLatestBlockHeightFailed(LightWalletServiceError.timeOut)
         }
 
@@ -524,7 +554,7 @@ final class OrchardMigrationCompositionTests: ZcashTestCase {
     func testTakePreparationPropagatesTheSeamsRefusal() async throws {
         welding.migrationTakePreparationTxidSubmissionServerHeightForThrowableError =
             ZcashError.migrationSubmissionRefused(.expired)
-        let migration = makeMigration(broadcaster: ScriptedBroadcaster(script: .throwing(StubEngineError()))) { 100 }
+        let migration = makeMigration(broadcaster: ScriptedBroadcaster(script: .throwing(StubEngineError()))) { _ in 100 }
 
         do {
             _ = try await migration.takePreparation(byTxid: Data(repeating: 0xCD, count: 32))
@@ -1464,7 +1494,7 @@ final class OrchardMigrationCompositionTests: ZcashTestCase {
 
     private func makeMigration(
         broadcaster: any MigrationBroadcasting,
-        submissionHeight: @escaping @Sendable () async throws -> BlockHeight = OrchardMigration.unreadableSubmissionHeight
+        submissionHeight: @escaping @Sendable (Data) async throws -> BlockHeight = OrchardMigration.unreadableSubmissionHeight
     ) -> OrchardMigration {
         // `isSyncBlocked()` and the `useEstimatedTip: true` paths unconditionally read
         // `migrationBlockRateSamples` (`ChainTipEstimator`'s raw input); default it to "no samples"
