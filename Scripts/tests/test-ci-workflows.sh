@@ -159,7 +159,7 @@ test_swift_workflow_builds_the_ffi_with_ffi_ci() {
 }
 
 test_swift_workflow_installs_only_the_arm64_macos_rust_target() {
-    assert_file_contains "$(_swift_workflow)" "targets: aarch64-apple-darwin" "swift.yml installs aarch64-apple-darwin"
+    assert_file_contains "$(_swift_workflow)" "target aarch64-apple-darwin" "swift.yml installs aarch64-apple-darwin"
     assert_file_lacks "$(_swift_workflow)" "x86_64-apple-darwin" "swift.yml installs no x86_64 target"
 }
 
@@ -211,6 +211,7 @@ test_codeql_swift_job_builds_with_ffi_ci() {
     assert_file_contains "$(_codeql_workflow)" "find rust Cargo.toml Cargo.lock BuildSupport Makefile -type f" \
         "CodeQL's FFI hash covers the root Makefile"
     assert_file_contains "$(_codeql_workflow)" "id: toolchain" "CodeQL's Setup Rust step has an id"
+    assert_file_contains "$(_codeql_workflow)" 'echo "cachekey=' "CodeQL's Setup Rust step sets the cachekey output"
     assert_file_lacks "$(_codeql_workflow)" "x86_64-apple-darwin" "CodeQL installs no x86_64 target"
 }
 
@@ -259,6 +260,7 @@ test_every_local_action_a_workflow_uses_exists() {
 # would ever save the rebuilt ones, so the key has to name the rustc version.
 test_swift_workflow_cargo_key_includes_the_toolchain() {
     assert_file_contains "$(_swift_workflow)" "id: toolchain" "the build job's Rust setup step has an id"
+    assert_file_contains "$(_swift_workflow)" 'echo "cachekey=' "the Rust setup step sets the cachekey output"
     assert_file_contains "$(_swift_workflow)" 'cargo-v2-${{ steps.toolchain.outputs.cachekey }}-' \
         "the cargo cache key carries the rustc version"
 }
