@@ -1,3 +1,5 @@
+# shellcheck shell=bash disable=SC2016
+# Literal shell/GitHub expressions are fixtures, evaluated by their consumers.
 # Offline, text-only checks on how CI builds and caches the FFI (the root
 # Makefile's ffi-ci target and the workflows that call it), on whether the
 # FFI build's deployment targets agree with Package.swift, and on Cargo.toml
@@ -165,13 +167,13 @@ test_swift_workflow_installs_only_the_arm64_macos_rust_target() {
 
 test_swift_workflow_cache_keys_name_the_ci_build() {
     assert_file_contains "$(_swift_workflow)" "key: ffi-xcframework-macos-arm64-nolto-" "the XCFramework key names the ffi-ci build"
-    assert_file_contains "$(_swift_workflow)" "cargo-v2-" "the cargo key is bumped to v2"
+    assert_file_contains "$(_swift_workflow)" "cargo-ci-macos-arm64-nolto-v3-" "the cargo key isolates the CI build variant"
     assert_file_lacks "$(_swift_workflow)" "cargo-v1-" "no v1 cargo key remains"
 }
 
 test_swift_workflow_hashes_the_root_makefile() {
-    assert_file_contains "$(_swift_workflow)" "find rust Cargo.toml Cargo.lock BuildSupport Makefile -type f" \
-        "the FFI source hash covers the root Makefile, where ffi-ci lives"
+    assert_file_contains "$(_swift_workflow)" 'Scripts/ci/ffi-input-hash.sh' \
+        "the FFI source hash uses committed build inputs"
 }
 
 test_swift_workflow_interpolates_nothing_into_run_scripts() {
@@ -294,6 +296,60 @@ test_every_local_action_a_workflow_uses_exists() {
 test_swift_workflow_cargo_key_includes_the_toolchain() {
     assert_file_contains "$(_swift_workflow)" "id: toolchain" "the build job's Rust setup step has an id"
     assert_file_contains "$(_swift_workflow)" 'echo "cachekey=' "the Rust setup step sets the cachekey output"
-    assert_file_contains "$(_swift_workflow)" 'cargo-v2-${{ steps.toolchain.outputs.cachekey }}-' \
-        "the cargo cache key carries the rustc version"
+    assert_file_contains "$(_swift_workflow)" 'cargo-ci-macos-arm64-nolto-v3-${{ steps.toolchain.outputs.cachekey }}-' \
+        "the cargo cache key carries the rustc identity and build variant"
+}
+
+# Compile identity must be available before any compiled product can be restored.
+test_ci_cache_rust_setup_precedes_product_restore() {
+    local setup restore
+    setup="$(grep -n 'id: toolchain' "$(_swift_workflow)" | cut -d: -f1)"
+    restore="$(grep -n 'id: cache-ffi' "$(_swift_workflow)" | cut -d: -f1)"
+    assert_succeeds 'Rust identity is computed before FFI lookup' test "$setup" -lt "$restore"
+}
+
+test_ci_cache_keys_include_complete_rust_identity() {
+    local workflow key lines
+    for workflow in "$(_swift_workflow)" "$(_build_ffi_workflow)"; do
+        assert_file_contains "$workflow" 'id: toolchain' 'Rust setup exports its identity'
+        assert_file_contains "$workflow" 'rustc +stable --version --verbose > "$rustc_version_file"' 'capture complete compiler identity'
+        assert_file_contains "$workflow" 'shasum -a 256 "$rustc_version_file"' 'hash every verbose identity field'
+        lines="$(awk '/^[[:space:]]*key:/ { print } /^[[:space:]]*restore-keys:/ { fallback=1; next } fallback && /[^[:space:]]/ { if ($0 ~ /^[[:space:]]+\$\{\{/) print; else fallback=0 }' "$workflow")"
+        while IFS= read -r key; do
+            printf '%s\n' "$key" > "$SCRATCH/rust-key.txt"
+            assert_file_contains "$SCRATCH/rust-key.txt" '${{ steps.toolchain.outputs.cachekey }}' 'all compiled keys and fallbacks constrain Rust'
+        done <<< "$lines"
+    done
+    assert_file_contains "$(_build_ffi_workflow)" 'cargo-release-all-slices-lto-v2-${{ steps.toolchain.outputs.cachekey }}-' 'release Cargo namespace isolates all slices and LTO'
+}
+
+test_ci_cache_rust_identity_changes_for_verbose_fields() {
+    local workflow script dir first second expected
+    dir="$(mktemp -d "$SCRATCH/rust-identity.XXXXXX")"
+    printf '#!/bin/sh\nexit 0\n' > "$dir/rustup"
+    printf '#!/bin/sh\ncat "$RUST_IDENTITY_FILE"\n' > "$dir/rustc"
+    chmod +x "$dir/rustup" "$dir/rustc"
+    for workflow in "$(_swift_workflow)" "$(_build_ffi_workflow)"; do
+        script="$dir/setup.sh"
+        awk '/id: toolchain/ { active=1; next } active && /run: \|/ { body=1; next } active && body { if ($0 ~ /^[[:space:]]*(- name:|#|$)/) exit; print }' "$workflow" > "$script"
+        printf 'rustc fixture\ncommit-hash: abcdef012345\ncommit-date: 2026-10-24\nhost: aarch64-apple-darwin\nLLVM version: 22\n' > "$dir/identity"
+        : > "$dir/output"
+        PATH="$dir:$PATH" RUST_IDENTITY_FILE="$dir/identity" GITHUB_ENV="$dir/env" GITHUB_OUTPUT="$dir/output" bash "$script" > /dev/null
+        first="$(sed -n 's/^cachekey=//p' "$dir/output")"
+        expected="$(shasum -a 256 "$dir/identity" | cut -d' ' -f1)"
+        assert_eq "$expected" "$first" 'cache identity hashes the full rustc output'
+        printf 'LLVM version: 23\n' >> "$dir/identity"
+        : > "$dir/output"
+        PATH="$dir:$PATH" RUST_IDENTITY_FILE="$dir/identity" GITHUB_ENV="$dir/env" GITHUB_OUTPUT="$dir/output" bash "$script" > /dev/null
+        second="$(sed -n 's/^cachekey=//p' "$dir/output")"
+        assert_succeeds 'a verbose identity field changes the cache key' test "$first" != "$second"
+    done
+}
+
+test_ci_cache_release_keeps_publication_and_targets() {
+    local workflow
+    workflow="$(_build_ffi_workflow)"
+    assert_file_contains "$workflow" 'target aarch64-apple-ios,x86_64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-darwin,aarch64-apple-darwin' 'release retains all five architecture targets'
+    assert_file_contains "$workflow" './Scripts/prepare-release.sh artifacts --force-overwrite-existing-release "$VERSION"' 'release force publication command is preserved'
+    assert_file_contains "$workflow" './Scripts/prepare-release.sh artifacts "$VERSION"' 'release publication command is preserved'
 }

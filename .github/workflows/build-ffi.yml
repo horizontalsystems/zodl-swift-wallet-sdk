@@ -41,13 +41,18 @@ jobs:
       # The settings are those of swift.yml's build job, with every target a
       # release builds.
       - name: Setup Rust
+        id: toolchain
         run: |
           rustup toolchain install stable --profile minimal --no-self-update \
             --target aarch64-apple-ios,x86_64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-darwin,aarch64-apple-darwin
           rustup default stable
           echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
           echo "CARGO_TERM_COLOR=always" >> "$GITHUB_ENV"
-          rustc +stable --version --verbose
+          rustc_version_file=$(mktemp)
+          trap 'rm -f "$rustc_version_file"' EXIT
+          rustc +stable --version --verbose > "$rustc_version_file"
+          cat "$rustc_version_file"
+          echo "cachekey=$(shasum -a 256 "$rustc_version_file" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Cache Cargo
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
@@ -70,9 +75,9 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/registry/src
-          key: ${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode-cache-key.outputs.hash }}-cargo-v1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode-cache-key.outputs.hash }}-cargo-release-all-slices-lto-v2-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode-cache-key.outputs.hash }}-cargo-v1-
+            ${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode-cache-key.outputs.hash }}-cargo-release-all-slices-lto-v2-${{ steps.toolchain.outputs.cachekey }}-
 
       - name: Build and upload draft release
         env:
