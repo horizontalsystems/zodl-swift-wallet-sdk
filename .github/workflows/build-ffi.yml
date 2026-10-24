@@ -8,10 +8,20 @@ on:
       version:
         description: 'SDK version (e.g., 2.5.0)'
         required: true
+      expected_source_sha:
+        description: 'Optional exact source commit expected by the caller'
+        required: false
+        type: string
+      request_id:
+        description: 'Optional release request correlation (32 lowercase hex characters)'
+        required: false
+        type: string
       force:
         description: 'Replace the assets of an existing release'
         type: boolean
         default: false
+
+run-name: Build FFI ${{ inputs.version }} ${{ inputs.request_id }}
 
 permissions: {}
 
@@ -84,6 +94,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ github.event.inputs.version }}
           FORCE: ${{ github.event.inputs.force }}
+          ZODL_SDK_BUILD_RECORD: '1'
+          ZODL_SDK_EXPECTED_SOURCE: ${{ inputs.expected_source_sha }}
+          ZODL_SDK_REQUEST_ID: ${{ inputs.request_id }}
         run: |
           if [ "$FORCE" = "true" ]; then
             ./Scripts/prepare-release.sh artifacts --force-overwrite-existing-release "$VERSION"

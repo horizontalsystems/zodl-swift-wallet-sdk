@@ -111,3 +111,8 @@ test_artifacts_help_restricts_overwrite_to_drafts() {
         sh -c "'$REPO_ROOT/Scripts/prepare-release.sh' artifacts --help |
                grep -A1 -- --force-overwrite-existing-release | grep -q DRAFT"
 }
+
+test_native_sdk_build_record_suite() {
+    assert_succeeds "native artifacts source and build evidence" \
+        python3 -m unittest discover -s "$REPO_ROOT/Scripts/tests" -p test_sdk_build_record.py
+}
