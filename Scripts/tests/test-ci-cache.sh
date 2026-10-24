@@ -162,3 +162,25 @@ test_locked_manifest_drift() {
             cargo metadata --offline ${flags:+"$flags"} --format-version 1 --manifest-path "$repo/Cargo.toml"
     done
 }
+
+# Archive the workflow's actual path list in a populated fixture. A widened
+# path would include sibling build products, test output or credentials.
+test_swift_dependency_archive_excludes_products_and_credentials() {
+    local fixture step paths item
+    fixture="$(mktemp -d "$SCRATCH/swift-dependencies.XXXXXX")"
+    for item in .build/repositories/repo.git/HEAD .build/checkouts/package/Package.swift \
+        .build/artifacts/library/library.zip .build/arm64-apple-macosx/debug/SDK.o \
+        .build/debug/test-results .build/workspace-state.json .build/artifacts-old/compiled \
+        LocalPackages/library.a .git-credentials .gitconfig; do
+        mkdir -p "$fixture/$(dirname "$item")"
+        printf 'fixture\n' > "$fixture/$item"
+    done
+    for step in 'Restore SwiftPM dependencies' 'Save SwiftPM dependencies'; do
+        paths="$SCRATCH/swift-dependency-paths.txt"
+        _swift_dependency_paths "$step" > "$paths"
+        assert_succeeds "$step has dependency paths to archive" test -s "$paths"
+        tar -cf "$SCRATCH/swift-dependencies.tar" -C "$fixture" -T "$paths"
+        tar -tf "$SCRATCH/swift-dependencies.tar" | sed '/\/$/d' | sort > "$SCRATCH/swift-archive.txt"
+        assert_eq "$(printf '.build/artifacts/library/library.zip\n.build/checkouts/package/Package.swift\n.build/repositories/repo.git/HEAD')" "$(cat "$SCRATCH/swift-archive.txt")" "$step archives only dependency content, excluding compiled output tests and credentials"
+    done
+}

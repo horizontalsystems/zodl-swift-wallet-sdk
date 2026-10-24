@@ -211,7 +211,7 @@ _assert_default_xcode_cache_identity() {
             if (RSTART > restore_indent) { print; next }
             in_restore = 0
         }
-    ' "$workflow" > "$keys"
+    ' "$workflow" | grep -E 'cargo-|ffi-xcframework-' > "$keys"
     assert_succeeds "compiled cache keys exist" test -s "$keys"
     while IFS= read -r key; do
         printf '%s\n' "$key" > "$SCRATCH/cache-key.txt"
@@ -314,7 +314,7 @@ test_ci_cache_keys_include_complete_rust_identity() {
         assert_file_contains "$workflow" 'id: toolchain' 'Rust setup exports its identity'
         assert_file_contains "$workflow" 'rustc +stable --version --verbose > "$rustc_version_file"' 'capture complete compiler identity'
         assert_file_contains "$workflow" 'shasum -a 256 "$rustc_version_file"' 'hash every verbose identity field'
-        lines="$(awk '/^[[:space:]]*key:/ { print } /^[[:space:]]*restore-keys:/ { fallback=1; next } fallback && /[^[:space:]]/ { if ($0 ~ /^[[:space:]]+\$\{\{/) print; else fallback=0 }' "$workflow")"
+        lines="$(awk '/^[[:space:]]*key:/ { print } /^[[:space:]]*restore-keys:/ { fallback=1; next } fallback && /[^[:space:]]/ { if ($0 ~ /^[[:space:]]+\$\{\{/) print; else fallback=0 }' "$workflow" | grep -E 'cargo-|ffi-xcframework-')"
         while IFS= read -r key; do
             printf '%s\n' "$key" > "$SCRATCH/rust-key.txt"
             assert_file_contains "$SCRATCH/rust-key.txt" '${{ steps.toolchain.outputs.cachekey }}' 'all compiled keys and fallbacks constrain Rust'
@@ -352,4 +352,116 @@ test_ci_cache_release_keeps_publication_and_targets() {
     assert_file_contains "$workflow" 'target aarch64-apple-ios,x86_64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-darwin,aarch64-apple-darwin' 'release retains all five architecture targets'
     assert_file_contains "$workflow" './Scripts/prepare-release.sh artifacts --force-overwrite-existing-release "$VERSION"' 'release force publication command is preserved'
     assert_file_contains "$workflow" './Scripts/prepare-release.sh artifacts "$VERSION"' 'release publication command is preserved'
+}
+
+# Evaluate only the explicitly supported workflow contract; an unknown
+# expression fails rather than silently using this fixture's implementation.
+_sdk_concurrency_group() {
+    local group event="$1" pr="$2" run="$3" workflow="$4" identity
+    group="$(sed -n 's/^  group: //p' "$(_swift_workflow)")"
+    case "$event" in
+        pull_request) identity="pr-$pr" ;;
+        *) identity="run-$run" ;;
+    esac
+    group="${group//'${{ github.workflow }}'/$workflow}"
+    group="${group//'${{ github.event_name == '\''pull_request'\'' && format('\''pr-{0}'\'', github.event.pull_request.number) || format('\''run-{0}'\'', github.run_id) }}'/$identity}"
+    printf '%s\n' "$group"
+}
+
+test_sdk_concurrency_is_pr_scoped() {
+    local f; f="$(_swift_workflow)"
+    assert_file_contains "$f" 'concurrency:' 'workflow defines cancellation scope'
+    assert_file_contains "$f" '  group: ${{ github.workflow }}-${{ github.event_name == '\''pull_request'\'' && format('\''pr-{0}'\'', github.event.pull_request.number) || format('\''run-{0}'\'', github.run_id) }}' 'group scopes PRs by number and other events by run identity'
+    assert_file_contains "$f" '  cancel-in-progress: ${{ github.event_name == '\''pull_request'\'' }}' 'only PR events cancel earlier runs'
+    assert_eq 'Build-pr-1' "$(_sdk_concurrency_group pull_request 1 101 Build)" 'PR 1 uses its own group'
+    assert_eq 'Build-pr-1' "$(_sdk_concurrency_group pull_request 1 102 Build)" 'a newer PR 1 run shares its group'
+    assert_eq 'Build-pr-2' "$(_sdk_concurrency_group pull_request 2 103 Build)" 'PR 2 does not cancel PR 1'
+    assert_eq 'Build-run-1' "$(_sdk_concurrency_group push 0 1 Build)" 'a main push cannot collide with PR 1'
+    assert_eq 'Build-run-2' "$(_sdk_concurrency_group push 0 2 Build)" 'two main pushes have independent groups'
+    assert_eq 'Release-run-1' "$(_sdk_concurrency_group workflow_dispatch 0 1 Release)" 'a release workflow cannot share the build group'
+}
+
+_swift_dependency_paths() {
+    _step_block "$1" | awk '
+        /^        path: \|$/ { paths = 1; next }
+        paths && /^          / { sub(/^          /, ""); print; next }
+        paths { exit }
+    '
+}
+
+test_swift_dependency_cache_paths_are_explicit() {
+    local step paths expected
+    expected="$(printf '.build/repositories\n.build/checkouts\n.build/artifacts')"
+    for step in 'Restore SwiftPM dependencies' 'Save SwiftPM dependencies'; do
+        paths="$(_swift_dependency_paths "$step")"
+        assert_eq "$expected" "$paths" "$step caches only downloaded dependency directories"
+        _step_block "$step" > "$SCRATCH/swift-cache-step.txt"
+        assert_file_contains "$SCRATCH/swift-cache-step.txt" 'continue-on-error: true' "$step failures do not block normal builds"
+    done
+    _step_block 'Restore SwiftPM dependencies' > "$SCRATCH/swift-restore.txt"
+    assert_file_contains "$SCRATCH/swift-restore.txt" 'actions/cache/restore@cdf6c1fa76f9f475f3d7449005a359c84ca0f306' 'restore uses the existing pinned action revision'
+    assert_file_contains "$SCRATCH/swift-restore.txt" 'if: steps.swift-cache-key.outcome == '\''success'\''' 'a failed identity cannot restore a broad empty key'
+    _step_block 'Save SwiftPM dependencies' > "$SCRATCH/swift-save.txt"
+    assert_file_contains "$SCRATCH/swift-save.txt" 'actions/cache/save@cdf6c1fa76f9f475f3d7449005a359c84ca0f306' 'save uses the existing pinned action revision'
+}
+
+test_swift_dependency_keys_constrain_toolchain_and_manifests() {
+    local step prefix
+    _step_block 'Restore SwiftPM dependencies' > "$SCRATCH/swift-restore.txt"
+    prefix='${{ runner.os }}-${{ runner.arch }}-swiftpm-dependencies-v1-${{ steps.xcode-cache-key.outputs.hash }}-${{ steps.swift-cache-key.outputs.hash }}-'
+    assert_file_contains "$SCRATCH/swift-restore.txt" "key: $prefix" 'primary key scopes OS architecture Xcode and Swift'
+    assert_file_contains "$SCRATCH/swift-restore.txt" 'hashFiles('\''Package.swift'\'', '\''Package.resolved'\'', '\''BuildSupport/LocalPackages-Package.swift'\'', '\''LocalPackages/Package.swift'\'')' 'primary key includes root and local FFI manifests and resolution lockfile'
+    assert_eq "          $prefix" "$(awk '/restore-keys:/ { getline; print }' "$SCRATCH/swift-restore.txt")" 'fallback retains all toolchain fields'
+    assert_eq '1' "$(awk '/restore-keys:/ { in_keys=1; next } in_keys && /^          / { n++; next } in_keys { in_keys=0 } END { print n+0 }' "$SCRATCH/swift-restore.txt")" 'no broader restore prefix is allowed'
+    _step_block 'Save SwiftPM dependencies' > "$SCRATCH/swift-save.txt"
+    assert_file_contains "$SCRATCH/swift-save.txt" 'key: ${{ steps.cache-swift.outputs.cache-primary-key }}' 'save reuses the exact lookup key even if resolution updates files'
+}
+
+test_swift_resolves_before_saving_dependencies() {
+    local configure restore resolve save build f
+    f="$(_swift_workflow)"
+    configure="$(grep -n 'run: make configure-local-ffi$' "$f" | cut -d: -f1)"
+    restore="$(grep -n 'name: Restore SwiftPM dependencies$' "$f" | cut -d: -f1)"
+    resolve="$(grep -n 'run: make resolve$' "$f" | cut -d: -f1)"
+    save="$(grep -n 'name: Save SwiftPM dependencies$' "$f" | cut -d: -f1)"
+    build="$(grep -n 'run: make build SWIFT_BUILD_FLAGS=-v$' "$f" | cut -d: -f1)"
+    assert_succeeds 'local FFI exists before dependency restore' test "${configure:-0}" -lt "${restore:-0}"
+    assert_succeeds 'restore occurs before resolution' test "${restore:-0}" -lt "${resolve:-0}"
+    assert_succeeds 'resolution occurs before save' test "${resolve:-0}" -lt "${save:-0}"
+    assert_succeeds 'dependency save occurs before compilation' test "${save:-0}" -gt 0
+    assert_succeeds 'dependency save occurs before compilation' test "${save:-0}" -lt "${build:-0}"
+    _step_block 'Resolve SwiftPM dependencies' > "$SCRATCH/swift-resolve.txt"
+    assert_file_contains "$SCRATCH/swift-resolve.txt" 'id: resolve-swift' 'resolution outcome is available for save gating'
+    assert_file_lacks "$SCRATCH/swift-resolve.txt" 'continue-on-error' 'dependency resolution failures remain build failures'
+    assert_eq '' "$(_step_condition 'Resolve SwiftPM dependencies')" 'resolution runs even on exact cache hits'
+    assert_eq "      if: steps.resolve-swift.outcome == 'success' && steps.cache-swift.outputs.cache-hit != 'true' && steps.swift-cache-key.outcome == 'success'" "$(_step_condition 'Save SwiftPM dependencies')" 'only successful resolution after a non-hit saves dependencies'
+}
+
+test_swift_build_and_tests_remain_unconditional() {
+    local step command
+    for step in 'Build ZODLSwiftWalletSDK Swift Package' 'Run OfflineTests suite' 'Run Rust unit tests'; do
+        assert_eq '' "$(_step_condition "$step")" "$step runs on cache hit and miss"
+    done
+    for command in 'make build SWIFT_BUILD_FLAGS=-v' 'make test-offline' 'make test-rust'; do
+        assert_file_contains "$(_swift_workflow)" "run: $command" "$command remains enabled"
+    done
+}
+
+test_swift_cache_identity_uses_actual_compiler_output() {
+    local dir script first second
+    dir="$(mktemp -d "$SCRATCH/swift-identity.XXXXXX")"
+    script="$dir/identity.sh"
+    _step_block 'Compute Swift cache identity' | awk '/run: \|/ { body=1; next } body { print }' > "$script"
+    printf '#!/bin/sh\n[ "$1" = --version ] || exit 1\ncat "$SWIFT_IDENTITY_FILE"\n' > "$dir/swift"
+    chmod +x "$dir/swift"
+    printf 'Apple Swift version 6.4\nTarget: arm64-apple-macosx27.0\n' > "$dir/identity"
+    : > "$dir/output"
+    PATH="$dir:$PATH" SWIFT_IDENTITY_FILE="$dir/identity" GITHUB_OUTPUT="$dir/output" bash -e -o pipefail "$script" > /dev/null
+    first="$(sed -n 's/^hash=//p' "$dir/output")"
+    assert_eq "$(shasum -a 256 "$dir/identity" | cut -d' ' -f1)" "$first" 'Swift identity hashes the complete actual compiler output'
+    printf 'Compiler build: 6.4.1\n' >> "$dir/identity"
+    : > "$dir/output"
+    PATH="$dir:$PATH" SWIFT_IDENTITY_FILE="$dir/identity" GITHUB_OUTPUT="$dir/output" bash -e -o pipefail "$script" > /dev/null
+    second="$(sed -n 's/^hash=//p' "$dir/output")"
+    assert_succeeds 'a compiler build change invalidates the Swift cache' test "$first" != "$second"
 }
