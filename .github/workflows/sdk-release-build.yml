@@ -1,0 +1,112 @@
+name: Build SDK release artifact
+run-name: SDK binary ${{ inputs.request_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact public source commit (40 lowercase hex)
+        required: true
+        type: string
+      release_version:
+        description: Canonical SDK release version
+        required: true
+        type: string
+      mode:
+        description: Immutable existing tag or prepared candidate source
+        required: true
+        type: choice
+        options: [existing-tag, source-and-binary]
+      request_id:
+        description: Unique request UUID (32 lowercase hex)
+        required: true
+        type: string
+      expected_workflow_sha:
+        description: Expected immutable workflow commit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.repository == 'zodl-inc/zodl-swift-wallet-sdk'
+    runs-on: xcode-27
+    timeout-minutes: 180
+    steps:
+      - name: Checkout workflow tooling
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: tooling
+          persist-credentials: false
+
+      - name: Check expected workflow identity
+        env:
+          EXPECTED_WORKFLOW_SHA: ${{ inputs.expected_workflow_sha }}
+        run: test "$EXPECTED_WORKFLOW_SHA" = "$GITHUB_WORKFLOW_SHA"
+
+      # Never execute a runner script taken from the selected historical source.
+      - name: Checkout selected public source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+
+      - name: Report Xcode and compute cache identity
+        id: xcode-cache-key
+        run: |
+          xcode_version_file=$(mktemp)
+          trap 'rm -f "$xcode_version_file"' EXIT
+          xcodebuild -version -skipMacroValidation -derivedDataPath "${RUNNER_TEMP}/DerivedData" > "$xcode_version_file"
+          cat "$xcode_version_file"
+          echo "hash=$(shasum -a 256 "$xcode_version_file" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Rust
+        id: toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update \
+            --target aarch64-apple-ios,x86_64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-darwin,aarch64-apple-darwin
+          rustup default stable
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+          echo "CARGO_TERM_COLOR=always" >> "$GITHUB_ENV"
+          rustc_version_file=$(mktemp)
+          trap 'rm -f "$rustc_version_file"' EXIT
+          rustc +stable --version --verbose > "$rustc_version_file"
+          cat "$rustc_version_file"
+          echo "cachekey=$(shasum -a 256 "$rustc_version_file" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      # Preserve the release build/compiler namespace used by the native build.
+      # Only registry dependencies and compiled target products are restored.
+      - name: Cache Cargo
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: |
+            source/target
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode-cache-key.outputs.hash }}-cargo-release-all-slices-lto-v2-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('source/Cargo.lock', 'source/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode-cache-key.outputs.hash }}-cargo-release-all-slices-lto-v2-${{ steps.toolchain.outputs.cachekey }}-
+
+      - name: Build and verify complete SDK bundle
+        timeout-minutes: 150
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          MODE: ${{ inputs.mode }}
+          REQUEST_ID: ${{ inputs.request_id }}
+          EXPECTED_WORKFLOW_SHA: ${{ inputs.expected_workflow_sha }}
+        run: ./tooling/Scripts/ci/build-sdk-release.py "$GITHUB_WORKSPACE/source" "$RUNNER_TEMP/sdk-release-bundle"
+
+      - name: Upload verified bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sdk-release-${{ inputs.request_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sdk-release-bundle/
+          if-no-files-found: error
+          retention-days: 14
