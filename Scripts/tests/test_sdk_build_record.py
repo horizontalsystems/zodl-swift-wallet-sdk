@@ -342,5 +342,28 @@ class NativeRecordTests(unittest.TestCase):
         for path in (".github/workflows/sdk-release-build.yml", "Scripts/ci/build-sdk-release.py", "Scripts/ci/sdk_release_build.py"):
             self.assertFalse((ROOT / path).exists(), path)
 
+class WorkflowRefTests(unittest.TestCase):
+    def test_actions_refs_follow_git_rules_including_build_metadata(self):
+        import importlib.util
+        from unittest.mock import patch
+        spec = importlib.util.spec_from_file_location('native_ref_record', ROOT / 'Scripts/ci/sdk_build_record.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        repository = 'zodl-inc/zodl-swift-wallet-sdk-private'
+        prefix = repository + '/.github/workflows/build-ffi.yml@'
+        environment = dict(GITHUB_ACTIONS='true', GITHUB_REPOSITORY=repository, GITHUB_SHA='a' * 40,
+                           GITHUB_WORKFLOW_SHA='a' * 40, GITHUB_RUN_ID='12', GITHUB_RUN_ATTEMPT='1',
+                           ZODL_SDK_REQUEST_ID='c' * 32)
+        for ref in ('refs/heads/candidate/6.1.0+build.1', 'refs/tags/6.1.0+build.1',
+                    'refs/heads/valid-@-é'):
+            with self.subTest(ref=ref), patch.dict(os.environ, dict(environment, GITHUB_WORKFLOW_REF=prefix + ref)):
+                self.assertEqual(module.execution_identity(repository, 'a' * 40)['workflow']['ref'], prefix + ref)
+        for ref in ('--help', 'refs/pull/12/head', 'refs/heads/a..b', 'refs/tags/x.lock',
+                    'refs/heads/a b', 'refs/tags/x\ny', 'refs/heads/.hidden', 'refs/tags/x@{1}', 'refs/heads/a//b'):
+            with self.subTest(ref=ref), patch.dict(os.environ, dict(environment, GITHUB_WORKFLOW_REF=prefix + ref)):
+                with self.assertRaises(module.BuildError):
+                    module.execution_identity(repository, 'a' * 40)
+
+
 if __name__ == "__main__":
     unittest.main()

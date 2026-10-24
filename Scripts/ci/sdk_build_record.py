@@ -182,8 +182,8 @@ def execution_identity(repository: str, source_commit: str) -> dict:
     ref = os.environ.get("GITHUB_WORKFLOW_REF", "")
     prefix = repository + "/" + WORKFLOW_PATH + "@"
     selected = ref[len(prefix):] if ref.startswith(prefix) else ""
-    if not re.fullmatch(r"refs/(?:heads|tags)/[A-Za-z0-9_./-]+", selected) or any(
-            part in selected for part in ("..", "//", "/.", ".lock/")) or selected.endswith(("/", ".", ".lock")):
+    if not selected.startswith(("refs/heads/", "refs/tags/")) or subprocess.run(
+            ["git", "check-ref-format", selected], capture_output=True).returncode:
         raise BuildError("invalid Actions workflow reference")
     sha = os.environ.get("GITHUB_WORKFLOW_SHA", "")
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
