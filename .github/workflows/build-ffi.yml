@@ -28,8 +28,14 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_27.0.app
+      - name: Report Xcode and compute cache identity
+        id: xcode-cache-key
+        run: |
+          xcode_version_file=$(mktemp)
+          trap 'rm -f "$xcode_version_file"' EXIT
+          xcodebuild -version -skipMacroValidation -derivedDataPath "${RUNNER_TEMP}/DerivedData" > "$xcode_version_file"
+          cat "$xcode_version_file"
+          echo "hash=$(shasum -a 256 "$xcode_version_file" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       # The runner image already ships rustup, so no toolchain action is needed.
       # The settings are those of swift.yml's build job, with every target a
@@ -64,9 +70,9 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/registry/src
-          key: ${{ runner.os }}-cargo-v1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode-cache-key.outputs.hash }}-cargo-v1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-v1-
+            ${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode-cache-key.outputs.hash }}-cargo-v1-
 
       - name: Build and upload draft release
         env:

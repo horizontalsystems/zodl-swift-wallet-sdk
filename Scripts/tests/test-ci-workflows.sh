@@ -185,14 +185,47 @@ test_no_workflow_selects_xcode_16() {
     assert_eq "" "$(grep -rl 'Xcode_16' "$REPO_ROOT/.github/workflows")" "no workflow selects Xcode 16"
 }
 
+# These workflows use the image-selected Xcode and isolate compiled caches by
+# its complete version/build output, as well as the runner architecture.
+_assert_default_xcode_cache_identity() {
+    local workflow="$1"
+    assert_file_lacks "$workflow" "xcode-select" "the image chooses Xcode"
+    assert_file_lacks "$workflow" "/Applications/Xcode_" "no version-numbered Xcode path is pinned"
+    assert_file_contains "$workflow" "id: xcode-cache-key" "the Xcode identity has a step output"
+    assert_file_contains "$workflow" 'xcodebuild -version -skipMacroValidation -derivedDataPath "${RUNNER_TEMP}/DerivedData"' \
+        "the default Xcode reports its version with isolated build data"
+    assert_file_contains "$workflow" 'shasum -a 256 "$xcode_version_file"' "the hash uses the complete captured output"
+    local keys="$SCRATCH/compiled-cache-keys.txt"
+    awk '
+        /^[[:space:]]*key:/ { print }
+        /^[[:space:]]*restore-keys:/ {
+            match($0, /[^[:space:]]/)
+            restore_indent = RSTART
+            in_restore = 1
+            next
+        }
+        in_restore && /[^[:space:]]/ {
+            match($0, /[^[:space:]]/)
+            if (RSTART > restore_indent) { print; next }
+            in_restore = 0
+        }
+    ' "$workflow" > "$keys"
+    assert_succeeds "compiled cache keys exist" test -s "$keys"
+    while IFS= read -r key; do
+        printf '%s\n' "$key" > "$SCRATCH/cache-key.txt"
+        assert_file_contains "$SCRATCH/cache-key.txt" '${{ runner.arch }}' "every compiled cache key or restore prefix includes architecture"
+        assert_file_contains "$SCRATCH/cache-key.txt" '${{ steps.xcode-cache-key.outputs.hash }}' "every compiled cache key or restore prefix includes Xcode identity"
+    done < "$keys"
+}
+
 test_swift_workflow_runs_on_xcode_27() {
     assert_file_contains "$(_swift_workflow)" "runs-on: xcode-27" "swift.yml builds on the xcode-27 image"
-    assert_file_contains "$(_swift_workflow)" "/Applications/Xcode_27.0.app" "swift.yml selects Xcode 27.0"
+    _assert_default_xcode_cache_identity "$(_swift_workflow)"
 }
 
 test_build_ffi_workflow_runs_on_xcode_27() {
     assert_file_contains "$(_build_ffi_workflow)" "runs-on: xcode-27" "build-ffi.yml builds on the xcode-27 image"
-    assert_file_contains "$(_build_ffi_workflow)" "/Applications/Xcode_27.0.app" "build-ffi.yml selects Xcode 27.0"
+    _assert_default_xcode_cache_identity "$(_build_ffi_workflow)"
 }
 
 # Xcode 27 ships Swift 6.4, which CodeQL's Swift extractor cannot analyze yet.

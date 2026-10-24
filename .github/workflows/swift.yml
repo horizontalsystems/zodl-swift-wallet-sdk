@@ -71,8 +71,14 @@ jobs:
         persist-credentials: false
       timeout-minutes: 1
 
-    - name: Select Xcode version
-      run: sudo xcode-select -s '/Applications/Xcode_27.0.app/Contents/Developer'
+    - name: Report Xcode and compute cache identity
+      id: xcode-cache-key
+      run: |
+        xcode_version_file=$(mktemp)
+        trap 'rm -f "$xcode_version_file"' EXIT
+        xcodebuild -version -skipMacroValidation -derivedDataPath "${RUNNER_TEMP}/DerivedData" > "$xcode_version_file"
+        cat "$xcode_version_file"
+        echo "hash=$(shasum -a 256 "$xcode_version_file" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
     - name: Run release-script tests
       run: make test-scripts
@@ -95,7 +101,7 @@ jobs:
       uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
       with:
         path: BuildSupport/products/libzcashlc.xcframework
-        key: ffi-xcframework-macos-arm64-nolto-${{ runner.os }}-${{ steps.ffi-hash.outputs.hash }}
+        key: ffi-xcframework-macos-arm64-nolto-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode-cache-key.outputs.hash }}-${{ steps.ffi-hash.outputs.hash }}
 
     # Needed unconditionally: even on an FFI cache hit, the Rust test step below
     # compiles the crate's test profile and so needs the toolchain. Only the
@@ -144,9 +150,9 @@ jobs:
           ~/.cargo/registry/index
           ~/.cargo/registry/cache
           ~/.cargo/registry/src
-        key: ${{ runner.os }}-cargo-v2-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+        key: ${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode-cache-key.outputs.hash }}-cargo-v2-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
         restore-keys: |
-          ${{ runner.os }}-cargo-v2-${{ steps.toolchain.outputs.cachekey }}-
+          ${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode-cache-key.outputs.hash }}-cargo-v2-${{ steps.toolchain.outputs.cachekey }}-
 
     # Build the arm64 macOS slice without fat LTO (`make ffi-ci`), which is all
     # the Swift build and the offline tests need. Releases still build every
