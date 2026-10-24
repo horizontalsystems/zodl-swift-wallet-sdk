@@ -146,7 +146,7 @@ test-all: ## Run the whole test suite, including networked tests
 # they are not reached by any `swift test` filter and need their own target.
 .PHONY: test-rust
 test-rust: ## Run the Rust unit tests
-	cargo test
+	cargo test --locked
 
 .PHONY: format-rust
 format-rust: ## Format the Rust sources with rustfmt
