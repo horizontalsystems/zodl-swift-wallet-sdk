@@ -297,7 +297,8 @@ if sys.argv[1:] == ["--version"]:
         self.assertTrue((self.products / "release.env").is_file())
 
     def test_make_swift_identity_target_is_quiet_and_read_only(self):
-        environment = dict(os.environ, **self.swift_fixtures(), SWIFT=str(self.tools / "environment-swift"))
+        environment = {key: value for key, value in os.environ.items() if key not in ("MAKEFLAGS", "MFLAGS", "MAKELEVEL")}
+        environment.update(self.swift_fixtures(), SWIFT=str(self.tools / "environment-swift"))
         before = self.source_snapshot()
         result = subprocess.run(["/usr/bin/make", "--no-print-directory", "print-swift-version"],
                                 cwd=self.source, env=environment, text=True, capture_output=True)
