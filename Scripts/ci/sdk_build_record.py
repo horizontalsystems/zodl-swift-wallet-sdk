@@ -224,7 +224,7 @@ def finish_record(root: Path, archive: Path, context: dict, destination: Path) -
             if hashlib.sha256(bundle.read(item)).hexdigest() != sha256(expected[item.filename]):
                 raise BuildError("archive bytes differ from verified native product")
     toolchains = {
-        "swift": run(["swift", "--version"], root),
+        "swift": run(["make", "--no-print-directory", "print-swift-version"], root),
         "cargo": run(["cargo", "+stable", "--version", "--verbose"], root),
         "rustc": run(["rustc", "+stable", "--version", "--verbose"], root),
         "xcode": run(["xcodebuild", "-version", "-skipMacroValidation", "-derivedDataPath", str(root / "DerivedData")], root),

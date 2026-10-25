@@ -18,7 +18,7 @@ root = pathlib.Path.cwd()
 if name == "make":
     with open(os.environ["NATIVE_LOG"], "a") as log:
         log.write(json.dumps({"cwd": str(root), "argv": sys.argv}) + "\\n")
-    target = sys.argv[1]
+    target = sys.argv[-1]
     if os.environ.get("FAIL_TARGET") == target:
         print("native step failed", file=sys.stderr)
         sys.exit(9)
@@ -72,6 +72,10 @@ if name == "make":
         if os.environ.get("CHANGE_COMMIT"):
             subprocess = __import__("subprocess")
             subprocess.run(["git", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "changed"], check=True)
+    if os.environ.get("NATIVE_REAL_MAKE") and target in ("build", "test-offline", "print-swift-version"):
+        os.execv("/usr/bin/make", ["/usr/bin/make", *sys.argv[1:]])
+    if target == "print-swift-version":
+        print("swift fixture compiler identity\\ncomplete compiler/build details")
 elif name == "lipo":
     print(pathlib.Path(sys.argv[-1]).read_text())
 else:
@@ -117,7 +121,7 @@ class NativeRecordTests(unittest.TestCase):
             path = self.tools / tool
             path.write_text(GH_DOUBLE if tool == "gh" else NATIVE_DOUBLE)
             path.chmod(0o755)
-        for relative in ("Scripts/prepare-release.sh", "Scripts/release.sh", "Scripts/lib/release-lib.sh", "Scripts/ci/sdk_build_record.py"):
+        for relative in ("Makefile", "Scripts/prepare-release.sh", "Scripts/release.sh", "Scripts/lib/release-lib.sh", "Scripts/ci/sdk_build_record.py"):
             source = ROOT / relative
             if source.exists():
                 target = self.source / relative
@@ -146,7 +150,7 @@ class NativeRecordTests(unittest.TestCase):
         self.git("-c", "commit.gpgsign=false", "commit", "-qm", "fixture")
 
     def artifacts(self, *flags, record=True, expected_source=None, **env):
-        environment = {k: v for k, v in os.environ.items() if not k.startswith(("GITHUB_", "ZODL_SDK_")) and k != "GH_REPO"}
+        environment = {k: v for k, v in os.environ.items() if not k.startswith(("GITHUB_", "ZODL_SDK_")) and k not in ("GH_REPO", "SWIFT", "MAKEFLAGS", "MFLAGS", "MAKELEVEL")}
         environment.update(PATH=str(self.tools) + os.pathsep + environment["PATH"], NATIVE_LOG=str(self.log), GH_LOG=str(self.ghlog))
         if record:
             environment["ZODL_SDK_BUILD_RECORD"] = "1"
@@ -156,7 +160,32 @@ class NativeRecordTests(unittest.TestCase):
         return subprocess.run(["bash", "Scripts/prepare-release.sh", "artifacts", *flags, "5.0.0"], cwd=self.source, env=environment, text=True, capture_output=True)
 
     def make_calls(self):
+        return [args for args in self.all_make_calls() if args != ["--no-print-directory", "print-swift-version"]]
+
+    def all_make_calls(self):
         return [json.loads(line)["argv"][1:] for line in self.log.read_text().splitlines()] if self.log.exists() else []
+
+    def swift_fixtures(self):
+        self.swiftlog = self.root / "swift.jsonl"
+        for name in ("swift", "environment-swift", "assignment-swift"):
+            compiler = self.tools / name
+            compiler.write_text('''#!/usr/bin/env python3
+import json, os, pathlib, sys
+with open(os.environ["SWIFT_LOG"], "a") as log:
+    log.write(json.dumps([pathlib.Path(sys.argv[0]).name, *sys.argv[1:]]) + "\\n")
+if sys.argv[1:] == ["--version"]:
+    mode = os.environ.get("SWIFT_IDENTITY_MODE") if pathlib.Path(sys.argv[0]).name == "environment-swift" else None
+    if mode == "failure":
+        print("identity unavailable", file=sys.stderr)
+        sys.exit(7)
+    if mode != "empty":
+        print(pathlib.Path(sys.argv[0]).name + " compiler version\\ncomplete compiler/build details")
+''')
+            compiler.chmod(0o755)
+        return dict(NATIVE_REAL_MAKE="1", SWIFT_LOG=str(self.swiftlog))
+
+    def swift_calls(self):
+        return [json.loads(line) for line in self.swiftlog.read_text().splitlines()]
 
     def gh_calls(self):
         return [json.loads(line) for line in self.ghlog.read_text().splitlines()] if self.ghlog.exists() else []
@@ -265,6 +294,65 @@ class NativeRecordTests(unittest.TestCase):
         self.assertTrue(all(proof["toolchains"].values()))
         self.assertFalse((self.source / "LocalPackages").exists())
         self.assertTrue(any(c[:2] == ["release", "upload"] and any("sdk-build-record.json" in a for a in c) for c in self.gh_calls()))
+        self.assertTrue((self.products / "release.env").is_file())
+
+    def test_make_swift_identity_target_is_quiet_and_read_only(self):
+        environment = dict(os.environ, **self.swift_fixtures(), SWIFT=str(self.tools / "environment-swift"))
+        before = self.source_snapshot()
+        result = subprocess.run(["/usr/bin/make", "--no-print-directory", "print-swift-version"],
+                                cwd=self.source, env=environment, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "environment-swift compiler version\ncomplete compiler/build details\n")
+        self.assertEqual(self.source_snapshot(), before)
+        self.assertEqual(self.swift_calls(), [["environment-swift", "--version"]])
+
+    def assert_selected_swift(self, selected, **environment):
+        result = self.artifacts(**self.swift_fixtures(), **environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.swift_calls()[:2], [[selected, "build"], [selected, "test", "--filter", "OfflineTests"]])
+        self.assertEqual(self.record()["toolchains"]["swift"], selected + " compiler version\ncomplete compiler/build details")
+        self.assertEqual(self.swift_calls(), [[selected, "build"], [selected, "test", "--filter", "OfflineTests"], [selected, "--version"]])
+        self.assertEqual(self.make_calls(), [[target] for target in TARGETS])
+        self.assertEqual(self.all_make_calls(), [[target] for target in TARGETS] + [["--no-print-directory", "print-swift-version"]])
+        self.assertEqual(self.record()["commands"], [["make", target] for target in TARGETS])
+
+    def test_record_uses_default_make_swift(self):
+        self.assert_selected_swift("swift")
+
+    def test_record_uses_environment_selected_make_swift(self):
+        self.assert_selected_swift("environment-swift", SWIFT=str(self.tools / "environment-swift"))
+
+    def test_record_uses_make_assignment_over_conflicting_environment_swift(self):
+        self.assert_selected_swift("assignment-swift", SWIFT=str(self.tools / "environment-swift"),
+                                   MAKEFLAGS="SWIFT=" + str(self.tools / "assignment-swift"))
+
+    def test_bad_make_swift_identity_stops_before_create_or_draft_overwrite(self):
+        environment = self.swift_fixtures()
+        for mode in ("failure", "empty"):
+            for existing in (False, True):
+                with self.subTest(mode=mode, existing=existing):
+                    self.log.unlink(missing_ok=True)
+                    self.ghlog.unlink(missing_ok=True)
+                    self.swiftlog.unlink(missing_ok=True)
+                    flags = ["--force-overwrite-existing-release"] if existing else []
+                    result = self.artifacts(*flags, **environment, SWIFT=str(self.tools / "environment-swift"),
+                                            SWIFT_IDENTITY_MODE=mode, RELEASE_EXISTS="1" if existing else "")
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("command failed: make" if mode == "failure" else "missing compiler identity", result.stderr)
+                    self.assertEqual(self.make_calls(), [[target] for target in TARGETS])
+                    self.assertEqual(self.swift_calls(), [["environment-swift", "build"], ["environment-swift", "test", "--filter", "OfflineTests"], ["environment-swift", "--version"]])
+                    self.assertTrue((self.products / "libzcashlc.xcframework.zip").is_file())
+                    self.assertFalse((self.products / "sdk-build-record.json").exists())
+                    self.assertFalse((self.products / "release.env").exists())
+                    self.assert_no_release_write()
+
+    def test_record_disabled_keeps_native_make_build_without_identity_query(self):
+        result = self.artifacts(record=False, **self.swift_fixtures(),
+                                SWIFT=str(self.tools / "environment-swift"), SWIFT_IDENTITY_MODE="failure")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.swift_calls(), [["environment-swift", "build"], ["environment-swift", "test", "--filter", "OfflineTests"]])
+        self.assertEqual(self.all_make_calls(), [[target] for target in TARGETS])
+        self.assertFalse((self.products / "sdk-build-record.json").exists())
         self.assertTrue((self.products / "release.env").is_file())
 
     def test_mutation_after_every_native_stage_stops_before_upload(self):
