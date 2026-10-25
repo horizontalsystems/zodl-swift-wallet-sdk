@@ -49,6 +49,12 @@ def canonical_version(value: str) -> str:
     return value
 
 
+def requested_version(value: str) -> str:
+    if isinstance(value, str) and "+" in value:
+        raise BuildError("unsupported build metadata in requested SDK release version")
+    return canonical_version(value)
+
+
 def read_plist(path: Path) -> dict:
     try:
         value = plistlib.loads(path.read_bytes())
@@ -246,9 +252,11 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     root = Path.cwd()
     try:
+        if args.version is not None:
+            requested_version(args.version)
         if args.operation == "begin":
+            version = requested_version(args.version)
             identity = capture_source(root, os.environ.get("ZODL_SDK_EXPECTED_SOURCE") or None)
-            version = canonical_version(args.version)
             repository = os.environ.get("GH_REPO", "")
             if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
                 raise BuildError("invalid native build repository")
@@ -259,6 +267,7 @@ def main(argv=None) -> int:
                            commands=[], execution=execution_identity(repository, identity["source_commit"]))
         else:
             context = json.loads(args.context.read_text())
+            requested_version(context["version"])
             check_source(root, context)
             if args.operation == "finish":
                 if args.archive is None or args.destination is None:

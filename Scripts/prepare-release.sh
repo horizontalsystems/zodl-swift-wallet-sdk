@@ -74,6 +74,9 @@ Arguments:
   <revision>  commit or branch holding the changes to release
               (default: current HEAD, which should be a maint/ branch)
 
+Build metadata (+suffix) is unsupported in requested release versions, including
+dry runs and resumed builds. Stable and prerelease versions are supported.
+
 Options:
   --issue <N>       release tracking issue; the PR body gets `Closes #N`.
                     Required: every pull request must reference an issue.
@@ -100,6 +103,9 @@ Phase two of a release, run after the draft pull request from
 Every step checks whether it has already run and skips if so, so re-running
 after a failure resumes rather than starting over. The five-architecture build
 is slow enough that this matters.
+
+Build metadata (+suffix) is unsupported in requested release versions, including
+dry runs and resumed builds. Stable and prerelease versions are supported.
 
 Options:
   --artifacts local  build the XCFramework on this machine (default)
@@ -139,6 +145,9 @@ Before uploading, it points Package.swift at the framework it just built via
 LocalPackages, builds the Swift package, and runs the OfflineTests suite. A
 mismatch across the FFI boundary compiles on both sides and fails only at link
 or run time, so this is the last point at which one can be caught cheaply.
+
+Build metadata (+suffix) is unsupported in requested release versions, including
+dry runs and resumed builds. Stable and prerelease versions are supported.
 
 Options:
   --force-overwrite-existing-release  replace the assets of an existing DRAFT
@@ -220,6 +229,7 @@ cmd_start() {
     fi
     remote="$1"
     version="${2#v}"
+    require_supported_release_version "$version"
     revision="${3:-HEAD}"
 
     if [ -z "$issue" ]; then
@@ -438,6 +448,8 @@ produce_artifacts() {
     local version="$1" force="$2" verify="$3"
     local manifest_version checksum download_url exists
 
+    require_supported_release_version "$version"
+
     : "${GH_REPO:=${GITHUB_REPOSITORY:-$DEFAULT_REPO}}"
     export GH_REPO
 
@@ -583,6 +595,7 @@ cmd_artifacts() {
         die "artifacts needs a version."
     fi
     version="${1#v}"
+    require_supported_release_version "$version"
 
     produce_artifacts "$version" "$force" "$verify"
 }
@@ -739,6 +752,7 @@ cmd_build() {
     fi
     remote="$1"
     version="${2#v}"
+    require_supported_release_version "$version"
     candidate_branch="candidate/${version}"
 
     step "Checking preconditions"

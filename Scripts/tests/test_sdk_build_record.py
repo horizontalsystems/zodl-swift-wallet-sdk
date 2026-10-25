@@ -117,7 +117,7 @@ class NativeRecordTests(unittest.TestCase):
             path = self.tools / tool
             path.write_text(GH_DOUBLE if tool == "gh" else NATIVE_DOUBLE)
             path.chmod(0o755)
-        for relative in ("Scripts/prepare-release.sh", "Scripts/lib/release-lib.sh", "Scripts/ci/sdk_build_record.py"):
+        for relative in ("Scripts/prepare-release.sh", "Scripts/release.sh", "Scripts/lib/release-lib.sh", "Scripts/ci/sdk_build_record.py"):
             source = ROOT / relative
             if source.exists():
                 target = self.source / relative
@@ -168,6 +168,78 @@ class NativeRecordTests(unittest.TestCase):
 
     def assert_no_release_write(self):
         self.assertFalse(any(c[:2] in (["release", "create"], ["release", "upload"], ["release", "edit"]) for c in self.gh_calls()))
+
+    def policy_environment(self):
+        environment = {k: v for k, v in os.environ.items() if not k.startswith(("GITHUB_", "ZODL_SDK_")) and k != "GH_REPO"}
+        environment.update(PATH=str(self.tools) + os.pathsep + environment["PATH"], NATIVE_LOG=str(self.log), GH_LOG=str(self.ghlog), GH_REPO="owner/sdk")
+        real_git = shutil.which("git")
+        sentinel = self.tools / "git"
+        sentinel.write_text("#!/bin/bash\nif [ \"$*\" = \"rev-parse --show-toplevel\" ]; then exec " + real_git + " \"$@\"; fi\nprintf '%s\\n' \"$*\" >> \"$GH_LOG\"\nexit 91\n")
+        sentinel.chmod(0o755)
+        return environment
+
+    def source_snapshot(self):
+        return {str(p.relative_to(self.source)): p.read_bytes() for p in self.source.rglob("*") if p.is_file()}
+
+    def test_metadata_requests_stop_before_operational_preflight(self):
+        environment = self.policy_environment()
+        self.products.mkdir(parents=True)
+        (self.products / "sdk-build-record.json").write_bytes(b"existing evidence\n")
+        (self.products / "release.env").write_bytes(b"existing completion\n")
+        before = self.source_snapshot()
+        commands = [
+            ["Scripts/prepare-release.sh", "start", "--issue", "1", "upstream"],
+            ["Scripts/prepare-release.sh", "build", "--artifacts", "local", "upstream"],
+            ["Scripts/prepare-release.sh", "build", "--artifacts", "ci", "upstream"],
+            ["Scripts/prepare-release.sh", "artifacts"],
+            ["Scripts/release.sh", "upstream"],
+        ]
+        for version in ("5.0.0+build.1", "5.0.0-rc.1+build.1"):
+            for command in commands:
+                for dry in ([], ["--dry-run"]):
+                    for evidence in ("0", "1"):
+                        with self.subTest(version=version, command=command, dry=dry, evidence=evidence):
+                            # release.sh requires options before the positionals.
+                            argv = ["bash", command[0], *dry, *command[1:], version] if command[0].endswith("/release.sh") else ["bash", *command, *dry, version]
+                            result = subprocess.run(argv, cwd=self.source, env=dict(environment, ZODL_SDK_BUILD_RECORD=evidence), text=True, capture_output=True)
+                            self.assertNotEqual(result.returncode, 0)
+                            self.assertIn("unsupported build metadata", result.stderr.lower())
+                            self.assertEqual(self.make_calls(), [])
+                            self.assertEqual(self.gh_calls(), [])
+                            self.assertEqual(self.source_snapshot(), before)
+
+    def test_record_explicit_metadata_request_precedes_context_reads(self):
+        environment = self.policy_environment()
+        for operation in ("begin", "check", "finish"):
+            with self.subTest(operation=operation):
+                result = subprocess.run(["python3", "Scripts/ci/sdk_build_record.py", operation, str(self.root / "missing.json"), "--version", "5.0.0+build.1"], cwd=self.source, env=environment, text=True, capture_output=True)
+                self.assertIn("unsupported build metadata", result.stderr.lower())
+                self.assertEqual(self.gh_calls(), [])
+
+    def test_record_metadata_requests_preserve_context_and_evidence(self):
+        environment = self.policy_environment()
+        context = self.root / "context.json"
+        destination = self.root / "record.json"
+        for version in ("5.0.0+build.1", "5.0.0-rc.1+build.1"):
+            for operation in ("begin", "check", "finish"):
+                for existing in (False, True):
+                    with self.subTest(version=version, operation=operation, existing=existing):
+                        context.unlink(missing_ok=True)
+                        if existing or operation != "begin":
+                            context.write_text(json.dumps(dict(version=version)) + "\n")
+                        destination.write_bytes(b"immutable existing evidence\n")
+                        before = context.read_bytes() if context.exists() else None
+                        result = subprocess.run(["python3", "Scripts/ci/sdk_build_record.py", operation, str(context), "--version", version, "--archive", str(self.root / "missing.zip"), "--destination", str(destination)], cwd=self.source, env=environment, text=True, capture_output=True)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn("unsupported build metadata", result.stderr.lower())
+                        self.assertEqual(context.read_bytes() if context.exists() else None, before)
+                        self.assertEqual(destination.read_bytes(), b"immutable existing evidence\n")
+                        self.assertEqual(self.gh_calls(), [])
+                        if operation != "begin":
+                            # Resume must validate the saved version even without --version.
+                            resumed = subprocess.run(["python3", "Scripts/ci/sdk_build_record.py", operation, str(context)], cwd=self.source, env=environment, text=True, capture_output=True)
+                            self.assertIn("unsupported build metadata", resumed.stderr.lower())
+                            self.assertEqual(context.read_bytes(), before)
 
     def test_expected_source_mismatch_stops_before_native_make(self):
         result = self.artifacts(expected_source="f" * 40)
@@ -341,6 +413,20 @@ class NativeRecordTests(unittest.TestCase):
     def test_duplicate_producer_removed(self):
         for path in (".github/workflows/sdk-release-build.yml", "Scripts/ci/build-sdk-release.py", "Scripts/ci/sdk_release_build.py"):
             self.assertFalse((ROOT / path).exists(), path)
+
+class RequestVersionTests(unittest.TestCase):
+    def test_request_policy_preserves_historical_parsing_and_prereleases(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("request_record", ROOT / "Scripts/ci/sdk_build_record.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for version in ("5.0.0+build.1", "5.0.0-rc.1+build.1"):
+            self.assertEqual(module.canonical_version(version), version)
+            with self.assertRaisesRegex(module.BuildError, "unsupported build metadata"):
+                module.requested_version(version)
+        for version in ("5.0.0", "5.0.0-rc.1", "5.0.0-alpha", "5.0.0-alpha.7"):
+            self.assertEqual(module.requested_version(version), version)
+
 
 class WorkflowRefTests(unittest.TestCase):
     def test_actions_refs_follow_git_rules_including_build_metadata(self):
