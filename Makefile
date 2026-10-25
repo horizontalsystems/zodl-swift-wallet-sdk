@@ -70,6 +70,10 @@ info: ## Print the resolved toolchain and FFI state
 		if [ -d LocalPackages ]; then echo " present (local FFI in use)"; \
 		else echo " absent (Package.swift uses the released FFI)"; fi
 
+.PHONY: print-swift-version
+print-swift-version: ## Print the complete version of the selected Swift compiler
+	@$(SWIFT) --version
+
 # The FFI targets produce an Apple XCFramework, which only Xcode can do.
 .PHONY: require-macos
 require-macos:
