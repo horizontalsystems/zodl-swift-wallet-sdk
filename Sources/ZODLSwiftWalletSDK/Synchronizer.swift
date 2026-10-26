@@ -918,7 +918,7 @@ public protocol Synchronizer: AnyObject {
     // `submitNoteSplit` and the propose/sign/store family are pre-drive consent flows — a user
     // approving a plan that does not exist yet — so there is no instruction for them to carry.
     //
-    // Before the NU7 network upgrade has activated, that lane starts nothing: each member that
+    // While the wallet's tip plus one is below NU7 activation, that lane starts nothing: each member that
     // plans, builds, signs, stores or rebuilds a scheduled run (`prepareNoteSplit`,
     // `submitNoteSplit`, `proposeMigrationTransfers`, `signAndStoreMigrationSchedule`,
     // `refreshStaleMigrationTransfers`, and the PCZT create/store members) throws
@@ -933,8 +933,9 @@ public protocol Synchronizer: AnyObject {
     // it first against the block it would be mined in: the one after the higher of the wallet's
     // chain tip and the latest block height of the server it is going to (for `takeMigrationPreparation`,
     // the synchronizer's own). A transaction that is not built for that block's consensus branch,
-    // that has expired by it, or that falls in the blocks just before the upgrade is not recorded in
-    // the wallet and not submitted, and the member throws `ZcashError.migrationSubmissionRefused(_:)`.
+    // or that has expired by it is not recorded in the wallet and not submitted, and the member
+    // throws `ZcashError.migrationSubmissionRefused(_:)`. Valid committed work can continue before
+    // activation; the scheduling bypass never bypasses these branch, expiry or height checks.
 
     /// The migration engine's next step to advance `accountUUID`'s stored run, paired with its
     /// advisory outlook — a verbatim conduit of the engine's own `advance_migration`: the
@@ -1003,11 +1004,11 @@ public protocol Synchronizer: AnyObject {
     ///   migrate": whether a migratable balance remains is answered by
     ///   ``proposeMigrationTransfers(accountUUID:)`` (an empty schedule means no).
     /// - `.pausedForNetworkUpgrade` — the engine's step is one the NU7 network-upgrade gate holds
-    ///   back at the wallet's chain tip → do nothing now: no broadcast, proof, rebuild or re-plan,
+    ///   back at the wallet's chain tip plus one → do nothing now: no broadcast, proof, rebuild or re-plan,
     ///   and no retry loop. Show the run as paused for the upgrade, sync as usual, and call this
     ///   again as the chain tip advances. The step carries the activation height and no outlook.
-    /// - `.interruptedByNetworkUpgrade` — the upgrade has stranded the run: a transaction of it
-    ///   that is not mined was built for the branch before the activation, so no block can include
+    /// - `.interruptedByNetworkUpgrade` — the wallet's tip plus one has reached activation and
+    ///   an unmined transaction uses the old branch, so the next candidate block cannot include
     ///   it → cancel the run with ``cancelMigrationRun(accountUUID:)`` and offer a new migration.
     ///   The step carries the activation height and no outlook. Once the run is cancelled this
     ///   member answers `.complete` for it.
@@ -1128,10 +1129,10 @@ public protocol Synchronizer: AnyObject {
     /// against sync.
     ///
     /// The preparation is checked before the wallet records it: it must be built for the
-    /// consensus branch of the next block, must not have expired by it, and is not served in the
-    /// blocks just before the NU7 network upgrade. The next block is the one after the higher of
-    /// the wallet's chain tip and the latest block height of the synchronizer's own lightwalletd
-    /// server, which this call therefore reads, with one network request of its own. With Tor
+    /// consensus branch of the next block and must not have expired by it. Valid committed work
+    /// can continue before activation; these validity checks cannot be bypassed. The next block is
+    /// the one after the higher of the wallet's chain tip and the latest block height of the
+    /// synchronizer's own lightwalletd server, which this call therefore reads, with one network request of its own. With Tor
     /// enabled that request goes over a Tor group named after `txid`: never over the default
     /// circuit the sync uses, and shared with no other transaction. It is not necessarily the
     /// circuit the app submits the bytes over. Without Tor it is a direct request. A preparation
@@ -1474,10 +1475,10 @@ public protocol Synchronizer: AnyObject {
     ///
     /// The transaction is checked before the wallet records it. The next block is the one after
     /// the higher of the wallet's chain tip and the height the submission server reported, and the
-    /// transaction must be built for that block's consensus branch, must not have expired by it,
-    /// and is not submitted in the blocks just before the NU7 network upgrade. One that fails is
-    /// neither recorded in the wallet nor submitted. A server whose height cannot be read gets
-    /// nothing either: no transaction is taken, and the result is
+    /// transaction must be built for that block's consensus branch and must not have expired by it.
+    /// Valid committed work can continue before activation; these validity checks cannot be bypassed.
+    /// One that fails is neither recorded in the wallet nor submitted. A server whose height cannot
+    /// be read gets nothing either: no transaction is taken, and the result is
     /// ``MigrationTransferResult/networkError(retryable:)``, so the next crank offers the
     /// instruction again.
     ///
@@ -1596,9 +1597,11 @@ public protocol Synchronizer: AnyObject {
     /// This is how a host ends a run the NU7 network upgrade interrupted
     /// (``MigrationAdvanceStep/interruptedByNetworkUpgrade(activationHeight:)``): cancel it, then
     /// offer the user a new migration, which is built for the consensus branch the chain is on. The
-    /// run is persisted as cancelled and every note reservation its never-broadcast transactions
-    /// hold is released, so those notes are spendable again at once. Its pre-signed transactions are
-    /// abandoned; transactions already broadcast are unaffected on-chain and may still be mined.
+    /// run is persisted as cancelled and eligible advisory note reservations are released. Recorded
+    /// spends remain subject to the wallet's expiry and scan rules, even if network submission failed
+    /// or was never attempted. Its pre-signed transactions are abandoned; transactions already
+    /// broadcast are unaffected on-chain and may still be mined. Interruption does not mean every
+    /// transaction failed or every input becomes available at once.
     /// A plan proposed before the call can no longer be committed, and afterwards
     /// ``migrationAdvanceStep(accountUUID:)`` answers ``MigrationAdvanceStep/complete`` for the run:
     /// stop polling it.

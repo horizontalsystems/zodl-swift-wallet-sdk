@@ -460,7 +460,7 @@ fn upgrade_gate_closed_until(ctx: &CallCtx, bypass: bool) -> anyhow::Result<Opti
 ///
 /// A run spreads its transactions over many blocks, and every one of them is built for the
 /// consensus branch of the block it is built under, so one built before the activation is stranded
-/// by it. Hence nothing of the scheduled lane starts until the chain is past the activation. The
+/// by it. Hence new scheduled work waits until the wallet's tip plus one reaches activation. The
 /// entry points that open a wallet for such work call this right after [`open`], before they read
 /// or change anything, so a refusal leaves no run, no cached plan and no signature behind.
 ///
@@ -4641,12 +4641,13 @@ pub unsafe extern "C" fn zcashlc_migration_record_immediate_run(
     unwrap_exc_or(res, false)
 }
 
-/// Cancels the account's pending run through the store's own cancel: it releases every note
-/// reservation the run's never-broadcast transactions hold and records the terminal `Cancelled`
-/// status, in one store transaction. Hand-writing `Failed` (the pre-locking behavior) would leave
-/// those reservations standing. With no run pending it only repairs the reservations a terminal run
-/// still holds, so it succeeds. The restart ([`zcashlc_migration_restart_step`]) and the
-/// cancel-only entry point ([`zcashlc_migration_cancel_run`]) both end a run with this.
+/// Cancels the account's pending run through the store's own cancel: it releases eligible advisory
+/// note reservations and records the terminal `Cancelled` status in one store transaction. Recorded
+/// spends still follow the wallet's expiry and scan rules. Hand-writing `Failed` (the pre-locking
+/// behavior) would leave those advisory reservations standing. With no run pending it only repairs
+/// the advisory reservations a terminal run still holds, so it succeeds. The restart
+/// ([`zcashlc_migration_restart_step`]) and the cancel-only entry point
+/// ([`zcashlc_migration_cancel_run`]) both end a run with this.
 fn cancel_pending_run(ctx: &mut CallCtx) -> anyhow::Result<()> {
     let mut store = account_store(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
     store
@@ -4656,10 +4657,10 @@ fn cancel_pending_run(ctx: &mut CallCtx) -> anyhow::Result<()> {
 }
 
 /// Cancels the stored run through the engine's own cancel (persisting it as `Cancelled` and
-/// releasing every note reservation its never-broadcast transactions hold — its pre-signed
-/// transactions are abandoned; already-broadcast ones are unaffected on-chain) and, where the
-/// network-upgrade gate allows a scheduled run, previews a fresh plan against the live balance for
-/// the platform's re-confirm lane.
+/// releasing eligible advisory note reservations; recorded spends retain the wallet's expiry and
+/// scan restrictions). Its pre-signed transactions are abandoned; already-broadcast ones may still
+/// mine. Where the network-upgrade gate allows a scheduled run, it previews a fresh plan against
+/// the live balance for the platform's re-confirm lane.
 ///
 /// Cancelling is also what clears the attention state: a terminal run surfaces neither
 /// `AdvanceStep::Attend` (upstream `next_step` answers `Complete` for it) nor
@@ -4729,9 +4730,10 @@ pub unsafe extern "C" fn zcashlc_migration_restart_step(
 }
 
 /// Cancels the account's pending run and nothing more: the engine's own cancel persists it as
-/// `Cancelled` and releases every note reservation and advisory lock its never-broadcast
-/// transactions hold, so those notes are spendable again at once. The run's pre-signed
-/// transactions are abandoned; already-broadcast ones are unaffected on-chain and may still mine.
+/// `Cancelled` and releases eligible advisory note reservations. Recorded spends remain subject to
+/// the wallet's expiry and scan rules, even if network submission failed or was never attempted.
+/// The run's pre-signed transactions are abandoned; already-broadcast ones may still mine.
+/// Interruption does not mean every transaction failed or every input becomes available at once.
 /// The cached proposal is dropped, so a plan previewed before the cancel cannot be committed
 /// after it. Unlike [`zcashlc_migration_restart_step`], which cancels the same way, nothing is
 /// planned afterwards.

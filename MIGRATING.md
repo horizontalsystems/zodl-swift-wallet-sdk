@@ -1523,13 +1523,16 @@ are answered from the wallet's own chain tip, in front of the engine's step:
   re-plan before activation. Valid committed work may still be proved and broadcast up to activation.
   Do nothing now and ask again as the chain advances. Nothing is handed out to
   execute, and there is no outlook.
-- `.interruptedByNetworkUpgrade(activationHeight:)` — the wallet is past the activation and a transaction of
-  the run that is not mined was built for the branch before it, so the run cannot complete. Cancel the run
-  with `cancelMigrationRun(accountUUID:)` and offer the user a new migration.
+- `.interruptedByNetworkUpgrade(activationHeight:)` — the wallet's tip plus one has reached activation, so
+  the next candidate block uses the new branch, and an unmined transaction of the run uses the old branch.
+  The run cannot complete. Cancel it with `cancelMigrationRun(accountUUID:)` and offer a new migration.
+  Other transactions of the run may already have mined or may still mine; interruption does not make every
+  input available at once. Cancellation releases eligible advisory reservations, while recorded spends
+  retain the wallet's expiry and scan restrictions, even if submission failed or was never attempted.
 
-`.reevaluate` has a second meaning around the activation: the wallet's scan has not reached the last block
-before it, so it cannot yet tell a stranded run from a finished one. Sync and ask again, as for a rejected
-broadcast.
+`.reevaluate` has a second meaning once the next candidate block uses the new branch: when every unmined
+old-branch transaction may already have been submitted, the wallet must scan through the last preactivation
+block before declaring the run stranded. Sync and ask again, as for a rejected broadcast.
 
 ```swift
 // Before
@@ -1570,9 +1573,9 @@ scheduling bypass. `TransactionSubmissionRefusal` contains only `.wrongConsensus
 ## `restartCurrentMigrationStep` returns `MigrationRestartOutcome`
 
 `Synchronizer.restartCurrentMigrationStep(accountUUID:)` now returns a `MigrationRestartOutcome` in place of
-the `MigrationSchedule`. A restart always cancels the account's stored run. Before the NU7 network upgrade has
-activated it plans nothing after that, because a scheduled run planned now would be built for the consensus
-branch the upgrade ends, so it succeeds with `.cancelledUntilNetworkUpgrade(activationHeight:)` and the height
+the `MigrationSchedule`. A restart always cancels the account's stored run. While the wallet's tip plus one is
+below NU7 activation it plans nothing after that, because a scheduled run planned now would be built for the
+consensus branch the upgrade ends, so it succeeds with `.cancelledUntilNetworkUpgrade(activationHeight:)` and the height
 at which the upgrade activates. A call site that used the returned schedule stops compiling, and any
 `Synchronizer` conformer or test double must return the new type. A conformer without migration support is
 unaffected: its default still throws.
@@ -1589,25 +1592,25 @@ case .replanned(let schedule):
     break
 case .cancelledUntilNetworkUpgrade(let activationHeight):
     // The run is cancelled and nothing was planned. Show that a new migration waits for the upgrade,
-    // and offer one once the wallet has synced up to `activationHeight`.
+    // and offer one once the wallet's tip plus one reaches `activationHeight`.
     break
 }
 ```
 
-`.replanned` is the only outcome once the upgrade has activated. A plan proposed before a restart that answers
-`.cancelledUntilNetworkUpgrade` can no longer be committed. For internal builds,
+`.replanned` is the only outcome once the wallet's tip plus one reaches activation. A plan proposed before a
+restart that answers `.cancelledUntilNetworkUpgrade` can no longer be committed. For internal builds,
 `setMigrationNetworkUpgradeGateBypass(_:)` makes the restart plan at every height.
 
 ## `ZcashError` gained a case — `migrationPausedUntilNetworkUpgrade`
 
 `ZcashError` and `ZcashErrorCode` have a new case, `migrationPausedUntilNetworkUpgrade` (`ZRUST0159`), whose
-payload is the NU7 activation height of the wallet's network. Until the upgrade has activated, the calls that
-plan, build, sign, store or rebuild a scheduled migration run throw it, and nothing is planned, built, signed,
-stored or broadcast: `prepareNoteSplit`, `submitNoteSplit`, `proposeMigrationTransfers`,
+payload is the NU7 activation height of the wallet's network. While the wallet's tip plus one is below activation,
+the calls that plan, build, sign, store or rebuild a scheduled migration run throw it, and nothing is planned,
+built, signed, stored or broadcast: `prepareNoteSplit`, `submitNoteSplit`, `proposeMigrationTransfers`,
 `signAndStoreMigrationSchedule`, `refreshStaleMigrationTransfers`, `createUnsignedNoteSplitPCZTs`,
 `storeSignedNoteSplitPCZTs`, `createUnsignedMigrationTransferPCZTs` and `storeSignedMigrationSchedulePCZTs`.
 The reads, the proving and broadcast executors and the immediate lane are not affected. It is judged at the
-wallet's own chain tip, and a network with no NU7 activation height never throws it. The judgment needs that
+wallet's own chain tip plus one, and a network with no NU7 activation height never throws it. The judgment needs that
 tip, so a wallet that has none yet fails these calls with their rust error instead (sync first). That includes
 `refreshStaleMigrationTransfers`, which used to answer the empty schedule for an account with no stored run, or
 a terminal one, whatever the wallet's tip, and still does with `setMigrationNetworkUpgradeGateBypass(_:)` on or
@@ -1617,7 +1620,7 @@ handled.
 ```swift
 case .migrationPausedUntilNetworkUpgrade(let activationHeight):
     // Scheduled migration waits for the upgrade: show the pause rather than a failure, and offer the
-    // migration again once the wallet has synced up to `activationHeight`.
+    // migration again once the wallet's tip plus one reaches `activationHeight`.
     break
 ```
 
@@ -1686,8 +1689,8 @@ to, on the connection it submits over, and refuses a transaction that cannot be 
 higher of that height and the wallet's chain tip: one built for another consensus branch than that block's, which is what the NU7
 activation does to a transaction created before it and not yet sent, or one that has expired by then. Nothing else changes for a
 transaction that can be valid, apart from the extra request, and a normal send is never held back in the blocks before the
-activation. The immediate migration is a normal send, so check `isImmediateLaneAvailable` of `migrationAvailability()` before
-sending one.
+activation. Immediate migration remains available under this policy and follows the same normal transaction validity
+checks. Use `migrationAvailability()` when offering the scheduled option; immediate migration needs no availability prerequisite.
 
 A refusal is reported as the failure of the call, under the local code and the stable description of its
 `TransactionSubmissionRefusal`, which no server sends. Nothing was submitted, and no block can include the transaction as it

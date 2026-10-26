@@ -128,9 +128,10 @@ public enum MigrationAdvanceStep: Equatable, Sendable {
     /// usual, and crank again as the wallet's chain tip advances. See the type doc's discharge
     /// mapping.
     case pausedForNetworkUpgrade(activationHeight: BlockHeight)
-    /// The run was INTERRUPTED by the NU7 network upgrade, which activated at `activationHeight`:
-    /// a transaction of it that is not mined was built for the consensus branch before the
-    /// activation, which no block accepts any more, so the run cannot complete.
+    /// The run was INTERRUPTED by the NU7 network upgrade at `activationHeight`: the wallet's tip
+    /// plus one has reached activation, so the next candidate block uses the new consensus branch.
+    /// An unmined transaction of the run uses the old branch, so the run cannot complete. Other
+    /// transactions may already have mined or may still mine; not every input becomes available at once.
     ///
     /// Cancel the run with `cancelMigrationRun(accountUUID:)` and offer the user a new migration,
     /// which is built for the branch the chain is on. The step names no transaction and carries no
@@ -713,17 +714,18 @@ public struct MigrationSchedule: Equatable, Sendable, Codable {
 ///
 /// A restart always cancels the account's stored run. Whether it then plans a new one depends on
 /// the NU7 network upgrade: a scheduled run spreads its transactions over many blocks and each is
-/// built for the consensus branch of the block it is built under, so before the upgrade has
-/// activated no new scheduled run is planned, built, signed or stored.
+/// built for the consensus branch of the block it is built under. While the wallet's tip plus one
+/// is below activation no new scheduled run is planned, built, signed or stored.
 public enum MigrationRestartOutcome: Equatable, Sendable {
     /// The run was cancelled and a fresh plan was previewed against the live balance. Re-confirm
     /// it with the user and commit it as for any other proposal; its
-    /// ``MigrationSchedule/proposalHandle`` identifies it. An empty schedule means nothing is
-    /// left to migrate.
+    /// ``MigrationSchedule/proposalHandle`` identifies it. An empty schedule means no eligible
+    /// migration can be planned from the currently available balance. Recorded spends may still
+    /// restrict selection until the wallet's expiry and scan rules allow it.
     case replanned(MigrationSchedule)
-    /// The run was cancelled and no new plan was made, because the NU7 network upgrade has not
-    /// activated yet. The upgrade activates at `activationHeight`: offer the user a new migration
-    /// once the wallet has synced up to it. Until then the calls that plan, build, sign or store a
+    /// The run was cancelled and no new plan was made, because the wallet's next block is before
+    /// NU7. The upgrade activates at `activationHeight`: offer the user a new migration once the
+    /// wallet's tip plus one reaches that height. Until then the calls that plan, build, sign or store a
     /// scheduled run throw ``ZcashError/migrationPausedUntilNetworkUpgrade(_:)``, and a plan
     /// proposed before the restart can no longer be committed.
     case cancelledUntilNetworkUpgrade(activationHeight: BlockHeight)

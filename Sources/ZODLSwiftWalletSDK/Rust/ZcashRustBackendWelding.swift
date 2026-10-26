@@ -663,9 +663,9 @@ protocol ZcashRustBackendWelding {
     /// wallet, against the next block: the one after the higher of the wallet's chain tip and
     /// `submissionServerHeight`, the latest block height the server the transaction is about to be
     /// submitted to reports. It must be built for that block's consensus branch and not have expired
-    /// by it, and the migration submits nothing in the blocks just before the NU7 network upgrade
-    /// (the upgrade-gate bypass lifts that window and nothing else). A transaction that fails is not
-    /// recorded; the committed run and the proof stay.
+    /// by it. Valid committed work can continue before activation; the scheduling bypass never
+    /// bypasses branch, expiry or height checks. A transaction that fails is not recorded;
+    /// the committed run and the proof stay.
     /// - Parameter submissionServerHeight: the latest block height the submission server reported,
     ///   read on the connection the transaction will go over.
     /// - Throws: `migrationPausedUntilNetworkUpgrade` before the NU7 network upgrade has activated
@@ -832,9 +832,8 @@ protocol ZcashRustBackendWelding {
     /// block is never recorded in the wallet. The next block is the one after the higher of the
     /// wallet's chain tip and `submissionServerHeight`, the latest block height of the server the
     /// caller reads it from; the preparation must be built for that block's consensus branch and not
-    /// have expired by it, and the migration submits nothing in the blocks just before the NU7
-    /// network upgrade (the upgrade-gate bypass lifts that window and nothing else). A run that has
-    /// ended serves nothing.
+    /// have expired by it. Valid committed work can continue before activation; the scheduling
+    /// bypass never bypasses branch, expiry or height checks. A run that has ended serves nothing.
     /// - Parameters:
     ///   - txid: a txid ``MigrationProveOutcome/preparationTxids`` named, in the SDK's raw/internal
     ///     byte order.
@@ -873,9 +872,8 @@ protocol ZcashRustBackendWelding {
     /// block is never recorded in the wallet. The next block is the one after the higher of the
     /// wallet's chain tip and `submissionServerHeight`, the latest block height of the server the
     /// transaction is about to be submitted to; it must be built for that block's consensus branch
-    /// and not have expired by it, and the migration submits nothing in the blocks just before the
-    /// NU7 network upgrade (the upgrade-gate bypass lifts that window and nothing else). A run that
-    /// has ended serves nothing.
+    /// and not have expired by it. Valid committed work can continue before activation; the scheduling
+    /// bypass never bypasses branch, expiry or height checks. A run that has ended serves nothing.
     /// - Parameters:
     ///   - id: the transaction the instruction named.
     ///   - submissionServerHeight: the latest block height the submission server reported, read on
@@ -929,10 +927,10 @@ protocol ZcashRustBackendWelding {
     func migrationRestartStep(for account: AccountUUID) async throws -> MigrationRestartOutcome
 
     /// Cancels `account`'s pending run and nothing more: the stored run is persisted as cancelled
-    /// and every note reservation its never-broadcast transactions hold is released, so those notes
-    /// are spendable again at once. Its pre-signed transactions are abandoned; already-broadcast
-    /// ones are unaffected on-chain and may still be mined. A plan proposed earlier can no longer
-    /// be committed. Unlike ``migrationRestartStep(for:)``, which cancels the same way, no new plan
+    /// and eligible advisory note reservations are released. Recorded spends still follow the wallet's
+    /// expiry and scan rules, even if network submission failed or was never attempted. Its pre-signed
+    /// transactions are abandoned; already-broadcast ones are unaffected on-chain and may still be
+    /// mined. A plan proposed earlier can no longer be committed. Unlike ``migrationRestartStep(for:)``, which cancels the same way, no new plan
     /// is made.
     ///
     /// Never gated by the NU7 network-upgrade gate (it ends a run, it starts nothing), so the

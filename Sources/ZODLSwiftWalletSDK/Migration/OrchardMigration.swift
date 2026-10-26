@@ -456,8 +456,8 @@ actor OrchardMigration {
     /// transaction, never the default circuit the sync keeps for the wallet), and a height that
     /// cannot be read fails closed — the error propagates and nothing is taken. The next block is
     /// the one after the higher of that height and the wallet's chain tip; the preparation must be
-    /// built for its consensus branch and not have expired by it, and the migration takes nothing
-    /// in the blocks just before the NU7 network upgrade. A host that submits to servers other than
+    /// built for its consensus branch and not have expired by it. Valid committed work can continue
+    /// before activation; these validity checks cannot be bypassed. A host that submits to servers other than
     /// the synchronizer's should judge the result against each one's own height as well.
     /// - Parameter txid: a txid ``MigrationProveOutcome/preparationTxids`` named, in the SDK's
     ///   raw/internal byte order.
@@ -844,8 +844,9 @@ actor OrchardMigration {
         try await welding.migrationRestartStep(for: accountUUID)
     }
 
-    /// Cancels the stored run and nothing more: it is persisted as cancelled and every note
-    /// reservation its never-broadcast transactions hold is released, but no fresh plan is made --
+    /// Cancels the stored run and nothing more: it is persisted as cancelled and eligible advisory
+    /// note reservations are released. Recorded spends still follow the wallet's expiry and scan
+    /// rules, even if network submission failed or was never attempted. No fresh plan is made --
     /// the cancel half of ``restartCurrentMigrationStep()``, for ending a run the NU7 network
     /// upgrade interrupted before the user is offered a new migration. A plan proposed earlier can
     /// no longer be committed; already-broadcast transactions are unaffected on-chain. With no run

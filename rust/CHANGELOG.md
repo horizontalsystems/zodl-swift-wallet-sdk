@@ -485,9 +485,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unknown or unregistered network or a null output pointer.
 - `zcashlc_migration_cancel_run(db_data, db_data_len, account_uuid_bytes, network_id)` cancels the
   account's pending migration run and nothing more, and returns `true` (`false` with the last error
-  set otherwise). The run is stored as cancelled and every note reservation its never-broadcast
-  transactions hold is released, so those notes are spendable at once; transactions already
-  broadcast are unaffected on-chain. A proposal previewed earlier can no longer be committed
+  set otherwise). The run is stored as cancelled and eligible advisory note reservations are released.
+  Recorded spends retain the wallet's expiry and scan restrictions, even if network submission failed
+  or was never attempted; transactions already broadcast are unaffected on-chain and may still mine.
+  A proposal previewed earlier can no longer be committed
   (`MIGRATION_PLAN_STALE`). Unlike `zcashlc_migration_restart_step`, which cancels the same way, it
   plans nothing. It is never refused before the NU7 activation, so it takes no
   `upgrade_gate_bypass` and needs no chain tip. With no run pending it succeeds and changes no stored

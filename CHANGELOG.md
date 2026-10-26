@@ -40,9 +40,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ZcashError.rustMigrationAvailability(_:)` for a wallet that has no chain tip yet (sync first) on a network
   with an NU7 activation height. A conformer that does not support migration throws by default.
 - `Synchronizer.cancelMigrationRun(accountUUID:)` cancels the account's pending run without planning a new
-  one: the run is stored as cancelled and every note reservation its never-broadcast transactions hold is
-  released, so those notes are spendable at once. Transactions already broadcast are unaffected on-chain and
-  may still be mined, and a plan proposed earlier can no longer be committed. It is how an app ends a run
+  one: the run is stored as cancelled and eligible advisory note reservations are released. Recorded spends
+  remain subject to the wallet's expiry and scan rules, even if network submission failed or was never attempted.
+  Transactions already broadcast are unaffected on-chain and may still be mined, and a plan proposed earlier
+  can no longer be committed. It is how an app ends a run
   that `migrationAdvanceStep(accountUUID:)` reported as `interruptedByNetworkUpgrade`, before it offers the
   user a new migration; afterwards `migrationAdvanceStep(accountUUID:)` answers `complete` for the run.
   Unlike `restartCurrentMigrationStep(accountUUID:)`, which cancels the same way and then plans, it plans
@@ -91,19 +92,19 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   both are handled; see `MIGRATING.md`. `migrationAdvanceStep(accountUUID:)` answers them from the wallet's own
   chain tip, in front of the engine's step, around the NU7 activation, whose height `activationHeight` is. Neither
   names a transaction or carries an outlook, and a network with no NU7 activation height is never gated.
-  - `pausedForNetworkUpgrade`: do nothing now, no broadcast, proof, rebuild or re-plan, and ask again as the
-    chain advances. It replaces a rebuild or a re-plan while the next height is more than 48 blocks before the
-    activation, and a broadcast, a proof, a rebuild or a re-plan in the 48 blocks (about an hour) before it.
+  - `pausedForNetworkUpgrade`: the next block is before activation, so a rebuild or re-plan waits. Ask again
+    as the chain advances. Valid committed work may still be proved and broadcast until activation.
   - `interruptedByNetworkUpgrade`: the run cannot complete, because a transaction of it that is not mined was
-    built for the consensus branch before the activation, which no block accepts any more. Cancel the run with
-    `cancelMigrationRun(accountUUID:)` and offer a new migration.
+    built for the consensus branch before activation, while the next candidate block uses the new branch.
+    Cancel the run with `cancelMigrationRun(accountUUID:)` and offer a new migration. Other transactions of the
+    run may already have mined or may still mine; interruption does not make every input available at once.
   - `reevaluate` is also the answer, around the activation, while the wallet's scan has not reached the last
     block before it and every unmined transaction built for the old branch may already have been sent: sync and
-    ask again, and the answer becomes `interruptedByNetworkUpgrade` once the scan has passed that block without
+    ask again, and the answer becomes `interruptedByNetworkUpgrade` once the scan has reached that block without
     finding them.
 - `ZcashError` and `ZcashErrorCode` gain `migrationPausedUntilNetworkUpgrade(_:)` (`ZRUST0159`), whose payload is
-  the NU7 activation height of the wallet's network. Until the upgrade has activated, the calls that plan, build,
-  sign, store or rebuild a scheduled migration run throw it: `prepareNoteSplit`, `submitNoteSplit`,
+  the NU7 activation height of the wallet's network. While the wallet's tip plus one is below activation, the calls
+  that plan, build, sign, store or rebuild a scheduled migration run throw it: `prepareNoteSplit`, `submitNoteSplit`,
   `proposeMigrationTransfers`, `signAndStoreMigrationSchedule`, `refreshStaleMigrationTransfers`,
   `createUnsignedNoteSplitPCZTs`, `storeSignedNoteSplitPCZTs`, `createUnsignedMigrationTransferPCZTs` and
   `storeSignedMigrationSchedulePCZTs`. Nothing is planned, built, signed, stored or broadcast, and the reads, the
@@ -118,10 +119,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MigrationSchedule`, so a call site that used the schedule stops compiling, and any conformer or test double
   must return the new type; see `MIGRATING.md`. It still cancels the stored run.
   - `replanned(_:)` carries the fresh schedule to re-confirm, as the call returned before.
-  - `cancelledUntilNetworkUpgrade(activationHeight:)` is the answer until the NU7 network upgrade has activated:
+  - `cancelledUntilNetworkUpgrade(activationHeight:)` is the answer while the wallet's next block is before NU7:
     the run is cancelled and nothing is planned, and `activationHeight` is the height at which the upgrade
     activates. The call succeeds, and a plan proposed before it can no longer be committed. Offer the user a new
-    migration once the wallet has synced up to that height.
+    migration once the wallet's tip plus one reaches `activationHeight`.
 - `ZcashError` and `ZcashErrorCode` gain `rustMigrationAvailability(_:)` (`ZRUST0160`) and
   `rustMigrationCancelRun(_:)` (`ZRUST0161`), whose payload is the rust layer's message. An exhaustive `switch`
   over either type stops compiling until they are handled; see `MIGRATING.md`.
@@ -130,8 +131,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `options.useTor` is set) and read its latest block height on that connection before they take the transaction
   from the wallet: connect, read the height, take, submit. The transaction is then checked against the next
   block, the one after the higher of that height and the wallet's chain tip. It must be built for that block's
-  consensus branch and must not have expired by it, and it is not submitted in the 48 blocks before the NU7
-  activation (`setMigrationNetworkUpgradeGateBypass(_:)` lifts that window and nothing else). A transaction that
+  consensus branch and must not have expired by it. Valid committed work may be submitted before activation;
+  `setMigrationNetworkUpgradeGateBypass(_:)` never bypasses branch, expiry or height checks. A transaction that
   fails is neither submitted nor recorded in the wallet, and the call throws
   `ZcashError.migrationSubmissionRefused(_:)` with the reason: sync, then crank `migrationAdvanceStep(accountUUID:)`
   again to learn what becomes of the run (for `submitNoteSplit` the run it committed stays). The crank judges the

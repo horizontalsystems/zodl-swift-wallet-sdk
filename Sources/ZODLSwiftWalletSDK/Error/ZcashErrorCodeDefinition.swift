@@ -799,7 +799,7 @@ enum ZcashErrorDefinition {
     // not reuse the code.
 
     /// Scheduled migration is paused until the network upgrade activates.
-    /// A scheduled migration spreads its transactions over many blocks, and each is built for the consensus branch of the block it is built under, so one built before the NU7 network upgrade is stranded by it. Until the upgrade has activated the SDK plans, builds, signs and stores no scheduled run, and refuses the call that would. Nothing was planned, built or stored: offer the migration again once the wallet has synced up to the activation height.
+    /// A scheduled migration spreads its transactions over many blocks, and each is built for the consensus branch of the block it is built under, so one built before the NU7 network upgrade is stranded by it. While the wallet's tip plus one is below activation the SDK plans, builds, signs and stores no scheduled run, and refuses the call that would. Nothing was planned, built or stored: offer the migration again once the wallet's tip plus one reaches the activation height.
     /// - `activationHeight` is the height at which the network upgrade activates.
     // sourcery: code="ZRUST0159"
     case migrationPausedUntilNetworkUpgrade(_ activationHeight: BlockHeight)
@@ -812,7 +812,7 @@ enum ZcashErrorDefinition {
     // sourcery: code="ZRUST0161"
     case rustMigrationCancelRun(_ rustError: String)
     /// The migration transaction cannot be valid in the next block, so it was not submitted.
-    /// A migration transaction is submitted only if it is built for the consensus branch of the next block, has not expired by then, and does not fall in the blocks just before the NU7 network upgrade, all judged at the higher of the wallet's chain tip and the height the submission server reports. This one failed that check, so nothing was submitted and the wallet recorded nothing. Sync, then crank the migration again: the step it returns says what becomes of the run, and a wallet that is behind the server is offered the same transaction again until it has synced.
+    /// A migration transaction is submitted only if it is built for the consensus branch of the next block and has not expired by then. The next block is one after the higher of the wallet's chain tip and the height the submission server reports. Valid committed work can continue before activation; branch, expiry and height checks cannot be bypassed. This one failed that check, so nothing was submitted and the wallet recorded nothing. Sync, then crank the migration again: the step it returns says what becomes of the run, and a wallet that is behind the server is offered the same transaction again until it has synced.
     /// - `refusal` is why the transaction cannot be valid in the next block.
     // sourcery: code="ZRUST0162"
     case migrationSubmissionRefused(_ refusal: TransactionSubmissionRefusal)
