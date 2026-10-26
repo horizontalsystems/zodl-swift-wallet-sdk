@@ -24,7 +24,7 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no block height, which fails closed, no block can follow it, the network is unknown, the wallet database does not exist
   or cannot be read, or `tx` is no transaction. The branch is compared only for a v5 or later encoding, the only one that
   commits to a consensus branch; an earlier one has just its expiry judged. The wallet database is opened read-only, and
-  nothing is written to it. Unlike the migration's own submission check, it knows no cutoff window before a network upgrade.
+  nothing is written to it. These validity checks apply at every height.
 - `zcashlc_payment_uri_parse` validates supported cross-chain payment request URIs and returns an
   internal JSON envelope for SDK bindings.
 - `zcashlc_parse_gift_card_link(link, error_out)` reads a gift card link — any `https` URL whose
@@ -500,13 +500,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   network request. It returns an `FfiMigrationAvailability`, freed with
   `zcashlc_free_migration_availability`: `phase` is `ZCASHLC_MIGRATION_AVAILABLE` (`0`, both the
   scheduled and the immediate lane may start), `ZCASHLC_MIGRATION_PAUSED_UNTIL_UPGRADE` (`1`, the
-  NU7 activation is more than 48 blocks away: the scheduled lane is refused and the immediate lane
-  is open) or `ZCASHLC_MIGRATION_UPGRADE_CUTOFF` (`2`, the next height is one of the 48 blocks
-  before the activation: neither lane may start); `activation_height` is the network's NU7
-  activation height in every phase, `-1` when it has none; `immediate_available` is `false` only in
-  the cutoff phase. It judges the same gate as the calls refused with
-  `MIGRATION_PAUSED_UNTIL_UPGRADE`, which enforce the scheduled lane alone: no call refuses the
-  immediate lane in the cutoff window, so a caller checks `immediate_available`.
+  next block is before NU7: new scheduled work is paused); `activation_height` is the network's NU7
+  activation height in both phases, `-1` when it has none; `immediate_available` is always `true`,
+  retained for FFI compatibility. Valid committed transactions may still be proved and broadcast
+  before activation. It judges the same gate as the calls refused with `MIGRATION_PAUSED_UNTIL_UPGRADE`.
   `upgrade_gate_bypass` is for internal builds: `true` makes the phase `0` at every height. A wallet
   with no chain tip, on a network that has an NU7 activation height and without the bypass, returns
   NULL with the last error set ("sync first"); with the bypass, or on a network with no NU7
@@ -822,16 +819,16 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `network_upgrade_height` (`-1` on every other step), name no transaction (`id` is `0`) and carry no
   outlook (`next_height` is `-1`), so a `switch` over `step` needs an arm for each. A network with no
   NU7 activation height is never gated.
-  - `PAUSED_FOR_NETWORK_UPGRADE` answers in place of a Rebuild or a Replan while the next height is
-    more than 48 blocks below the activation, and in place of a Broadcast, a Prove, a Rebuild or a
-    Replan in the 48 blocks before it. Do nothing, and ask again as the chain advances.
+  - `PAUSED_FOR_NETWORK_UPGRADE` answers in place of a Rebuild or a Replan before activation.
+    Do nothing, and ask again as the chain advances. Valid committed work may still be proved
+    and broadcast before activation.
   - `INTERRUPTED_BY_NETWORK_UPGRADE` answers from the activation on when a transaction of the stored
     run that is not mined was built for another consensus branch than the next block's, so the run
     cannot complete. While every such transaction is `Proved` or `Broadcast`, one of them may have
     been mined before the activation at a block the wallet has not scanned yet, and the call answers
     `ZCASHLC_ADVANCE_STEP_REEVALUATE` instead, to sync and ask again, until the wallet has scanned the
     block before the activation.
-  - `upgrade_gate_bypass` is for internal builds: `true` lifts the pause and the 48-block window, so
+  - `upgrade_gate_bypass` is for internal builds: `true` lifts the pause on new scheduled work, so
     the call never answers `PAUSED_FOR_NETWORK_UPGRADE` and otherwise returns the engine's own step.
     It never lifts the interruption: the call still answers `INTERRUPTED_BY_NETWORK_UPGRADE`, or
     `ZCASHLC_ADVANCE_STEP_REEVALUATE` while the wallet's scan has not reached the block before the
@@ -880,19 +877,14 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     fails closed with the last error `the submission server's height is unknown` (for
     `zcashlc_migration_sign_note_split` before the run is committed), and so does a value above
     `u32::MAX`.
-  - A transaction that is not built for the consensus branch of the next block, that has expired by it
-    (an expiry height of 0 never expires, and a transaction can still be mined in the block at its
-    expiry height), or, unless `upgrade_gate_bypass` is set, whose next block is one of the 48 before
-    the NU7 activation, makes the call return NULL with the last error
-    `MIGRATION_SUBMISSION_REFUSED:<code>`, the code following the colon directly (for example
-    `MIGRATION_SUBMISSION_REFUSED:wrong_branch`). `<code>` is `wrong_branch`, `expired` or `cutoff`,
-    checked in that order. A refused call records nothing in the wallet: for
-    `zcashlc_migration_sign_note_split` the committed run and the stored proof stay. A stored PCZT that
+  - A transaction that is not built for the consensus branch of the next block or that has expired by it
+    (an expiry height of 0 never expires, and a transaction can still be mined at its expiry height)
+    makes the call return NULL with `MIGRATION_SUBMISSION_REFUSED:<code>`. `<code>` is `wrong_branch`
+    or `expired`, checked in that order. A refused call records nothing in the wallet: for
+    `zcashlc_migration_sign_note_split` the committed run and stored proof stay. A stored PCZT that
     does not parse fails with `MIGRATION_PROVING_UNAVAILABLE`.
-  - `upgrade_gate_bypass` is for internal builds: `true` lifts the 48-block window and nothing else,
-    never the branch and expiry checks. Pass `false` to enforce the window.
-  - A network with no NU7 activation height is never in the cutoff window, but the branch and expiry
-    checks apply to it as to any other.
+  - `upgrade_gate_bypass` is retained on the broadcast accessors for ABI compatibility. It never
+    bypasses submission validity; branch, expiry and server-height checks apply on every network.
 
 ### Removed
 - The step-by-step coinholder-voting C surface is gone: `zcash_voting` absorbed the

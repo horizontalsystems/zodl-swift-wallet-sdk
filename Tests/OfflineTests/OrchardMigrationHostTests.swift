@@ -537,9 +537,9 @@ final class OrchardMigrationHostTests: ZcashTestCase {
     func testMigrationAvailabilityPassesTheHostsBypassToTheWelding() async throws {
         let welding = ZcashRustBackendWeldingMock()
         let expected = MigrationAvailability(
-            phase: .networkUpgradeCutoff,
+            phase: .pausedUntilNetworkUpgrade,
             activationHeight: 3_543_405,
-            isImmediateLaneAvailable: false
+            isImmediateLaneAvailable: true
         )
         welding.migrationAvailabilityUpgradeGateBypassReturnValue = expected
         let accountsBuilt = OSAllocatedUnfairLock<[AccountUUID]>(initialState: [])

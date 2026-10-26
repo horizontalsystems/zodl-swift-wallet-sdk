@@ -30,16 +30,12 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the wallet's next height, so an app can decide which options to offer before anything is planned. It takes
   no account and makes no network request; it is judged at the wallet's own chain tip, plus one, by the same
   gate that refuses the calls that plan, build, sign, store or rebuild a scheduled run. `phase` is
-  `.available` (both the scheduled and the immediate migration may start), `.pausedUntilNetworkUpgrade` (the
-  NU7 activation is more than 48 blocks away: only the immediate migration may start) or
-  `.networkUpgradeCutoff` (the wallet's next height is one of the 48 blocks, about an hour, before the
-  activation: neither may start); `activationHeight` is the network's NU7 activation height in every phase,
-  `nil` for a network that has none; `isImmediateLaneAvailable` is `false` only in `.networkUpgradeCutoff`.
-  The SDK enforces only the scheduled migration, by refusing the calls that plan, build, sign, store or rebuild
-  one in the other two phases. Nothing refuses `proposeImmediateMigration(accountUUID:)`, or the send that
-  executes it, in the cutoff window, so check `isImmediateLaneAvailable` before offering or starting an
-  immediate migration: one sent late in that window and still unmined at the activation is rejected from then
-  on, and its notes stay unspendable until it expires, up to about 40 blocks after the activation.
+  `.available` (both the scheduled and immediate migration may start) or `.pausedUntilNetworkUpgrade`
+  (the next block is before NU7: new scheduled work is paused). `activationHeight` is the network's NU7
+  activation height in both phases, `nil` for a network that has none. `isImmediateLaneAvailable` remains
+  `true` at every height for compatibility. Valid committed transactions may still be proved and broadcast
+  before activation. Every submission still checks consensus branch, expiry and the submission server's
+  height; none of these validity checks is bypassed.
   With `setMigrationNetworkUpgradeGateBypass(_:)` on, the phase is `.available` at every height. It throws
   `ZcashError.rustMigrationAvailability(_:)` for a wallet that has no chain tip yet (sync first) on a network
   with an NU7 activation height. A conformer that does not support migration throws by default.
@@ -57,13 +53,11 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   next block, which is the one after the higher of the wallet's chain tip and the latest block height reported
   by the server the transaction is about to go to. `wrongConsensusBranch` means it is built for another
   consensus branch than the next block's, as a transaction created before a network upgrade and still unsent
-  is when the chain reaches it. `expired` means its expiry height is below the next block's. `networkUpgradeCutoff`
-  means the next block is one of the 48 before the NU7 activation, in which a migration transaction is not
-  submitted. `code` is the stable local code the refusal is reported under, `-9101`, `-9102` and `-9103`
-  respectively, which no server sends, and `description` a stable text that carries no transaction data. A
-  migration transaction is refused with `ZcashError.migrationSubmissionRefused(_:)`; any other transaction with
-  `TransactionSubmitResult.submitFailure(txId:code:description:)` or `TransactionSubmissionOutcome.rejected(code:message:)`,
-  never for `networkUpgradeCutoff`, which only the migration is subject to.
+  is when the chain reaches it. `expired` means its expiry height is below the next block's. `code` is
+  the stable local code the refusal is reported under, `-9101` and `-9102` respectively, which no server
+  sends, and `description` carries no transaction data. A migration transaction is refused with
+  `ZcashError.migrationSubmissionRefused(_:)`; any other transaction with
+  `TransactionSubmitResult.submitFailure(txId:code:description:)` or `TransactionSubmissionOutcome.rejected(code:message:)`.
 
 ## Changed
 
@@ -178,9 +172,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tip: one built for another consensus branch than that block's, which a network upgrade does to a transaction created before it,
   or one that has expired by then. The branch is compared for a v5 or later transaction, the only kind that carries one.
   The check costs one extra request per submission, and one per endpoint when a transaction goes to several, each judged at its
-  own endpoint's height. Normal sends are never cut off: unlike a migration transaction, one is not held back in the 48 blocks
-  before the NU7 activation, and a transaction that can be valid is submitted exactly as before. The immediate migration is a
-  normal send, so check `isImmediateLaneAvailable` of `migrationAvailability()` before sending one.
+  own endpoint's height. A transaction that can be valid is submitted exactly as before, including an immediate migration
+  and a valid committed migration transaction before NU7 activates.
   - A refusal is reported as the failure of the call that submitted the transaction, under the local `code` and the stable
     `description` of its `TransactionSubmissionRefusal` (`-9101` for the wrong branch, `-9102` for expiry), and nothing is
     submitted. The streams report `TransactionSubmitResult.submitFailure(txId:code:description:)`, without asking the server

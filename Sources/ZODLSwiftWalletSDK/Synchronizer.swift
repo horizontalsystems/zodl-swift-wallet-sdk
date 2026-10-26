@@ -1042,8 +1042,7 @@ public protocol Synchronizer: AnyObject {
     /// What the migration may start at the wallet's next height, to decide which options to offer
     /// before anything is planned. See ``MigrationAvailability`` for the phases:
     /// ``MigrationAvailability/Phase/available`` offers both the scheduled and the immediate
-    /// migration, ``MigrationAvailability/Phase/pausedUntilNetworkUpgrade`` only the immediate one,
-    /// and ``MigrationAvailability/Phase/networkUpgradeCutoff`` neither.
+    /// migration, and ``MigrationAvailability/Phase/pausedUntilNetworkUpgrade`` only the immediate one.
     ///
     /// WALLET-scoped, so it takes no account: the NU7 network-upgrade gate depends on the chain
     /// alone. It is judged at the wallet's own chain tip, plus one, and never at the sync server's
@@ -1051,14 +1050,10 @@ public protocol Synchronizer: AnyObject {
     /// often as the interface needs. It is the same judgment the calls that plan, build, sign,
     /// store or rebuild a scheduled run are refused by (``ZcashError/migrationPausedUntilNetworkUpgrade(_:)``),
     /// so a scheduled migration it reports as closed is one the SDK refuses. The immediate
-    /// migration is not enforced that way: nothing in the SDK refuses
-    /// ``proposeImmediateMigration(accountUUID:)``, or the send that executes it, in the cutoff
-    /// window, so a caller must check ``MigrationAvailability/isImmediateLaneAvailable`` before it
-    /// offers or starts one. An immediate migration sent late in that window and still unmined
-    /// when the upgrade activates is rejected from then on, and the notes it spends stay
-    /// unspendable until it expires, up to about 40 blocks after the activation. With the bypass
-    /// on (``setMigrationNetworkUpgradeGateBypass(_:)``, internal builds only) the phase is
-    /// ``MigrationAvailability/Phase/available`` at every height.
+    /// migration remains available at every height, as do proof and broadcast of valid committed
+    /// work. Every submission still checks the consensus branch, expiry and submission server's
+    /// height. With the bypass on (``setMigrationNetworkUpgradeGateBypass(_:)``, internal builds
+    /// only) the phase is ``MigrationAvailability/Phase/available`` at every height.
     ///
     /// A network with no NU7 activation height is always available, with a `nil`
     /// ``MigrationAvailability/activationHeight``.
@@ -1350,13 +1345,9 @@ public protocol Synchronizer: AnyObject {
     /// like any other transfer; call ``recordImmediateMigration(accountUUID:txid:)`` after a
     /// successful broadcast so the platform migration state machine reports it.
     ///
-    /// The NU7 network-upgrade gate does not apply to it: nothing in the SDK refuses this call, or
-    /// the send that executes it, in the 48 blocks (about an hour) before the activation, in which
-    /// ``migrationAvailability()`` reports ``MigrationAvailability/isImmediateLaneAvailable`` as
-    /// `false`. A caller must check that before it proposes or sends one. An immediate migration
-    /// sent late in that window and still unmined when the upgrade activates is rejected from then
-    /// on, and the notes it spends stay unspendable until it expires, up to about 40 blocks after
-    /// the activation.
+    /// The NU7 gate pauses only new scheduled work, so the immediate migration remains available
+    /// at every height. Its submission still requires a valid consensus branch and expiry for the
+    /// next block, judged against the higher of the wallet's tip and the submission server's height.
     /// - Parameter accountUUID: the account to propose the immediate migration for.
     /// - Throws: the rust layer's `InsufficientFunds` (mapped) when the fee would consume the whole
     ///   balance.

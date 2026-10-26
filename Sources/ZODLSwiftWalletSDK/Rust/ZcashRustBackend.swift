@@ -2098,7 +2098,7 @@ struct ZcashRustBackend: ZcashRustBackendWelding, LocalBalanceProviding {
     /// `.migrationPausedUntilNetworkUpgrade(height)` (the scheduled lane is closed until the NU7
     /// network upgrade activates), and `MIGRATION_SUBMISSION_REFUSED:<code>` ->
     /// `.migrationSubmissionRefused(refusal)` (a transaction about to be submitted cannot be valid
-    /// in the next block; the code is `wrong_branch`, `expired` or `cutoff`). Anything else —
+    /// in the next block; the code is `wrong_branch` or `expired`). Anything else —
     /// including a `MIGRATION_WAKEUP_INFEASIBLE` whose id, a `MIGRATION_PAUSED_UNTIL_UPGRADE` whose
     /// height or a `MIGRATION_SUBMISSION_REFUSED` whose code does not parse — falls back to the
     /// member's own case.
@@ -3757,8 +3757,6 @@ extension FfiMigrationAvailability {
             migrationPhase = .available
         case ZCASHLC_MIGRATION_PAUSED_UNTIL_UPGRADE:
             migrationPhase = .pausedUntilNetworkUpgrade
-        case ZCASHLC_MIGRATION_UPGRADE_CUTOFF:
-            migrationPhase = .networkUpgradeCutoff
         default:
             return nil
         }

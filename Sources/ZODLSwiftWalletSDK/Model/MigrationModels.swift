@@ -116,15 +116,12 @@ public enum MigrationAdvanceStep: Equatable, Sendable {
     /// becomes ``interruptedByNetworkUpgrade(activationHeight:)`` once the scan has passed that
     /// block without finding them.
     case reevaluate
-    /// The migration is PAUSED for the NU7 network upgrade, which activates at `activationHeight`:
-    /// do NOT broadcast, prove, rebuild or re-plan now.
+    /// New scheduled work is PAUSED for the NU7 upgrade, which activates at `activationHeight`.
+    /// Do not rebuild or re-plan now.
     ///
-    /// The engine's next step is one the upgrade gate holds back at the wallet's chain tip. While
-    /// the activation is far off, that is a rebuild or a re-plan: whatever it built would be built
-    /// for the consensus branch before the activation, and be stranded by it. The run's
-    /// transactions that are already built keep being proved and broadcast. In the last 48 blocks
-    /// before the activation (about an hour) it is every step that moves, a broadcast and a proof
-    /// as well, so that nothing is still in flight when the branch changes.
+    /// The gate holds back steps that build new scheduled work before activation, because those
+    /// transactions would be built for the branch the upgrade ends. Valid committed transactions
+    /// may still be proved and broadcast until activation.
     ///
     /// The step names no transaction and carries no outlook (``MigrationAdvance/next`` is `nil`):
     /// there is no executor to hand it to. Show the run as paused for the network upgrade, sync as
@@ -748,16 +745,10 @@ public struct MigrationAvailability: Equatable, Sendable {
         /// is under NU7 already, or the host turned the upgrade gate's bypass on (internal builds
         /// only).
         case available
-        /// The upgrade is more than 48 blocks away. The scheduled lane may not start, and the calls
+        /// The next block is before activation. The scheduled lane may not start, and the calls
         /// that plan, build, sign, store or rebuild a scheduled run throw
         /// ``ZcashError/migrationPausedUntilNetworkUpgrade(_:)``. The immediate lane is open.
         case pausedUntilNetworkUpgrade
-        /// The wallet's next height is one of the 48 blocks (about an hour) before the upgrade
-        /// activates. Neither lane may start, so that nothing is still in flight when the
-        /// consensus branch changes: the SDK refuses the scheduled lane's calls, and the caller
-        /// withholds the immediate lane (see ``MigrationAvailability/isImmediateLaneAvailable``).
-        /// Offer a migration again once the wallet has synced up to the activation height.
-        case networkUpgradeCutoff
     }
 
     /// Where the wallet's next height stands against the NU7 network upgrade.
@@ -765,9 +756,8 @@ public struct MigrationAvailability: Equatable, Sendable {
     /// The NU7 activation height of the wallet's network, in every phase, or `nil` when the
     /// network has none (and then the phase is always ``Phase/available``).
     public let activationHeight: BlockHeight?
-    /// Whether the immediate lane, one transaction that migrates the whole balance, may start:
-    /// `false` only in ``Phase/networkUpgradeCutoff``. Nothing in the SDK refuses the immediate
-    /// migration when it is `false`, so a caller must check it before it proposes or sends one.
+    /// Whether the immediate lane, one transaction that migrates the whole balance, may start.
+    /// Always `true` under the migration policy. Retained for compatibility.
     public let isImmediateLaneAvailable: Bool
 
     /// Creates an availability.

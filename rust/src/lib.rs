@@ -2629,8 +2629,7 @@ pub unsafe extern "C" fn zcashlc_decrypt_and_store_transaction(
 /// The transaction is parsed with `Transaction::read(tx, BranchId::for_height(params, next))`.
 /// Only a v5 or later encoding commits to its consensus branch, so only for such a transaction is
 /// the branch it carries compared with the next block's. Earlier encodings carry none, and just
-/// their expiry height is judged. The migration stops sending in the blocks just before a network
-/// upgrade, but this check knows no such window: a normal send is never cut off.
+/// their expiry height is judged. These validity checks apply at every height.
 ///
 /// The wallet database is opened read-only and nothing is written to it.
 ///
@@ -2698,13 +2697,6 @@ pub unsafe extern "C" fn zcashlc_check_transaction_submittable(
             Ok(()) => Ok(0),
             Err(SubmissionRefusal::WrongBranch) => Ok(1),
             Err(SubmissionRefusal::Expired) => Ok(2),
-            // `check_submittable` never refuses for the cutoff, which only the migration lanes
-            // know. An answer this function cannot report is no reason to let a transaction go.
-            Err(refusal @ SubmissionRefusal::Cutoff) => Err(anyhow!(
-                "the submission check refused the transaction for a reason ({}) this call does \
-                 not report",
-                refusal.code()
-            )),
         }
     });
     unwrap_exc_or(res, -1)
@@ -7242,14 +7234,13 @@ mod tests {
         assert_eq!(fixture.check(&both, 3_543_404), 1);
     }
 
-    /// The migration is cut off in the 48 blocks before the activation, but a normal send never is:
-    /// the check does not know of the window.
+    /// A valid transaction remains submittable through the final preactivation block.
     #[test]
-    fn check_transaction_submittable_never_applies_the_cutoff() {
+    fn check_transaction_submittable_accepts_valid_work_until_activation() {
         let fixture = SubmissionFixture::mainnet(3_543_000);
         let old_branch = empty_v6_transaction(BranchId::Nu6_3, 3_594_240);
 
-        // The next blocks 3,543,357 and 3,543,404 are the first and the last of the window.
+        // Both next blocks are still under the transaction's NU6.3 branch.
         assert_eq!(fixture.check(&old_branch, 3_543_356), 0);
         assert_eq!(fixture.check(&old_branch, 3_543_403), 0);
     }

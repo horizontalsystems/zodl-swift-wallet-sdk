@@ -44,10 +44,9 @@
 //!   [`zcashlc_migration_sign_note_split`]) take the height the server it goes to reports, and
 //!   refuse a transaction that cannot be valid in the next block, which is the one after the higher
 //!   of that height and the wallet's chain tip ([`refuse_unsubmittable`]). It must be built for that
-//!   block's consensus branch and must not have expired by then, and the migration sends nothing in
-//!   the cutoff window before the activation. The check runs before the store's broadcast seam, so
-//!   a refused transaction is never recorded in the wallet. The same calls refuse to serve a run that
-//!   has already ended.
+//!   block's consensus branch and must not have expired by then. The check runs before the store's
+//!   broadcast seam, so a refused transaction is never recorded in the wallet. The same calls
+//!   refuse to serve a run that has already ended.
 //! - Mined-ness is DERIVED, never reported: this layer never marks a transaction mined. The
 //!   engine promotes every in-flight transaction its scan has seen mine, inside
 //!   `advance_migration` — including one whose broadcast THIS process failed to record, which it
@@ -233,7 +232,7 @@ fn paused_until_upgrade(activation: BlockHeight) -> anyhow::Error {
 /// The stable prefix the Swift layer maps to `ZcashError.migrationSubmissionRefused` (ZRUST0162).
 /// The refusal's code follows the colon DIRECTLY (no space, no prose), so the Swift side can parse
 /// it back out: `MIGRATION_SUBMISSION_REFUSED:<code>`, with `<code>` one of the values of
-/// [`SubmissionRefusal::code`] (`wrong_branch`, `expired`, `cutoff`).
+/// [`SubmissionRefusal::code`] (`wrong_branch`, `expired`).
 const SUBMISSION_REFUSED_PREFIX: &str = "MIGRATION_SUBMISSION_REFUSED";
 
 /// The submission check ([`refuse_unsubmittable`]) found that the transaction cannot be valid in the
@@ -450,11 +449,7 @@ fn upgrade_gate_closed_until(ctx: &CallCtx, bypass: bool) -> anyhow::Result<Opti
     Ok(
         match current_gate_phase(&ctx.network, bypass, || ctx.tip())? {
             GatePhase::Open => None,
-            // Both stop the scheduled lane: the pause while the activation is far off, and the cutoff
-            // window in the 48 blocks before it, in which the immediate lane stops as well.
-            GatePhase::PausedUntil { activation } | GatePhase::Cutoff { activation } => {
-                Some(activation)
-            }
+            GatePhase::PausedUntil { activation } => Some(activation),
         },
     )
 }
@@ -531,16 +526,14 @@ fn transaction_by_id(
 /// built for that block's branch and must not have expired by it ([`check_submittable`], which
 /// reports the branch first), and a PCZT that does not parse has no branch to read, which is a
 /// failure to turn the stored artifact into servable bytes
-/// ([`PROVING_UNAVAILABLE_PREFIX`]). Last, the migration does not send in the cutoff window before
-/// the activation ([`GatePhase::Cutoff`]): `bypass`, the host's opt-out for internal builds, lifts
-/// that window and nothing else.
+/// ([`PROVING_UNAVAILABLE_PREFIX`]). Submission validity is never bypassed.
 ///
 /// A refusal errs `MIGRATION_SUBMISSION_REFUSED:<code>` ([`SUBMISSION_REFUSED_PREFIX`]).
 fn refuse_unsubmittable(
     ctx: &CallCtx,
     row: &MigrationTransaction,
     server_height: BlockHeight,
-    bypass: bool,
+    _bypass: bool,
 ) -> anyhow::Result<()> {
     let target = submission_target(ctx.tip()?, server_height)?;
     let Some(branch) = pczt_consensus_branch_id(row.pczt()) else {
@@ -552,9 +545,6 @@ fn refuse_unsubmittable(
     };
     check_submittable(&ctx.network, Some(branch), row.expiry_height(), target)
         .map_err(submission_refused)?;
-    if let GatePhase::Cutoff { .. } = gate_phase(&ctx.network, target, bypass) {
-        return Err(submission_refused(SubmissionRefusal::Cutoff));
-    }
     Ok(())
 }
 
@@ -1309,9 +1299,9 @@ fn serve_for_broadcast(
 /// tables, and a transaction that cannot be valid in the next block must leave no such record
 /// behind, nor mark its notes as spent.
 ///
-/// `server_height` is the height of the server the transaction is about to go to, and `bypass` the
-/// host's opt-out of the cutoff window. Every submission of a migration transaction (the delivery
-/// executor, the preparation accessor and the note-split ceremony) serves through this.
+/// `server_height` is the height of the server the transaction is about to go to. The retained
+/// `bypass` argument preserves the calling interface and never bypasses submission validity. Every
+/// migration submission (delivery, preparation and note-split ceremony) serves through this.
 fn serve_for_submission(
     rng: impl CryptoRng,
     ctx: &mut CallCtx,
@@ -2273,12 +2263,8 @@ pub struct FfiMigrationRestartOutcome {
 /// height, the wallet's next block is under NU7, or the host's bypass is on.
 pub const ZCASHLC_MIGRATION_AVAILABLE: u32 = 0;
 /// The scheduled lane is paused until the NU7 upgrade has activated and the immediate lane is open:
-/// the wallet's next height is more than 48 blocks before the activation.
+/// the wallet's next height is before the activation.
 pub const ZCASHLC_MIGRATION_PAUSED_UNTIL_UPGRADE: u32 = 1;
-/// Neither lane may start: the wallet's next height is one of the 48 blocks before the NU7
-/// activation. The calls of the scheduled lane are refused; nothing refuses the immediate lane, so
-/// the caller withholds it (see [`FfiMigrationAvailability::immediate_available`]).
-pub const ZCASHLC_MIGRATION_UPGRADE_CUTOFF: u32 = 2;
 
 /// What the migration may start at the wallet's next height (returned by
 /// [`zcashlc_migration_availability`]): the NU7 network-upgrade gate's phase, for the platform to
@@ -2290,9 +2276,8 @@ pub struct FfiMigrationAvailability {
     /// The NU7 activation height of the wallet's network, in every phase; `-1` when the network
     /// has none, and then the phase is always [`ZCASHLC_MIGRATION_AVAILABLE`].
     pub activation_height: i64,
-    /// Whether the immediate lane (one transaction that migrates the whole balance) is open:
-    /// `false` only in the cutoff window, [`ZCASHLC_MIGRATION_UPGRADE_CUTOFF`]. Nothing in this
-    /// library refuses the immediate lane when it is `false`: the caller must check it.
+    /// Whether the immediate lane (one transaction that migrates the whole balance) is open.
+    /// Always `true`: this gate pauses only new scheduled work. Retained for FFI compatibility.
     pub immediate_available: bool,
 }
 
@@ -2304,7 +2289,6 @@ impl FfiMigrationAvailability {
         let (phase, immediate_available) = match phase {
             GatePhase::Open => (ZCASHLC_MIGRATION_AVAILABLE, true),
             GatePhase::PausedUntil { .. } => (ZCASHLC_MIGRATION_PAUSED_UNTIL_UPGRADE, true),
-            GatePhase::Cutoff { .. } => (ZCASHLC_MIGRATION_UPGRADE_CUTOFF, false),
         };
         FfiMigrationAvailability {
             phase,
@@ -2861,27 +2845,15 @@ pub(crate) fn advance_config<P: Parameters>(params: &P, tip: BlockHeight) -> Adv
 /// The NU7 activation height the network-upgrade gate pauses the engine's `step` until in `phase`,
 /// or `None` when the gate lets the step through.
 ///
-/// While the activation is far off ([`GatePhase::PausedUntil`]) the scheduled lane builds nothing
-/// new, so the steps that would build a transaction are held back: a rebuild signs a replacement
-/// and a re-plan starts a new run, and either would be built for the branch before the activation
-/// and stranded by it. In the cutoff window ([`GatePhase::Cutoff`]) nothing moves at all, so a
-/// broadcast or a proof is held back as well: a transaction sent now could still be in flight when
-/// the branch changes. The steps that ask nothing of the platform but a sync, a wait or a stop
-/// are never held back.
+/// Before activation ([`GatePhase::PausedUntil`]), new scheduled work is held back: a rebuild
+/// signs a replacement and a re-plan starts a new run. Valid committed transactions may still be
+/// proved and broadcast. Sync, wait and terminal steps are never held back.
 fn paused_until(phase: GatePhase, step: &AdvanceStep) -> Option<BlockHeight> {
     match phase {
         GatePhase::Open => None,
         GatePhase::PausedUntil { activation } => {
             matches!(step, AdvanceStep::Rebuild { .. } | AdvanceStep::Replan).then_some(activation)
         }
-        GatePhase::Cutoff { activation } => matches!(
-            step,
-            AdvanceStep::Broadcast { .. }
-                | AdvanceStep::Prove { .. }
-                | AdvanceStep::Rebuild { .. }
-                | AdvanceStep::Replan
-        )
-        .then_some(activation),
     }
 }
 
@@ -2953,13 +2925,13 @@ fn drive_advance(
 ///   not reached; the answer is then [`ZCASHLC_ADVANCE_STEP_REEVALUATE`], to sync and ask again,
 ///   until the scan has reached the block before the activation.
 /// - Otherwise a step the gate holds back answers
-///   [`ZCASHLC_ADVANCE_STEP_PAUSED_FOR_NETWORK_UPGRADE`]: Rebuild and Replan while the activation
-///   is far off, and Broadcast, Prove, Rebuild and Replan in the 48 blocks before it.
+///   [`ZCASHLC_ADVANCE_STEP_PAUSED_FOR_NETWORK_UPGRADE`]: Rebuild and Replan before activation.
+///   Valid committed transactions may still be proved and broadcast.
 ///
 /// Both answers carry the activation height in
 /// [`FfiMigrationAdvanceStep::network_upgrade_height`], name no transaction and carry no outlook.
 ///
-/// `upgrade_gate_bypass` is for internal builds: it lifts the pause and the cutoff, and leaves the
+/// `upgrade_gate_bypass` is for internal builds: it lifts the scheduled-work pause, and leaves the
 /// interruption in force, since a stranded run cannot complete however the host asks.
 ///
 /// # Safety
@@ -3784,8 +3756,8 @@ pub unsafe extern "C" fn zcashlc_migration_prepare_note_split(
 /// before it calls this. The transaction is checked against the next block, the one after the higher
 /// of that height and the wallet's chain tip, and refused with
 /// `MIGRATION_SUBMISSION_REFUSED:<code>` when it cannot be valid there (see
-/// [`refuse_unsubmittable`]; `upgrade_gate_bypass` lifts the cutoff window of that check and
-/// nothing else). The check runs after the transaction is proved and before the store's broadcast
+/// [`refuse_unsubmittable`]; submission validity is never bypassed). The check runs after the
+/// transaction is proved and before the store's broadcast
 /// seam records it, so a refused transaction is not recorded in the wallet, while the committed run
 /// and the stored proof stay. A negative `submission_server_height` is "unknown" and fails closed,
 /// before the run is committed.
@@ -4325,12 +4297,11 @@ pub unsafe extern "C" fn zcashlc_migration_prove_transactions(
 /// the transaction will be submitted to reports as its latest block, which the platform reads on
 /// its connection to that server just before it calls this. The next block is the one after the
 /// higher of that height and the wallet's chain tip, and a transaction that is not built for that
-/// block's consensus branch, that has expired by it, or that falls in the cutoff window before the
-/// NU7 activation is refused with `MIGRATION_SUBMISSION_REFUSED:<code>` (`wrong_branch`, `expired`
-/// or `cutoff`; see [`refuse_unsubmittable`]) and returns NULL. The seam is never reached then, so
-/// the refused transaction is not recorded in the wallet. `upgrade_gate_bypass` is for internal
-/// builds: it lifts the cutoff window and nothing else, never the branch and expiry checks. A
-/// negative `submission_server_height` is "unknown", which fails closed.
+/// block's consensus branch or that has expired by it is refused with
+/// `MIGRATION_SUBMISSION_REFUSED:<code>` (`wrong_branch` or `expired`; see [`refuse_unsubmittable`])
+/// and returns NULL. The seam is never reached then, so the refused transaction is not recorded in
+/// the wallet. `upgrade_gate_bypass` is retained for ABI compatibility and never bypasses validity.
+/// A negative `submission_server_height` is "unknown", which fails closed.
 ///
 /// A run that has ended (completed, failed, superseded or cancelled) serves nothing: an instruction
 /// issued before a cancel can arrive after it, and serving it would record the transaction and mark
@@ -4438,8 +4409,8 @@ pub unsafe extern "C" fn zcashlc_migration_take_broadcast_transaction(
 /// platform reads it from (the platform submits the preparation by its own means, possibly to
 /// several servers, so it is not necessarily the one it submits to), a transaction that cannot be
 /// valid in the block after the higher of that height and the wallet's chain tip is refused with
-/// `MIGRATION_SUBMISSION_REFUSED:<code>` and not recorded in the wallet, `upgrade_gate_bypass` lifts
-/// the cutoff window and nothing else, and a negative height fails closed. A run that has ended
+/// `MIGRATION_SUBMISSION_REFUSED:<code>` and not recorded in the wallet. The retained
+/// `upgrade_gate_bypass` never bypasses validity, and a negative height fails closed. A run that has ended
 /// serves nothing, with a bare refusal made before any check.
 ///
 /// # Safety
@@ -12653,9 +12624,8 @@ mod tests {
     // `zcashlc_migration_advance_step` answers PAUSED_FOR_NETWORK_UPGRADE or
     // INTERRUPTED_BY_NETWORK_UPGRADE in place of the engine's own step where `crate::migration_gate`
     // says the migration may not act, judged at the WALLET's tip alone. Mainnet fixtures: NU7
-    // activates at 3,543,405, so the cutoff window holds the next heights 3,543,357..=3,543,404 and
-    // a wallet tip is judged one block on. Tips up to 3,543,355 are before the cutoff, 3,543,356
-    // through 3,543,403 are inside it, and 3,543,404 is the last tip before the activation.
+    // activates at 3,543,405. New scheduled work pauses through tip 3,543,403; tip 3,543,404
+    // opens it because the next block activates NU7. Valid committed work continues before then.
 
     /// Everything one advance-step read hands back, copied out of the DTO before it is freed.
     #[derive(Debug)]
@@ -12946,38 +12916,30 @@ mod tests {
         }
     }
 
-    /// The gate holds back exactly the steps it names, in each phase, and nothing else: before the
-    /// cutoff only the work that builds something new, inside it the work that moves anything.
+    /// Only steps that build new scheduled work wait for activation.
     #[test]
     fn the_upgrade_gate_withholds_exactly_the_steps_it_names() {
         let activation = h(3_543_405);
         let id = MigrationTransferId::new(1);
-        // (step, withheld before the cutoff, withheld in the cutoff window)
         let steps = [
             (
                 AdvanceStep::Prove {
                     transactions: Vec::new(),
                 },
                 false,
-                true,
             ),
-            (AdvanceStep::Broadcast { id }, false, true),
-            (AdvanceStep::Rebuild { id }, true, true),
-            (AdvanceStep::Replan, true, true),
-            (AdvanceStep::Reevaluate, false, false),
-            (AdvanceStep::Waiting, false, false),
-            (AdvanceStep::Complete, false, false),
+            (AdvanceStep::Broadcast { id }, false),
+            (AdvanceStep::Rebuild { id }, true),
+            (AdvanceStep::Replan, true),
+            (AdvanceStep::Reevaluate, false),
+            (AdvanceStep::Waiting, false),
+            (AdvanceStep::Complete, false),
         ];
-        for (step, before_cutoff, in_cutoff) in steps {
+        for (step, withheld) in steps {
             assert_eq!(
                 paused_until(GatePhase::PausedUntil { activation }, &step),
-                before_cutoff.then_some(activation),
-                "before the cutoff: {step:?}"
-            );
-            assert_eq!(
-                paused_until(GatePhase::Cutoff { activation }, &step),
-                in_cutoff.then_some(activation),
-                "in the cutoff window: {step:?}"
+                withheld.then_some(activation),
+                "before activation: {step:?}"
             );
             assert_eq!(
                 paused_until(GatePhase::Open, &step),
@@ -12987,12 +12949,12 @@ mod tests {
         }
     }
 
-    /// Before the cutoff, only work that BUILDS something new is held back: a rebuild signs a
-    /// replacement for the branch of the next block, so while the activation is far off the
+    /// Before activation, work that BUILDS something new is held back: a rebuild signs a
+    /// replacement for the branch of the next block, so throughout the preactivation pause the
     /// platform is told to wait, with the activation height to wait for. The pause carries no
     /// outlook: it ends when the chain reaches the upgrade, at no height the drive can name.
     #[test]
-    fn advance_step_pauses_a_rebuild_before_the_cutoff() {
+    fn advance_step_pauses_a_rebuild_before_activation() {
         let paused = gated_step("pauses", GateRun::Rebuild, 3_543_000, false);
         assert_eq!(
             paused.step, ZCASHLC_ADVANCE_STEP_PAUSED_FOR_NETWORK_UPGRADE,
@@ -13009,9 +12971,9 @@ mod tests {
         assert_eq!(bypassed.network_upgrade_height, -1);
     }
 
-    /// A re-plan builds a new run, so it is held back before the cutoff as a rebuild is.
+    /// A re-plan builds a new run, so it is held back before activation as a rebuild is.
     #[test]
-    fn advance_step_pauses_a_replan_before_the_cutoff() {
+    fn advance_step_pauses_a_replan_before_activation() {
         let paused = gated_step("pauses", GateRun::Replan, 3_543_000, false);
         assert_eq!(
             paused.step, ZCASHLC_ADVANCE_STEP_PAUSED_FOR_NETWORK_UPGRADE,
@@ -13025,11 +12987,10 @@ mod tests {
         assert_eq!(bypassed.network_upgrade_height, -1);
     }
 
-    /// Before the cutoff the transactions already built keep moving: a valid one is still
-    /// proved and broadcast, up to the last tip before the window.
+    /// Transactions already built keep moving before activation: valid work is proved and broadcast.
     #[test]
-    fn advance_step_passes_broadcast_and_prove_through_before_the_cutoff() {
-        // 3,543,355 is judged at the next height 3,543,356, one short of the window.
+    fn advance_step_passes_broadcast_and_prove_through_before_activation() {
+        // A committed run remains valid at the next height 3,543,356.
         for tip in [3_543_000, 3_543_355] {
             let broadcast = gated_step("passes", GateRun::Broadcast, tip, false);
             assert_eq!(
@@ -13049,39 +13010,29 @@ mod tests {
         }
     }
 
-    /// In the cutoff window nothing is sent or proved: a broadcast started now could still be in
-    /// flight when the branch changes. The window runs from the tip before its first next height
-    /// (3,543,356) to the one before the activation's (3,543,403); the bypass lifts it.
+    /// Committed transactions can still be proved and broadcast up to the activation.
     #[test]
-    fn advance_step_pauses_broadcast_and_prove_in_the_cutoff_window() {
-        for tip in [3_543_356, 3_543_403] {
+    fn advance_step_passes_valid_broadcast_and_prove_until_activation() {
+        for tip in [3_543_355, 3_543_356, 3_543_403] {
             for run in [GateRun::Broadcast, GateRun::Prove] {
-                let paused = gated_step("window", run, tip, false);
-                assert_eq!(
-                    paused.step, ZCASHLC_ADVANCE_STEP_PAUSED_FOR_NETWORK_UPGRADE,
-                    "tip {tip}, {run:?}: {paused:?}"
-                );
-                assert_eq!(paused.network_upgrade_height, 3_543_405);
-                assert_eq!(paused.next_height, -1);
-                assert_eq!(
-                    paused.batch_len, 0,
-                    "a paused step hands out no prove batch"
-                );
-
-                let bypassed = gated_step("window", run, tip, true);
-                assert_eq!(
-                    bypassed.step,
-                    run.engine_step(),
-                    "tip {tip}, {run:?}: {bypassed:?}"
-                );
-                assert_eq!(bypassed.network_upgrade_height, -1);
+                let step = gated_step("preactivation", run, tip, false);
+                assert_eq!(step.step, run.engine_step(), "tip {tip}, {run:?}: {step:?}");
+                assert_eq!(step.network_upgrade_height, -1);
+                if matches!(run, GateRun::Prove) {
+                    assert_eq!(
+                        step.batch_len, 1,
+                        "the executor receives the committed proof batch"
+                    );
+                } else {
+                    assert_eq!(step.id, 7, "the executor receives the committed transfer");
+                }
             }
         }
     }
 
-    /// The window holds the build steps back as well, whatever is left of the run.
+    /// The preactivation pause holds new build steps back, whatever is left of the run.
     #[test]
-    fn advance_step_pauses_a_rebuild_and_a_replan_in_the_cutoff_window() {
+    fn advance_step_pauses_a_rebuild_and_a_replan_near_activation() {
         for tip in [3_543_356, 3_543_403] {
             for run in [GateRun::Rebuild, GateRun::Replan] {
                 let paused = gated_step("window", run, tip, false);
@@ -13097,7 +13048,7 @@ mod tests {
     /// A step that asks nothing of the platform is the engine's own in every phase, outlook
     /// included: the gate names what it holds back, and waiting or being done is neither.
     #[test]
-    fn advance_step_leaves_waiting_and_complete_alone_in_the_cutoff_window() {
+    fn advance_step_leaves_waiting_and_complete_alone_near_activation() {
         for run in [GateRun::Waiting, GateRun::Complete] {
             let in_window = gated_step("alone", run, 3_543_380, false);
             let bypassed = gated_step("alone", run, 3_543_380, true);
@@ -13143,7 +13094,7 @@ mod tests {
         assert_eq!(interrupted.next_height, -1);
         assert_eq!(interrupted.id, 0);
 
-        // The bypass lifts the pause and the cutoff, never this.
+        // The bypass lifts the scheduled-work pause, never interruption.
         let bypassed = read_gated_step(path_bytes, &account, -1, true);
         assert_eq!(
             bypassed.step, ZCASHLC_ADVANCE_STEP_INTERRUPTED_BY_NETWORK_UPGRADE,
@@ -13293,7 +13244,7 @@ mod tests {
     }
 
     /// The wall-clock estimate only ever brings scheduled work forward; the gate is judged at the
-    /// wallet's own chain tip. An estimate inside the cutoff window does not pause a broadcast
+    /// wallet's own chain tip. An estimate near activation does not pause a broadcast
     /// that is valid at the tip, and one past the activation does not declare a run over that the
     /// chain has not yet stranded.
     #[test]
@@ -13304,7 +13255,7 @@ mod tests {
         let broadcast = read_gated_step(path_bytes, &account, 3_543_400, false);
         assert_eq!(
             broadcast.step, ZCASHLC_ADVANCE_STEP_BROADCAST,
-            "an estimate in the cutoff window must not pause a broadcast: {broadcast:?}"
+            "an estimate near activation must not pause a broadcast: {broadcast:?}"
         );
         assert_eq!(broadcast.id, 7);
         let _ = std::fs::remove_file(&path);
@@ -13325,8 +13276,7 @@ mod tests {
     // `MIGRATION_PAUSED_UNTIL_UPGRADE:<activation height>` while the NU7 gate is closed at the
     // WALLET's next height, and `zcashlc_migration_restart_step` reports the upgrade it waits for
     // instead of planning. Mainnet fixtures: NU7 activates at 3,543,405, so every tip through
-    // 3,543,403 leaves the gate closed (3,543,355 and below under the pause, 3,543,356 on inside
-    // the cutoff window) and 3,543,404, whose next block is the activation block, opens it.
+    // 3,543,403 leaves new scheduled work paused; 3,543,404, whose next block is the activation, opens it.
 
     /// What the mainnet refusal says, exactly: the Swift layer parses the height off the end of it.
     const MAINNET_PAUSED_ERROR: &str = "MIGRATION_PAUSED_UNTIL_UPGRADE:3543405";
@@ -13591,7 +13541,7 @@ mod tests {
 
     /// Before the activation every entry point that plans, builds, signs, stores or rebuilds a
     /// scheduled run is refused, with the activation height in the error: under the pause (the
-    /// next height is 3,543,001) and at the first height of the cutoff window (3,543,357) alike.
+    /// next height is 3,543,001) and close to activation (3,543,357) alike.
     #[test]
     fn gated_entry_points_refuse_before_activation() {
         let (path, account, usk) = pre_activation_fixture("refuse", 3_543_000);
@@ -13780,7 +13730,7 @@ mod tests {
 
     /// A restart before the activation is not an error: it cancels the run, as it always does,
     /// plans nothing, and reports the activation height a new plan waits for. It is judged at the
-    /// wallet's own tip, under the pause and inside the cutoff window alike, and the cancelled
+    /// wallet's own tip, throughout the preactivation pause, and the cancelled
     /// run leaves the funded balance spendable for the plan that follows the upgrade.
     #[test]
     fn restart_before_activation_cancels_and_reports_the_upgrade() {
@@ -14079,7 +14029,7 @@ mod tests {
     }
 
     /// The upgrade gate stops what starts a run, never what ends one, so a cancel works under the
-    /// pause (the next height is 3,543,001) and inside the cutoff window (3,543,357) alike, with
+    /// pause (at next heights 3,543,001 and 3,543,357 alike), with
     /// no bypass to lift it.
     #[test]
     fn cancel_run_is_not_gated_by_the_network_upgrade() {
@@ -14146,9 +14096,8 @@ mod tests {
     // `zcashlc_migration_availability` reports the NU7 gate's phase at the wallet's next height to
     // the platform, which decides from it what to offer. It takes no account, opens the wallet
     // read-only, and judges the wallet's own chain tip alone. Mainnet fixtures: NU7 activates at
-    // 3,543,405, so the pause holds the tips through 3,543,355, the cutoff window the tips from
-    // 3,543,356 through 3,543,403, and the tip 3,543,404, whose next block is the activation
-    // block, opens the gate. Testnet activates NU7 at 4,465,026.
+    // 3,543,405, so new scheduled work pauses through tip 3,543,403. Tip 3,543,404, whose next
+    // block is the activation, opens the gate. Testnet activates NU7 at 4,465,026.
 
     /// What one availability read hands back, copied out of the DTO before it is freed.
     #[derive(Debug, PartialEq, Eq)]
@@ -14189,8 +14138,8 @@ mod tests {
     }
 
     /// The availability follows the wallet's tip through the gate's phases, on a wallet that has
-    /// no account at all: the pause leaves the immediate lane open, the cutoff window closes it,
-    /// and the activation block opens everything. The activation height is the network's, in every
+    /// no account at all: the immediate lane stays open, while new scheduled work waits for
+    /// the activation block. The activation height is the network's, in every
     /// phase.
     #[test]
     fn availability_reports_each_phase_at_the_wallet_tip() {
@@ -14200,8 +14149,8 @@ mod tests {
         for (tip, phase, immediate_available) in [
             (3_543_000, ZCASHLC_MIGRATION_PAUSED_UNTIL_UPGRADE, true),
             (3_543_355, ZCASHLC_MIGRATION_PAUSED_UNTIL_UPGRADE, true),
-            (3_543_356, ZCASHLC_MIGRATION_UPGRADE_CUTOFF, false),
-            (3_543_403, ZCASHLC_MIGRATION_UPGRADE_CUTOFF, false),
+            (3_543_356, ZCASHLC_MIGRATION_PAUSED_UNTIL_UPGRADE, true),
+            (3_543_403, ZCASHLC_MIGRATION_PAUSED_UNTIL_UPGRADE, true),
             (3_543_404, ZCASHLC_MIGRATION_AVAILABLE, true),
             (3_600_000, ZCASHLC_MIGRATION_AVAILABLE, true),
         ] {
@@ -14223,8 +14172,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// The host's bypass opens the gate at the heights it would close: the same wallet that reports
-    /// the cutoff window, and the pause, reports an open gate when the bypass is on.
+    /// The host's bypass opens scheduled work throughout the preactivation pause.
     #[test]
     fn availability_is_open_with_the_bypass() {
         let path = init_fixture_db("zcashlc_availability_bypass");
@@ -14232,7 +14180,7 @@ mod tests {
 
         for (tip, phase_without_the_bypass) in [
             (3_543_000, ZCASHLC_MIGRATION_PAUSED_UNTIL_UPGRADE),
-            (3_543_356, ZCASHLC_MIGRATION_UPGRADE_CUTOFF),
+            (3_543_356, ZCASHLC_MIGRATION_PAUSED_UNTIL_UPGRADE),
         ] {
             set_fixture_tip_at(path_bytes, tip);
 
@@ -14383,8 +14331,8 @@ mod tests {
         );
         for (tip, expected) in [
             (3_543_355, GatePhase::PausedUntil { activation }),
-            (3_543_356, GatePhase::Cutoff { activation }),
-            (3_543_403, GatePhase::Cutoff { activation }),
+            (3_543_356, GatePhase::PausedUntil { activation }),
+            (3_543_403, GatePhase::PausedUntil { activation }),
             (3_543_404, GatePhase::Open),
         ] {
             assert_eq!(
@@ -15975,7 +15923,7 @@ mod tests {
     // The take executors, and the note-split ceremony's handback, check the transaction they are
     // about to serve against the block it would be mined in, before the store's seam records it in
     // the wallet: it must be built for that block's consensus branch, it must not have expired by
-    // then, and the migration does not send in the cutoff window before the NU7 activation. The
+    // then. Valid work may be submitted throughout the preactivation interval. The
     // block is the one after the HIGHER of the wallet's chain tip and the submission server's
     // height, and a server height that is unknown fails closed.
     //
@@ -15983,8 +15931,7 @@ mod tests {
     // built for NU6.3) or at 3,600,000 (NU7), so a row's branch and expiry are the engine's own. Their
     // rows are `Signed`, which the seam itself refuses as not proved: a refusal of any other kind can
     // only have come from the check before it, and one that is the seam's shows the check let the
-    // row through. Mainnet activates NU7 at 3,543,405, so the cutoff window holds the next heights
-    // 3,543,357..=3,543,404.
+    // row through. Mainnet activates NU7 at 3,543,405.
 
     /// What the seam says of a row that is not `Proved`.
     const SEAM_NOT_PROVED: &str = "is not proved";
@@ -16044,7 +15991,7 @@ mod tests {
     }
 
     /// A row built for the branch before the activation is refused once the next block is the
-    /// activation block, before the seam can record it, and the bypass, which lifts the cutoff, never
+    /// activation block, before the seam can record it, and the scheduling bypass never
     /// lifts this.
     #[test]
     fn take_broadcast_refuses_an_old_branch_transaction_before_the_seam() {
@@ -16133,48 +16080,30 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// The migration sends nothing in the 48 blocks before the activation: a server at 3,543,356
-    /// makes 3,543,357, the first height of the window, the next block, and one at 3,543,403 makes
-    /// the last. The block below the window is open. The bypass lifts the window, and then the
-    /// check lets the row through to the seam.
+    /// Valid committed work reaches the broadcast executor throughout the preactivation interval.
     #[test]
-    fn take_broadcast_refuses_in_the_cutoff_window_unless_bypassed() {
-        let (path, account) = committed_run_fixture("take_cutoff", 3_543_000);
+    fn take_broadcast_passes_valid_work_until_activation() {
+        let (path, account) = committed_run_fixture("take_preactivation", 3_543_000);
         let path_bytes = path.to_str().unwrap().as_bytes();
         let row = fixture_run_row(&path, &account, false);
 
-        for server in [3_543_356, 3_543_403] {
-            let error = take_broadcast_error_at(path_bytes, &account, row.id, server, false);
-            assert_eq!(
-                error, "MIGRATION_SUBMISSION_REFUSED:cutoff",
-                "server at {server}"
-            );
-
-            let error = take_broadcast_error_at(path_bytes, &account, row.id, server, true);
-            assert!(
-                !error.starts_with(SUBMISSION_REFUSED_PREFIX),
-                "server at {server}, bypassed: {error}"
-            );
-            assert!(
-                error.contains(SEAM_NOT_PROVED),
-                "server at {server}, bypassed: {error}"
-            );
+        for server in [3_543_355, 3_543_356, 3_543_403] {
+            for bypass in [false, true] {
+                let error = take_broadcast_error_at(path_bytes, &account, row.id, server, bypass);
+                assert!(
+                    error.contains(SEAM_NOT_PROVED),
+                    "server at {server}, bypass {bypass}: the executor must receive the row: {error}"
+                );
+            }
         }
-
-        let error = take_broadcast_error_at(path_bytes, &account, row.id, 3_543_355, false);
-        assert!(
-            error.contains(SEAM_NOT_PROVED),
-            "the block below the window is open: {error}"
-        );
         assert!(
             !wallet_holds_transaction(&path, &account, row.txid),
-            "a refused transaction is never recorded in the wallet"
+            "the executor cannot record a transaction until its proof is available"
         );
         let _ = std::fs::remove_file(&path);
     }
 
-    /// A transaction built for the next block's branch, unexpired and outside the window, is not
-    /// refused: it reaches the seam.
+    /// A transaction built for the next block's branch and unexpired reaches the seam.
     #[test]
     fn take_broadcast_passes_a_valid_transaction_to_the_seam() {
         let (path, account) = committed_run_fixture("take_valid", 3_600_000);
@@ -16259,25 +16188,27 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// The preparation accessor makes the same check before its seam: the branch, the cutoff
-    /// window and an unknown server height are refused for a preparation's txid.
+    /// The preparation accessor allows valid preactivation work through to its seam, while a
+    /// wrong branch and an unknown server height are refused for a preparation's txid.
     #[test]
     fn take_preparation_checks_before_the_seam() {
         let (path, account) = committed_run_fixture("take_prep_check", 3_543_000);
         let path_bytes = path.to_str().unwrap().as_bytes();
         let preparation = fixture_run_row(&path, &account, true);
 
-        // The next block is the first of the cutoff window.
-        assert_eq!(
-            take_preparation_error_at(path_bytes, &account, preparation.txid, 3_543_356, false),
-            "MIGRATION_SUBMISSION_REFUSED:cutoff"
-        );
-        let error =
-            take_preparation_error_at(path_bytes, &account, preparation.txid, 3_543_356, true);
-        assert!(
-            !error.starts_with(SUBMISSION_REFUSED_PREFIX) && error.contains(SEAM_NOT_PROVED),
-            "bypassed, the check lets the preparation through to the seam: {error}"
-        );
+        for bypass in [false, true] {
+            let error = take_preparation_error_at(
+                path_bytes,
+                &account,
+                preparation.txid,
+                3_543_356,
+                bypass,
+            );
+            assert!(
+                error.contains(SEAM_NOT_PROVED),
+                "the executor receives valid preparation, bypass {bypass}: {error}"
+            );
+        }
 
         let error = take_preparation_error_at(path_bytes, &account, preparation.txid, -1, false);
         assert!(

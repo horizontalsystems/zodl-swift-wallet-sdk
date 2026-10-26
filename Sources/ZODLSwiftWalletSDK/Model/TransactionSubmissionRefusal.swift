@@ -23,8 +23,6 @@ import Foundation
 /// ``TransactionSubmitResult/submitFailure(txId:code:description:)`` when the synchronizer submits it, and,
 /// when it is submitted to several endpoints, as ``TransactionSubmissionOutcome/rejected(code:message:)`` once
 /// every endpoint has answered and none accepted it, with the refusal's ``code`` and ``description``.
-/// ``networkUpgradeCutoff`` is the scheduled migration's alone: a normal send, the immediate migration
-/// included, is never cut off.
 ///
 /// A refused normal transaction has to be created again, after a sync: a wallet that is behind the
 /// server would build one that is refused again. The refused one stays in the wallet, which stored it
@@ -38,23 +36,16 @@ public enum TransactionSubmissionRefusal: Equatable, Sendable, CustomStringConve
     /// The transaction's expiry height is below the next block's, so no block can include it any
     /// more (ZIP 203). A normal transaction has to be created again, after a sync.
     case expired
-    /// The next block is one of the 48 immediately before the NU7 network upgrade activates, in
-    /// which the migration submits nothing, so that no migration transaction is still in flight
-    /// when the consensus branch changes. Only a migration transaction is refused for this reason.
-    /// Nothing is lost: the transaction waits for the upgrade.
-    case networkUpgradeCutoff
 
     /// The local code the refusal is reported under where a failure carries an integer code:
-    /// `-9101` (``wrongConsensusBranch``), `-9102` (``expired``) and `-9103`
-    /// (``networkUpgradeCutoff``). They are stable, and no server sends them.
+    /// `-9101` (``wrongConsensusBranch``) and `-9102` (``expired``).
+    /// They are stable, and no server sends them.
     public var code: Int {
         switch self {
         case .wrongConsensusBranch:
             return -9101
         case .expired:
             return -9102
-        case .networkUpgradeCutoff:
-            return -9103
         }
     }
 
@@ -66,8 +57,6 @@ public enum TransactionSubmissionRefusal: Equatable, Sendable, CustomStringConve
             return "The transaction is built for another consensus branch than the next block's."
         case .expired:
             return "The transaction expires before the next block."
-        case .networkUpgradeCutoff:
-            return "Migration transactions are not submitted in the blocks just before the network upgrade."
         }
     }
 }
@@ -81,8 +70,6 @@ extension TransactionSubmissionRefusal {
             self = .wrongConsensusBranch
         case "expired":
             self = .expired
-        case "cutoff":
-            self = .networkUpgradeCutoff
         default:
             return nil
         }

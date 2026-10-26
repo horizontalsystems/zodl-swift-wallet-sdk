@@ -8,14 +8,11 @@
 //! be left holding signed transactions that no block can include, and the notes they spend would
 //! stay reserved for them. The gate keeps a run on one side of the activation:
 //!
-//! - [`gate_phase`] says what the migration may do at the next height. While the activation is
-//!   far off, the scheduled lane, which spreads a run over many blocks, is paused and only the
-//!   immediate lane, which sends a whole run at once, stays open ([`GatePhase::PausedUntil`]). In
-//!   the last [`NETWORK_UPGRADE_CUTOFF_BLOCKS`] blocks before the activation both lanes stop
-//!   ([`GatePhase::Cutoff`]), so that nothing new is started so close to the upgrade that it
-//!   could still be in flight when the branch changes. From the activation on, on a network with
-//!   no NU7 height, and for a host that opts out with the bypass (internal builds only), the gate
-//!   is [`GatePhase::Open`].
+//! - [`gate_phase`] says whether new scheduled work may start at the next height. Before NU7,
+//!   the scheduled lane is paused ([`GatePhase::PausedUntil`]); the immediate lane stays open,
+//!   and valid committed work may still be proved and submitted. From the activation on, on a
+//!   network with no NU7 height, and for an internal host using the bypass, the gate is
+//!   [`GatePhase::Open`].
 //! - [`check_submittable`] is the check every submission passes, migration or not, whatever the
 //!   phase: the transaction must be built for the branch the next block is under, and it must not
 //!   have expired by then.
@@ -30,22 +27,15 @@ use pczt::Pczt;
 use zcash_pool_migration::engine::MigrationTxState;
 use zcash_protocol::consensus::{BlockHeight, BranchId, NetworkUpgrade, Parameters};
 
-/// How wide the cutoff window is, in blocks: it holds the next heights from
-/// `activation - NETWORK_UPGRADE_CUTOFF_BLOCKS` up to the one before the activation.
-pub(crate) const NETWORK_UPGRADE_CUTOFF_BLOCKS: u32 = 48;
-
 /// What the migration may do at a given next height, as [`gate_phase`] decides it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GatePhase {
     /// No gate applies: the network has no NU7 height, NU7 is active at the next height, or the
     /// host opted out.
     Open,
-    /// The next height is below `activation - NETWORK_UPGRADE_CUTOFF_BLOCKS`: the scheduled lane
-    /// is paused until the upgrade, and the immediate lane is open.
+    /// The next height is below activation: new scheduled work is paused until the upgrade,
+    /// while the immediate lane and valid committed work remain available.
     PausedUntil { activation: BlockHeight },
-    /// The next height is at least `activation - NETWORK_UPGRADE_CUTOFF_BLOCKS` and below the
-    /// activation: both lanes are stopped.
-    Cutoff { activation: BlockHeight },
 }
 
 /// The height at which the network activates NU7, or `None` when it never does.
@@ -65,10 +55,6 @@ pub(crate) fn gate_phase<P: Parameters>(
     };
     if bypass || next_height >= activation {
         GatePhase::Open
-    } else if next_height >= activation - NETWORK_UPGRADE_CUTOFF_BLOCKS {
-        // Subtracting from a `BlockHeight` saturates, so an activation closer to genesis than the
-        // window is wide starts the window at genesis and leaves no height to pause at.
-        GatePhase::Cutoff { activation }
     } else {
         GatePhase::PausedUntil { activation }
     }
@@ -81,10 +67,6 @@ pub(crate) enum SubmissionRefusal {
     WrongBranch,
     /// The transaction has expired by the next height.
     Expired,
-    /// The next height is in the cutoff window ([`GatePhase::Cutoff`]), which stops the migration
-    /// lanes. [`check_submittable`] never returns this: it is the check of normal sends too, and
-    /// those are never cut off. The callers that submit migration transactions raise it.
-    Cutoff,
 }
 
 impl SubmissionRefusal {
@@ -94,7 +76,6 @@ impl SubmissionRefusal {
         match self {
             SubmissionRefusal::WrongBranch => "wrong_branch",
             SubmissionRefusal::Expired => "expired",
-            SubmissionRefusal::Cutoff => "cutoff",
         }
     }
 }
@@ -275,21 +256,11 @@ mod tests {
     // ----- gate_phase -----
 
     #[test]
-    fn gate_phase_pauses_below_the_cutoff() {
-        assert_eq!(
-            gate_phase(&MAIN_NETWORK, h(3_543_356), false),
-            GatePhase::PausedUntil {
-                activation: h(MAINNET_NU7)
-            }
-        );
-    }
-
-    #[test]
-    fn gate_phase_enters_the_cutoff_window_48_blocks_before_activation() {
-        for next in [3_543_357, 3_543_404] {
+    fn gate_phase_pauses_scheduled_work_until_mainnet_activation() {
+        for next in [3_543_356, 3_543_357, 3_543_404] {
             assert_eq!(
                 gate_phase(&MAIN_NETWORK, h(next), false),
-                GatePhase::Cutoff {
+                GatePhase::PausedUntil {
                     activation: h(MAINNET_NU7)
                 },
                 "next height {next}"
@@ -310,7 +281,7 @@ mod tests {
 
     #[test]
     fn gate_phase_is_open_with_the_bypass() {
-        // One height in the paused phase and one in the cutoff window.
+        // Both earlier and immediately before activation, the bypass opens scheduled work.
         for next in [3_543_000, 3_543_400] {
             assert_eq!(
                 gate_phase(&MAIN_NETWORK, h(next), true),
@@ -321,7 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn gate_phase_uses_the_networks_own_activation_height() {
+    fn gate_phase_pauses_scheduled_work_until_testnet_activation() {
         assert_eq!(
             gate_phase(&TEST_NETWORK, h(TESTNET_NU7), false),
             GatePhase::Open
@@ -332,7 +303,7 @@ mod tests {
                 activation: h(TESTNET_NU7)
             }
         );
-        // The window runs from 48 blocks below testnet's activation to the block before it.
+        // New scheduled work stays paused through the final preactivation block.
         assert_eq!(
             gate_phase(&TEST_NETWORK, h(4_464_977), false),
             GatePhase::PausedUntil {
@@ -342,7 +313,7 @@ mod tests {
         for next in [4_464_978, 4_465_025] {
             assert_eq!(
                 gate_phase(&TEST_NETWORK, h(next), false),
-                GatePhase::Cutoff {
+                GatePhase::PausedUntil {
                     activation: h(TESTNET_NU7)
                 },
                 "next height {next}"
@@ -363,18 +334,18 @@ mod tests {
     }
 
     #[test]
-    fn gate_phase_clamps_the_cutoff_window_at_genesis() {
-        // An activation within 48 blocks of genesis leaves no room to pause: every earlier height
-        // is in the window.
+    fn gate_phase_handles_an_activation_near_genesis() {
+        // Even an activation near genesis pauses new scheduled work at every earlier height.
         let early = custom(Some(10));
         for next in [0, 9] {
             assert_eq!(
                 gate_phase(&early, h(next), false),
-                GatePhase::Cutoff { activation: h(10) },
+                GatePhase::PausedUntil { activation: h(10) },
                 "next height {next}"
             );
         }
-        // At 49 the window starts at height 1, so only the genesis height is still paused.
+        assert_eq!(gate_phase(&early, h(10), false), GatePhase::Open);
+        // An activation at 49 has the same policy at genesis and the following block.
         let network = custom(Some(49));
         assert_eq!(
             gate_phase(&network, h(0), false),
@@ -382,7 +353,7 @@ mod tests {
         );
         assert_eq!(
             gate_phase(&network, h(1), false),
-            GatePhase::Cutoff { activation: h(49) }
+            GatePhase::PausedUntil { activation: h(49) }
         );
     }
 
@@ -485,7 +456,6 @@ mod tests {
     fn submission_refusals_are_reported_under_their_stable_codes() {
         assert_eq!(SubmissionRefusal::WrongBranch.code(), "wrong_branch");
         assert_eq!(SubmissionRefusal::Expired.code(), "expired");
-        assert_eq!(SubmissionRefusal::Cutoff.code(), "cutoff");
     }
 
     // ----- pczt_consensus_branch_id -----

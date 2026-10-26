@@ -506,10 +506,9 @@ final class MigrationFFITests: XCTestCase {
     // MARK: - The availability read and the cancel-only call (real FFI)
 
     /// The availability follows the wallet's own chain tip through the gate's phases, with no
-    /// account involved. On testnet, whose NU7 activates at 4,465,026, the cutoff window holds the
-    /// next heights from 4,464,978, so the tip 4,464,977 is its first and 4,465,025, whose next
-    /// block is the activation block, is the first that is open. The activation height is
-    /// testnet's in every phase.
+    /// account involved. On testnet, NU7 activates at 4,465,026. New scheduled work stays paused
+    /// until tip 4,465,025, whose next block is the activation. The immediate lane stays available
+    /// throughout, and the activation height is testnet's in both phases.
     func testAvailabilityDecodesEachPhase() async throws {
         let directory = try makeUniqueStorageDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -521,8 +520,16 @@ final class MigrationFFITests: XCTestCase {
                 MigrationAvailability(phase: .pausedUntilNetworkUpgrade, activationHeight: 4_465_026, isImmediateLaneAvailable: true)
             ),
             (
+                4_464_976,
+                MigrationAvailability(phase: .pausedUntilNetworkUpgrade, activationHeight: 4_465_026, isImmediateLaneAvailable: true)
+            ),
+            (
                 4_464_977,
-                MigrationAvailability(phase: .networkUpgradeCutoff, activationHeight: 4_465_026, isImmediateLaneAvailable: false)
+                MigrationAvailability(phase: .pausedUntilNetworkUpgrade, activationHeight: 4_465_026, isImmediateLaneAvailable: true)
+            ),
+            (
+                4_465_024,
+                MigrationAvailability(phase: .pausedUntilNetworkUpgrade, activationHeight: 4_465_026, isImmediateLaneAvailable: true)
             ),
             (
                 4_465_025,
@@ -555,7 +562,7 @@ final class MigrationFFITests: XCTestCase {
             ),
             (
                 Int32(4_464_977),
-                MigrationAvailability(phase: .networkUpgradeCutoff, activationHeight: 4_465_026, isImmediateLaneAvailable: false)
+                MigrationAvailability(phase: .pausedUntilNetworkUpgrade, activationHeight: 4_465_026, isImmediateLaneAvailable: true)
             )
         ] {
             try await wallet.backend.updateChainTip(height: tip)
@@ -617,8 +624,7 @@ final class MigrationFFITests: XCTestCase {
     func testAvailabilityMappingDecodesEachPhaseAndTheNoActivationSentinel() throws {
         let cases: [(phase: Int32, expected: MigrationAvailability.Phase)] = [
             (ZCASHLC_MIGRATION_AVAILABLE, .available),
-            (ZCASHLC_MIGRATION_PAUSED_UNTIL_UPGRADE, .pausedUntilNetworkUpgrade),
-            (ZCASHLC_MIGRATION_UPGRADE_CUTOFF, .networkUpgradeCutoff)
+            (ZCASHLC_MIGRATION_PAUSED_UNTIL_UPGRADE, .pausedUntilNetworkUpgrade)
         ]
         for (phase, expected) in cases {
             let ffi = FfiMigrationAvailability(phase: UInt32(phase), activation_height: 3_543_405, immediate_available: false)
@@ -641,8 +647,7 @@ final class MigrationFFITests: XCTestCase {
 
     /// With no run stored there is nothing to end: the cancel succeeds and stores nothing, so there
     /// is still no run to advance. The upgrade gate stops what starts a run, never what ends one,
-    /// so it succeeds on a wallet whose gate is closed, under the pause and inside the cutoff
-    /// window, with no bypass.
+    /// so it succeeds throughout the preactivation pause, with no bypass.
     func testCancelRunWithoutARunSucceeds() async throws {
         try await rustBackend.migrationCancelRun(for: account)
         let pastActivationStep = try await rustBackend.migrationAdvanceStep(for: account)
@@ -1567,8 +1572,7 @@ final class MigrationFFITests: XCTestCase {
 
         let codes: [(rustCode: String, refusal: TransactionSubmissionRefusal)] = [
             ("wrong_branch", .wrongConsensusBranch),
-            ("expired", .expired),
-            ("cutoff", .networkUpgradeCutoff)
+            ("expired", .expired)
         ]
         for (rustCode, refusal) in codes {
             let routed = backend.migrationRoutedError(
@@ -1607,14 +1611,12 @@ final class MigrationFFITests: XCTestCase {
     func testTransactionSubmissionRefusalHasStableCodesAndDescriptions() {
         XCTAssertEqual(TransactionSubmissionRefusal.wrongConsensusBranch.code, -9101)
         XCTAssertEqual(TransactionSubmissionRefusal.expired.code, -9102)
-        XCTAssertEqual(TransactionSubmissionRefusal.networkUpgradeCutoff.code, -9103)
         XCTAssertEqual(
             Set([
                 TransactionSubmissionRefusal.wrongConsensusBranch.description,
-                TransactionSubmissionRefusal.expired.description,
-                TransactionSubmissionRefusal.networkUpgradeCutoff.description
+                TransactionSubmissionRefusal.expired.description
             ]).count,
-            3,
+            2,
             "each refusal describes itself"
         )
     }

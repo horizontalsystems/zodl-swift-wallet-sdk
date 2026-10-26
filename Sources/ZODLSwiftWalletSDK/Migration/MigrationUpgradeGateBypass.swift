@@ -19,7 +19,7 @@ import os
 /// reaches migrations that already exist and the ones built later, and no gated welding signature
 /// has to carry the flag.
 ///
-/// - Note: The bypass lifts the gate's pause and its cutoff. It does not lift the check that keeps
+/// - Note: The bypass lifts the pause on new scheduled work. It does not lift the check that keeps
 ///   a transaction the next block cannot include from being submitted, nor the detection of a run
 ///   the upgrade has stranded.
 final class MigrationUpgradeGateBypass: Sendable {

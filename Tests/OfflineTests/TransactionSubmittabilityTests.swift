@@ -529,8 +529,8 @@ final class TransactionSubmittabilityFFITests: ZcashTestCase {
         XCTAssertEqual(after, .wrongConsensusBranch)
     }
 
-    func testTheBackendNeverAppliesTheMigrationsCutoff() async throws {
-        // The next block is the first of the 48 before the activation.
+    func testTheBackendAcceptsAValidTransactionBeforeActivation() async throws {
+        // The next block still accepts the transaction's NU6.3 consensus branch.
         let refusal = try await backend.checkTransactionSubmittable(v6Nu63, submissionServerHeight: 3_543_356)
         XCTAssertNil(refusal)
     }

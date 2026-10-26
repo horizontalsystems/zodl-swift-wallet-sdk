@@ -446,7 +446,7 @@ final class OrchardMigrationCompositionTests: ZcashTestCase {
     func testSubmitNoteSplitRefusedAtTheSeamSubmitsNothing() async throws {
         let proposal = NoteSplitProposal(outputNotes: [Zatoshi(100_000)], fee: Zatoshi(5_000), proposalHandle: 1)
         welding.migrationSignNoteSplitProposalUskSubmissionServerHeightForThrowableError =
-            ZcashError.migrationSubmissionRefused(.networkUpgradeCutoff)
+            ZcashError.migrationSubmissionRefused(.expired)
         welding.migrationRecordTransferResultTransferIdResultForClosure = { _, _, _ in }
         let broadcaster = ScriptedBroadcaster(script: .outcome(.submitted))
         let migration = makeMigration(broadcaster: broadcaster)
@@ -459,7 +459,7 @@ final class OrchardMigrationCompositionTests: ZcashTestCase {
             )
             XCTFail("Expected the refusal to propagate")
         } catch ZcashError.migrationSubmissionRefused(let refusal) {
-            XCTAssertEqual(refusal, .networkUpgradeCutoff)
+            XCTAssertEqual(refusal, .expired)
         } catch {
             XCTFail("Expected migrationSubmissionRefused but got \(error)")
         }

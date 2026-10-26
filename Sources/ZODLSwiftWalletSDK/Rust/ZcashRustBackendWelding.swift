@@ -118,8 +118,7 @@ protocol ZcashRustBackendWelding {
     /// chain tip and `submissionServerHeight`, the latest block height of the server the transaction is about to be
     /// submitted to: the wallet lags every block it has not synced yet, and the server may lag the wallet. A wallet that
     /// has no chain tip yet is judged by the server's height alone. The branch is compared only for a transaction whose
-    /// encoding commits to one (v5 and later). Unlike the migration's own check, this one knows no cutoff window before a
-    /// network upgrade: a normal send is never cut off.
+    /// encoding commits to one (v5 and later). These validity checks apply at every height.
     ///
     /// The wallet is opened read-only. Nothing is written to it.
     /// - Parameters:

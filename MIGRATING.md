@@ -1520,8 +1520,8 @@ Both come from the gate that keeps the migration from acting across the NU7 netw
 are answered from the wallet's own chain tip, in front of the engine's step:
 
 - `.pausedForNetworkUpgrade(activationHeight:)` — the engine's step is one the gate holds back: a rebuild or a
-  re-plan while the activation is more than 48 blocks away, and a broadcast, a proof, a rebuild or a re-plan in
-  the 48 blocks before it. Do nothing now and ask again as the chain advances. Nothing is handed out to
+  re-plan before activation. Valid committed work may still be proved and broadcast up to activation.
+  Do nothing now and ask again as the chain advances. Nothing is handed out to
   execute, and there is no outlook.
 - `.interruptedByNetworkUpgrade(activationHeight:)` — the wallet is past the activation and a transaction of
   the run that is not mined was built for the branch before it, so the run cannot complete. Cancel the run
@@ -1559,6 +1559,13 @@ case .replan, .reevaluate, .waiting, .complete, nil:
 
 `Synchronizer` also gained `setMigrationNetworkUpgradeGateBypass(_:)`, `migrationAvailability()` and
 `cancelMigrationRun(accountUUID:)`, which have default implementations, so a custom conformer needs no change.
+
+`MigrationAvailability.Phase` has two cases: `.available` and `.pausedUntilNetworkUpgrade`. The latter
+pauses only new scheduled work until the next block is at the NU7 activation height. Immediate migration
+remains available, and `isImmediateLaneAvailable` is always `true` under this policy; the field remains for
+compatibility. Proof and broadcast of valid committed work continue before activation. Every submission
+still checks consensus branch, expiry and the submission server's height, independently of the internal
+scheduling bypass. `TransactionSubmissionRefusal` contains only `.wrongConsensusBranch` and `.expired`.
 
 ## `restartCurrentMigrationStep` returns `MigrationRestartOutcome`
 
@@ -1651,10 +1658,6 @@ case .migrationSubmissionRefused(let refusal):
     case .wrongConsensusBranch, .expired:
         // The transaction can never be mined: sync, then crank `migrationAdvanceStep(accountUUID:)` again,
         // which says what becomes of the run (an interrupted one is cancelled, an expired transfer rebuilt).
-        break
-    case .networkUpgradeCutoff:
-        // The next block is one of the 48 before the NU7 activation: nothing is submitted until it has
-        // passed. Sync, then crank again later.
         break
     }
 ```

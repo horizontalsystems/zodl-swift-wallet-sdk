@@ -252,7 +252,6 @@ final class SDKSynchronizerMigrationTests: ZcashTestCase {
         let answers = [
             MigrationAvailability(phase: .available, activationHeight: 3_543_405, isImmediateLaneAvailable: true),
             MigrationAvailability(phase: .pausedUntilNetworkUpgrade, activationHeight: 3_543_405, isImmediateLaneAvailable: true),
-            MigrationAvailability(phase: .networkUpgradeCutoff, activationHeight: 3_543_405, isImmediateLaneAvailable: false),
             MigrationAvailability(phase: .available, activationHeight: nil, isImmediateLaneAvailable: true)
         ]
 
