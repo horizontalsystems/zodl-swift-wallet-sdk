@@ -45,8 +45,10 @@
 //!   refuse a transaction that cannot be valid in the next block, which is the one after the higher
 //!   of that height and the wallet's chain tip ([`refuse_unsubmittable`]). It must be built for that
 //!   block's consensus branch and must not have expired by then. The check runs before the store's
-//!   broadcast seam, so a refused transaction is never recorded in the wallet. The same calls
-//!   refuse to serve a run that has already ended.
+//!   broadcast seam, so a refused transaction is never recorded in the wallet. For an active
+//!   Proved row it first persists testimony at that higher tip, withholding the broadcast until
+//!   scanning can adjudicate it through `advance_migration`. The same calls refuse to serve a
+//!   run that has already ended.
 //! - Mined-ness is DERIVED, never reported: this layer never marks a transaction mined. The
 //!   engine promotes every in-flight transaction its scan has seen mine, inside
 //!   `advance_migration` — including one whose broadcast THIS process failed to record, which it
@@ -528,14 +530,19 @@ fn transaction_by_id(
 /// failure to turn the stored artifact into servable bytes
 /// ([`PROVING_UNAVAILABLE_PREFIX`]). Submission validity is never bypassed.
 ///
-/// A refusal errs `MIGRATION_SUBMISSION_REFUSED:<code>` ([`SUBMISSION_REFUSED_PREFIX`]).
+/// A refusal of an active Proved row first persists testimony at the higher observed tip, so
+/// advance withholds that broadcast until scanning can adjudicate it. Only a successful write
+/// returns `MIGRATION_SUBMISSION_REFUSED:<code>` ([`SUBMISSION_REFUSED_PREFIX`]).
 fn refuse_unsubmittable(
-    ctx: &CallCtx,
-    row: &MigrationTransaction,
+    ctx: &mut CallCtx,
+    state: &MigrationState,
+    id: MigrationTransferId,
     server_height: BlockHeight,
     _bypass: bool,
 ) -> anyhow::Result<()> {
-    let target = submission_target(ctx.tip()?, server_height)?;
+    let row = transaction_by_id(state, id)?;
+    let observed_tip = ctx.tip()?.max(server_height);
+    let target = submission_target(observed_tip, server_height)?;
     let Some(branch) = pczt_consensus_branch_id(row.pczt()) else {
         return Err(proving_unavailable(format!(
             "the PCZT of migration transaction {} does not parse, so the consensus branch it is \
@@ -543,8 +550,18 @@ fn refuse_unsubmittable(
             u32::from(row.id())
         )));
     };
-    check_submittable(&ctx.network, Some(branch), row.expiry_height(), target)
-        .map_err(submission_refused)?;
+    if let Err(refusal) = check_submittable(&ctx.network, Some(branch), row.expiry_height(), target)
+    {
+        if !state.is_terminal() && matches!(row.state(), MigrationTxState::Proved) {
+            let mut state = state.clone();
+            state.report_broadcast_failure(id, observed_tip);
+            let mut store = account_store(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
+            store
+                .replace_migration(&state)
+                .map_err(|e| anyhow!("migration store write failed: {e}"))?;
+        }
+        return Err(submission_refused(refusal));
+    }
     Ok(())
 }
 
@@ -1310,7 +1327,7 @@ fn serve_for_submission(
     server_height: BlockHeight,
     bypass: bool,
 ) -> anyhow::Result<(Vec<u8>, [u8; 32])> {
-    refuse_unsubmittable(ctx, transaction_by_id(state, id)?, server_height, bypass)?;
+    refuse_unsubmittable(ctx, state, id, server_height, bypass)?;
     serve_for_broadcast(rng, ctx, state, id)
 }
 
@@ -4299,8 +4316,10 @@ pub unsafe extern "C" fn zcashlc_migration_prove_transactions(
 /// higher of that height and the wallet's chain tip, and a transaction that is not built for that
 /// block's consensus branch or that has expired by it is refused with
 /// `MIGRATION_SUBMISSION_REFUSED:<code>` (`wrong_branch` or `expired`; see [`refuse_unsubmittable`])
-/// and returns NULL. The seam is never reached then, so the refused transaction is not recorded in
-/// the wallet. `upgrade_gate_bypass` is retained for ABI compatibility and never bypasses validity.
+/// and returns NULL. For an active Proved row the refusal first persists testimony at the higher
+/// observed tip; advance answers Reevaluate until scanning can adjudicate it. The seam is never
+/// reached then, so the refused transaction is not recorded in the wallet. `upgrade_gate_bypass`
+/// is retained for ABI compatibility and never bypasses validity.
 /// A negative `submission_server_height` is "unknown", which fails closed.
 ///
 /// A run that has ended (completed, failed, superseded or cancelled) serves nothing: an instruction
@@ -15990,6 +16009,288 @@ mod tests {
             .get_transaction(TxId::from_bytes(txid))
             .expect("the wallet reads its transactions")
             .is_some()
+    }
+
+    /// A refusal must survive reopening and stop offering the same stale broadcast until sync
+    /// can adjudicate it, without recording a wallet transaction or consuming its inputs.
+    #[test]
+    fn take_refusal_reopens_as_reevaluate_until_scan_catches_up() {
+        let (path, account) = gate_fixture("take_refusal_reopens", 3_543_000);
+        let path_bytes = path.to_str().unwrap().as_bytes();
+        record_fixture_block(&path, 3_543_000);
+        let state = custom_state(
+            MigrationStatus::InProgress,
+            vec![
+                provable_tx_row(
+                    7,
+                    MigrationTxKind::Transfer { crossing: 0 },
+                    3_543_001,
+                    4_000_000,
+                    Some(3_542_900),
+                    MigrationTxState::Proved,
+                ),
+                provable_tx_row(
+                    8,
+                    MigrationTxKind::Transfer { crossing: 1 },
+                    3_542_901,
+                    4_000_000,
+                    None,
+                    MigrationTxState::Broadcast {
+                        txid: TxId::from_bytes([8u8; 32]),
+                    },
+                ),
+                provable_tx_row(
+                    9,
+                    MigrationTxKind::Transfer { crossing: 2 },
+                    3_542_901,
+                    4_000_000,
+                    None,
+                    MigrationTxState::Mined {
+                        txid: TxId::from_bytes([9u8; 32]),
+                        height: h(3_542_999),
+                    },
+                ),
+            ],
+        );
+        store_fixture_state(&path, &account, &state);
+        Connection::open(&path).unwrap().execute(
+            "INSERT INTO transactions (txid, mined_height, min_observed_height) VALUES (?1, ?2, ?2)",
+            rusqlite::params![&[9u8; 32][..], 3_542_999],
+        ).unwrap();
+        let records_before = wallet_transaction_records(&path);
+        let spendable_before = spendable_fixture_orchard(&path, &account);
+        assert_eq!(
+            read_gated_step(path_bytes, &account, -1, false).step,
+            ZCASHLC_ADVANCE_STEP_BROADCAST
+        );
+
+        let error = take_broadcast_error_at(path_bytes, &account, 7, 3_543_404, false);
+        assert_eq!(error, WRONG_BRANCH_ERROR);
+        assert_eq!(
+            read_gated_step(path_bytes, &account, -1, false).step,
+            ZCASHLC_ADVANCE_STEP_REEVALUATE
+        );
+        assert_eq!(wallet_transaction_records(&path), records_before);
+        assert_eq!(spendable_fixture_orchard(&path, &account), spendable_before);
+        let stored = read_fixture_state(&path, &account);
+        let row = transaction_by_id(&stored, MigrationTransferId::new(7)).unwrap();
+        assert_eq!(row.broadcast_failure_at(), Some(h(3_543_404)));
+        assert_eq!(row.state(), MigrationTxState::Proved);
+        assert_eq!(&stored.transactions()[1..], &state.transactions()[1..]);
+
+        set_fixture_tip_at(path_bytes, 3_543_404);
+        mark_fixture_scanned_through(&path, 3_543_404);
+        record_fixture_block(&path, 3_543_404);
+        assert_eq!(
+            read_gated_step(path_bytes, &account, -1, false).step,
+            ZCASHLC_ADVANCE_STEP_INTERRUPTED_BY_NETWORK_UPGRADE
+        );
+        assert_eq!(wallet_transaction_records(&path), records_before);
+        let settled = read_fixture_state(&path, &account);
+        assert_eq!(&settled.transactions()[1..], &state.transactions()[1..]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Expiry testimony uses the later observed tip and remains pending until that scan arrives.
+    #[test]
+    fn refusal_persists_the_observed_tip_for_expiry_and_wallet_ahead() {
+        for (wallet_tip, server_tip, observed_tip) in [
+            (3_600_000, 3_600_010, 3_600_010),
+            (3_600_020, 3_600_010, 3_600_020),
+        ] {
+            let (path, account) = gate_fixture("refusal_expiry_tip", 3_600_000);
+            let path_bytes = path.to_str().unwrap().as_bytes();
+            record_fixture_block(&path, 3_600_000);
+            set_fixture_tip_at(path_bytes, wallet_tip);
+            let state = custom_state(
+                MigrationStatus::InProgress,
+                vec![provable_nu7_tx_row(
+                    7,
+                    MigrationTxKind::Transfer { crossing: 0 },
+                    3_600_001,
+                    3_600_010,
+                    Some(3_599_900),
+                    MigrationTxState::Proved,
+                )],
+            );
+            store_fixture_state(&path, &account, &state);
+            let records_before = wallet_transaction_records(&path);
+            let spendable_before = spendable_fixture_orchard(&path, &account);
+            assert_eq!(
+                take_broadcast_error_at(path_bytes, &account, 7, server_tip, false),
+                "MIGRATION_SUBMISSION_REFUSED:expired"
+            );
+            let stored = read_fixture_state(&path, &account);
+            let row = transaction_by_id(&stored, MigrationTransferId::new(7)).unwrap();
+            assert_eq!(row.broadcast_failure_at(), Some(h(observed_tip)));
+            assert_eq!(row.state(), MigrationTxState::Proved);
+            assert_eq!(wallet_transaction_records(&path), records_before);
+            assert_eq!(spendable_fixture_orchard(&path, &account), spendable_before);
+            assert_eq!(
+                read_gated_step(path_bytes, &account, -1, false).step,
+                ZCASHLC_ADVANCE_STEP_REEVALUATE
+            );
+            set_fixture_tip_at(path_bytes, observed_tip);
+            mark_fixture_scanned_through(&path, observed_tip - 1);
+            record_fixture_block(&path, observed_tip - 1);
+            assert_eq!(
+                read_gated_step(path_bytes, &account, -1, false).step,
+                ZCASHLC_ADVANCE_STEP_REEVALUATE
+            );
+            mark_fixture_scanned_through(&path, observed_tip);
+            record_fixture_block(&path, observed_tip);
+            assert_eq!(
+                read_gated_step(path_bytes, &account, -1, false).step,
+                ZCASHLC_ADVANCE_STEP_REBUILD
+            );
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    /// Only an active, readable Proved transaction can acquire refusal testimony.
+    #[test]
+    fn refusal_does_not_report_nonproved_or_invalid_requests() {
+        for case in [
+            "signed",
+            "mined",
+            "terminal",
+            "unknown",
+            "malformed",
+            "unknown_height",
+            "overflow_height",
+            "overflow_target",
+            "expiry_boundary",
+        ] {
+            let (path, account) = gate_fixture("refusal_invalid", 3_600_000);
+            let path_bytes = path.to_str().unwrap().as_bytes();
+            let lifecycle = match case {
+                "signed" => MigrationTxState::Signed,
+                "mined" => MigrationTxState::Mined {
+                    txid: TxId::from_bytes([7u8; 32]),
+                    height: h(3_599_999),
+                },
+                _ => MigrationTxState::Proved,
+            };
+            let row = provable_tx_row_with(
+                if case == "malformed" {
+                    vec![0u8]
+                } else {
+                    minimal_nu7_pczt_bytes()
+                },
+                7,
+                MigrationTxKind::Transfer { crossing: 0 },
+                3_600_001,
+                3_600_010,
+                Some(3_599_900),
+                lifecycle,
+            );
+            let state = custom_state(
+                if case == "terminal" {
+                    MigrationStatus::Cancelled
+                } else {
+                    MigrationStatus::InProgress
+                },
+                vec![row],
+            );
+            store_fixture_state(&path, &account, &state);
+            let before = read_fixture_state(&path, &account);
+            let records_before = wallet_transaction_records(&path);
+            let server_tip = match case {
+                "unknown_height" => -1,
+                "overflow_height" => i64::from(u32::MAX) + 1,
+                "overflow_target" => i64::from(u32::MAX),
+                "expiry_boundary" => 3_600_009,
+                _ => 3_600_010,
+            };
+            let error = take_broadcast_error_at(
+                path_bytes,
+                &account,
+                if case == "unknown" { 99 } else { 7 },
+                server_tip,
+                false,
+            );
+            if case == "expiry_boundary" {
+                assert!(!error.starts_with(SUBMISSION_REFUSED_PREFIX), "{error}");
+            }
+            assert_eq!(
+                read_fixture_state(&path, &account),
+                before,
+                "{case}: {error}"
+            );
+            assert_eq!(wallet_transaction_records(&path), records_before, "{case}");
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    /// A failed durable write must surface an error rather than imply recovery was recorded.
+    #[test]
+    fn refusal_persistence_failure_leaves_the_wallet_and_state_unchanged() {
+        let (path, account) = gate_fixture("refusal_write_failure", 3_543_000);
+        let path_bytes = path.to_str().unwrap().as_bytes();
+        let state = custom_state(
+            MigrationStatus::InProgress,
+            vec![provable_tx_row(
+                7,
+                MigrationTxKind::Transfer { crossing: 0 },
+                3_543_001,
+                4_000_000,
+                Some(3_542_900),
+                MigrationTxState::Proved,
+            )],
+        );
+        store_fixture_state(&path, &account, &state);
+        let before = read_fixture_state(&path, &account);
+        let records_before = wallet_transaction_records(&path);
+        Connection::open(&path).unwrap().execute_batch(
+            "CREATE TRIGGER reject_migration_refusal BEFORE UPDATE ON orchard_ironwood_migrations
+             BEGIN SELECT RAISE(ABORT, 'fixture migration persistence rejected'); END;"
+        ).unwrap();
+        let error = take_broadcast_error_at(path_bytes, &account, 7, 3_543_404, false);
+        assert!(error.contains("migration store write failed"), "{error}");
+        assert!(
+            error.contains("fixture migration persistence rejected"),
+            "{error}"
+        );
+        assert_eq!(read_fixture_state(&path, &account), before);
+        assert_eq!(wallet_transaction_records(&path), records_before);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Preparation retrieval shares the delivery guard's durable sync recovery.
+    #[test]
+    fn preparation_refusal_persists_testimony_before_returning() {
+        let (path, account) = gate_fixture("refusal_preparation", 3_543_000);
+        let path_bytes = path.to_str().unwrap().as_bytes();
+        let state = custom_state(
+            MigrationStatus::InProgress,
+            vec![provable_tx_row(
+                7,
+                MigrationTxKind::Preparation { layer: 0, index: 0 },
+                3_543_001,
+                4_000_000,
+                None,
+                MigrationTxState::Proved,
+            )],
+        );
+        store_fixture_state(&path, &account, &state);
+        let records_before = wallet_transaction_records(&path);
+        let txid = <[u8; 32]>::from(state.transactions()[0].txid());
+        assert_eq!(
+            take_preparation_error_at(path_bytes, &account, txid, 3_543_404, false),
+            WRONG_BRANCH_ERROR
+        );
+        let stored = read_fixture_state(&path, &account);
+        assert_eq!(
+            stored.transactions()[0].broadcast_failure_at(),
+            Some(h(3_543_404))
+        );
+        assert_eq!(stored.transactions()[0].state(), MigrationTxState::Proved);
+        assert_eq!(wallet_transaction_records(&path), records_before);
+        assert_eq!(
+            read_gated_step(path_bytes, &account, -1, false).step,
+            ZCASHLC_ADVANCE_STEP_REEVALUATE
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// A row built for the branch before the activation is refused once the next block is the

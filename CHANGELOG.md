@@ -6,6 +6,13 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 # Unreleased
 
+## Fixed
+
+- Refused stale migration submissions now persist recovery state: `advanceStep()` returns `.reevaluate`
+  until scanning reaches the higher observed wallet/server tip, then resumes the existing interruption
+  or rebuild handling. No transaction is submitted or recorded in the wallet, and caller signatures
+  are unchanged.
+
 ## Added
 
 - `TargetBlockSpacing(network:)` describes a network's proof-of-work target spacing: 150 seconds a block

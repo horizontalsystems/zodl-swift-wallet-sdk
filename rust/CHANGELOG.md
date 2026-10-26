@@ -6,6 +6,13 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Fixed
+
+- Refused stale migration submissions now persist recovery state: `zcashlc_migration_advance_step` returns Reevaluate
+  until scanning reaches the higher observed wallet/server tip, then resumes the existing interruption
+  or rebuild handling. No transaction is submitted or recorded in the wallet, and caller signatures
+  are unchanged.
+
 ### Added
 
 - `zcashlc_slipstream_stop_for_wallet_change(handle)`, the stop to call right before changing the

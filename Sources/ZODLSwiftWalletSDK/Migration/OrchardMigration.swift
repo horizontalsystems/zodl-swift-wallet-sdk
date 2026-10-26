@@ -448,9 +448,11 @@ actor OrchardMigration {
     /// with the bytes, and over what transport, is the host's ordinary submission policy.
     ///
     /// IT CHECKS THE PREPARATION AGAINST THE NEXT BLOCK FIRST, so one that cannot be valid there is
-    /// refused before the seam records it in the wallet. The host submits through machinery of its
-    /// own, possibly to several servers, so there is no single submission server to ask for the
-    /// height the check needs: this reads it from the synchronizer's own lightwalletd server
+    /// refused before the seam records it in the wallet. For an active proved preparation the SDK
+    /// persists the observed tip first, so ``advanceStep()`` returns `.reevaluate` until scanning
+    /// can adjudicate it. The host submits through machinery of its own, possibly to several
+    /// servers, so there is no single submission server to ask for the height the check needs:
+    /// this reads it from the synchronizer's own lightwalletd server
     /// (``Config/submissionHeight``), with one request of its own, made for `txid` so that it can
     /// ride a connection of that transaction's own (with Tor on, a Tor group named after the
     /// transaction, never the default circuit the sync keeps for the wallet), and a height that
@@ -564,15 +566,15 @@ actor OrchardMigration {
     /// ``MigrationTransferResult/networkError(retryable:)`` — the next crank offers the instruction
     /// again.
     ///
-    /// - Throws: a pre-broadcast failure throws untouched and nothing is recorded — a fail-closed
-    ///   ``ZcashError/migrationTorUnavailable`` when `options.useTor` is set and Tor cannot be
-    ///   established, ``ZcashError/migrationSubmissionRefused(_:)`` when the transaction cannot be
-    ///   valid in the next block (nothing was submitted, and the wallet recorded nothing — sync,
-    ///   then crank ``advanceStep()`` again to learn what becomes of the run: the crank judges the
-    ///   run at the wallet's own chain tip, and the check at the higher of that and the server's
-    ///   height, so a wallet that is behind the server is offered the same broadcast again until
-    ///   it has synced), or the seam's STALENESS refusal
-    ///   (``ZcashError/rustMigrationTakeBroadcastTransaction(_:)``) of a row that is no longer
+    /// - Throws: a pre-broadcast failure throws untouched and no wallet transaction is recorded —
+    ///   a fail-closed ``ZcashError/migrationTorUnavailable`` when `options.useTor` is set and Tor
+    ///   cannot be established, ``ZcashError/migrationSubmissionRefused(_:)`` when the transaction
+    ///   cannot be valid in the next block (nothing was submitted and no wallet transaction was recorded).
+    ///   For an active proved row the SDK first persists the higher of the wallet and server tips,
+    ///   so ``advanceStep()`` returns `.reevaluate` until scanning reaches that height. Sync, then
+    ///   crank again to learn what becomes of the run. A persistence failure throws the store error
+    ///   instead of claiming the refusal was recorded. Other failures include the seam's STALENESS
+    ///   refusal (``ZcashError/rustMigrationTakeBroadcastTransaction(_:)``) of a row that is no longer
     ///   proved-and-servable. The staleness throw is the honest answer to a stale instruction —
     ///   discharge it by cranking ``advanceStep()`` again rather than retrying the executor. A
     ///   record failure *after* a successful broadcast throws
@@ -978,11 +980,13 @@ extension OrchardMigration {
     /// transaction from the seam (the delivery executor's take, or the note-split ceremony's signing)
     /// and returns it. The seam is the one place that records the transaction in the wallet, and it
     /// checks first, with that height, that the transaction can be valid in the next block, so a
-    /// transaction it refuses is never recorded and never submitted: its error propagates out of
-    /// the broadcaster and this flow, with the in-flight marker cleared. What `take` returned is
-    /// remembered here, for the record that follows the submit. When it was never called, the
-    /// broadcaster could not read the server's height, and returned without submitting anything —
-    /// nothing is taken, submitted or recorded, and the result is a retryable network error.
+    /// transaction it refuses is never recorded in the wallet and never submitted. For an active
+    /// proved row it persists refusal testimony for ``advanceStep()`` to adjudicate after sync;
+    /// its error propagates out of the broadcaster and this flow, with the in-flight marker cleared.
+    /// What `take` returned is remembered here, for the record that follows the submit. When it was
+    /// never called, the broadcaster could not read the server's height, and returned without
+    /// submitting anything — nothing is taken, submitted or recorded, and the result is a retryable
+    /// network error.
     ///
     /// The whole submit-to-record window is bracketed by the sync gate's persisted in-flight
     /// marker (``MigrationSyncGate/markBroadcastInFlight()``) — the gate's ONLY condition, and the
