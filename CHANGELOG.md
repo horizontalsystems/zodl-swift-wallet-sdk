@@ -300,6 +300,24 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a height produces no `foundTransactions` event. Apart from handling the new `ZcashError` case
   listed under Changed, no caller changes are required.
 
+## Checkpoints
+
+Mainnet
+
+````
+Sources/ZODLSwiftWalletSDK/Resources/checkpoints/mainnet/3527500.json
+...
+Sources/ZODLSwiftWalletSDK/Resources/checkpoints/mainnet/3530000.json
+````
+
+Testnet
+
+````
+Sources/ZODLSwiftWalletSDK/Resources/checkpoints/testnet/4530000.json
+...
+Sources/ZODLSwiftWalletSDK/Resources/checkpoints/testnet/4540000.json
+````
+
 # 6.0.0 - 2026-10-15
 
 Changes are relative to `5.2.2`.
