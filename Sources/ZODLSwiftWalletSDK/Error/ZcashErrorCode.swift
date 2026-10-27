@@ -549,6 +549,8 @@ public enum ZcashErrorCode: String {
     case compactBlockProcessorPutIronwoodSubtreeRoots = "ZCBPEO0023"
     /// The chain is past the Ironwood (NU6.3) activation but the connected server does not serve Ironwood data, which the wallet needs in order to detect its shielded transactions by scanning.
     case compactBlockProcessorServerMissingIronwoodSupport = "ZCBPEO0024"
+    /// The connected server reported a block height that is too large for the SDK to use. Only a broken or malicious server does that.
+    case compactBlockProcessorServerBlockHeightOutOfRange = "ZCBPEO0025"
     /// The synchronizer is unprepared.
     case synchronizerNotPrepared = "ZSYNCO0001"
     /// Memos can't be sent to transparent addresses.

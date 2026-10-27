@@ -41,6 +41,12 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer than before, and the SDK asks the server about it for as long. Nothing changes from Blossom until
   NU7, and no caller changes are required.
 - Building `libzcashlc` from source now requires Rust 1.97 or newer (was 1.91).
+- `ZcashError` and `ZcashErrorCode` gain `compactBlockProcessorServerBlockHeightOutOfRange`
+  (`ZCBPEO0025`). `SDKSynchronizer`'s sync fails with it on mainnet and testnet when the connected
+  lightwalletd reports a chain tip above `Int32.max`, something only a broken or malicious server
+  does; `switchTo(endpoint:)` reports it as `synchronizerServerSwitch`, and `SlipstreamSynchronizer`
+  never reports it. An exhaustive `switch` over either type stops compiling until the new case is
+  handled; see `MIGRATING.md`.
 
 ## Deprecated
 
@@ -104,6 +110,33 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Ironwood data passed validation there, and syncing against it detected nothing in the Ironwood pool. It now throws
   `ZcashError.compactBlockProcessorServerMissingIronwoodSupport` (`ZCBPEO0024`) as it did from NU6.3 activation
   until NU7. No caller changes are required.
+- `estimateTimestamp(for:)` on `Synchronizer`, `SDKSynchronizer` and `SlipstreamSynchronizer` now
+  returns `nil` instead of never returning when the checkpoint files in the SDK's resource bundle
+  are missing or damaged. The result was already optional, so no caller changes are required.
+- A server that reports a block height above `Int32.max` no longer crashes the app. That covers the
+  tip in `getInfo`, the latest block, a compact block, a UTXO, a tree state and the height of a
+  transaction; only a broken or malicious server sends one. The call that received such a height
+  fails with its usual error (`serviceLatestBlockHeightFailed`, `serviceBlockRangeFailed`,
+  `serviceBlockStreamFailed` or `serviceFetchUTXOsFailed`), and `SDKSynchronizer`'s sync fails with
+  it (a UTXO's inside `unspentTransactionFetcherStream`). When the tip in `getInfo` is the problem,
+  `SDKSynchronizer`'s sync fails with the new
+  `ZcashError.compactBlockProcessorServerBlockHeightOutOfRange` on mainnet and testnet, and
+  `switchTo(endpoint:)` reports the error as `synchronizerServerSwitch`; a regtest or other custom
+  network does not check that tip during sync, and `SlipstreamSynchronizer` never reports it.
+  `evaluateBestOf(...)` and `evaluateServerSwitch(...)` skip such a server on every network. A
+  wallet or gift card wallet that is created while the server sends such a tree state keeps the
+  bundled checkpoint. A restore while the server reports such a tip recovers until the same height
+  as when the server cannot be reached, with `SDKSynchronizer` and `SlipstreamSynchronizer` alike,
+  and `importAccount` does what it does then too: `SDKSynchronizer`'s throws
+  `synchronizerNotPrepared`, and `SlipstreamSynchronizer`'s imports the account with the recovery
+  height it gets when the server cannot be reached. With Tor enabled,
+  `getTreeState(height:)` on `Synchronizer`, `SDKSynchronizer` and `SlipstreamSynchronizer` throws
+  `ZcashError.rustTorLwdGetTreeState` for a height above `Int32.max` without contacting the server,
+  where it used to crash above `UInt32.max`. A transaction that a server reports at such a height
+  (from the mempool, by its id or for a transparent address) is treated as unmined, like one in the
+  mempool or mined on a fork: it is stored without a mined height, and a mempool transaction at such
+  a height produces no `foundTransactions` event. Apart from handling the new `ZcashError` case
+  listed under Changed, no caller changes are required.
 
 # 6.0.0 - 2026-10-15
 

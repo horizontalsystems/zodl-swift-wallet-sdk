@@ -12,22 +12,27 @@ struct BundleCheckpointSource: CheckpointSource {
 
     var saplingActivation: Checkpoint
 
-    init(network: NetworkType) {
+    /// Resolves the directory the checkpoint files are read from. Tests inject their own to cover a
+    /// checkpoint directory that is missing, empty or damaged.
+    private let urlProvider: BundleCheckpointURLProvider
+
+    init(network: NetworkType, urlProvider: BundleCheckpointURLProvider = .default) {
         self.network = network
+        self.urlProvider = urlProvider
         self.saplingActivation = if network == .mainnet { Checkpoint.mainnetMin } else { Checkpoint.testnetMin }
     }
 
     func latestKnownCheckpoint() -> Checkpoint {
         Checkpoint.birthday(
             with: .max,
-            checkpointDirectory: BundleCheckpointURLProvider.default.url(self.network)
+            checkpointDirectory: urlProvider.url(self.network)
         ) ?? saplingActivation
     }
 
     func birthday(for height: BlockHeight) -> Checkpoint {
         Checkpoint.birthday(
             with: height,
-            checkpointDirectory: BundleCheckpointURLProvider.default.url(self.network)
+            checkpointDirectory: urlProvider.url(self.network)
         ) ?? saplingActivation
     }
 
@@ -35,7 +40,7 @@ struct BundleCheckpointSource: CheckpointSource {
     /// or after its time, or Sapling activation when none precedes `date`. Checkpoint times decide; the target
     /// spacing only picks where the walk starts.
     func estimateBirthdayHeight(for date: Date) -> BlockHeight {
-        let directory = BundleCheckpointURLProvider.default.url(network)
+        let directory = urlProvider.url(network)
         let heights = Checkpoint.bundledHeights(checkpointDirectory: directory)
         let dateTime = date.timeIntervalSince1970
         let latestCheckpoint = Checkpoint.birthday(with: .max, among: heights, checkpointDirectory: directory) ?? saplingActivation
@@ -75,6 +80,10 @@ struct BundleCheckpointSource: CheckpointSource {
         return candidate.height
     }
 
+    /// The time of the newest bundled checkpoint at or below the start of the checkpoint interval that `height` falls
+    /// in. When that checkpoint cannot be decoded the lookup goes on at the first interval start below the checkpoint's
+    /// own height, but never below Sapling activation, and it returns `nil` once no checkpoint can be loaded. Its work is
+    /// bounded by the number of checkpoint files, not by `height`.
     func estimateTimestamp(for height: BlockHeight) -> TimeInterval? {
         let blockInterval: BlockHeight = network == .mainnet ? 2500 : 10_000
         var checkpointHeight = (height / blockInterval) * blockInterval
@@ -88,25 +97,27 @@ struct BundleCheckpointSource: CheckpointSource {
             checkpointHeight = saplingActivationHeight
         }
 
-        var checkpoint: Checkpoint?
+        let directory = urlProvider.url(self.network)
+        let heights = Checkpoint.bundledHeights(checkpointDirectory: directory)
 
-        while checkpoint == nil || checkpointHeight > blockInterval {
-            checkpoint = Checkpoint.birthday(
-                with: BlockHeight(checkpointHeight),
-                checkpointDirectory: BundleCheckpointURLProvider.default.url(self.network)
-            )
+        while true {
+            // No checkpoint file at or below this height means there is none at any lower height either.
+            guard let fileHeight = heights.last(where: { $0 <= checkpointHeight }) else {
+                return nil
+            }
 
-            if let checkpoint {
+            if let checkpoint = Checkpoint.checkpoint(height: fileHeight, directory: directory) {
                 return TimeInterval(checkpoint.time)
             }
 
-            checkpointHeight -= blockInterval
-
-            if checkpointHeight < saplingActivationHeight {
-                checkpointHeight = saplingActivationHeight
+            // Nothing is bundled below Sapling activation, so a checkpoint that does not decode there ends the lookup.
+            guard fileHeight > saplingActivationHeight else {
+                return nil
             }
-        }
 
-        return nil
+            // Stepping down one interval at a time would pick this same file at every interval start from here down to its
+            // own height, so go on at the first interval start below it instead.
+            checkpointHeight = max(((fileHeight - 1) / blockInterval) * blockInterval, saplingActivationHeight)
+        }
     }
 }

@@ -206,9 +206,10 @@ strip = false
 # whereas a stale hash fails loudly. The revision must be built against the librustzcash generation
 # the versions above declare.
 #
-# zodl-inc/slipstream#26's head, which is 0.4.0-pre.2 plus main's graft-buffer fixes, the NU7 block
-# cadence, and the move to the release.
-zodl-slipstream = { git = "https://github.com/zodl-inc/slipstream.git", rev = "13cc8f56df6a043496cacdd478379f9f2536db03" }
+# zodl-inc/slipstream#27's head, stacked on #26's: 0.4.0-pre.2 plus main's graft-buffer fixes, the
+# NU7 block cadence and the move to the release, and on top of them the restore anchor's resolution
+# of a server height above i32::MAX like an unreachable server, which no release carries yet.
+zodl-slipstream = { git = "https://github.com/zodl-inc/slipstream.git", rev = "c8c7a12cc6294878b63c9a65b889f3ffaae2292d" }
 
 # DO NOT ALTER THIS COMMENT
 #

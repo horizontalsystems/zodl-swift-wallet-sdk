@@ -752,10 +752,12 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the schema, and cannot be reverted. No address that `zcashlc_get_current_address` or
   `zcashlc_get_next_available_address` returns changes, and an older build can still open the database.
 - `zodl-slipstream` is now required as `=0.4.0-pre.2`, and `[patch.crates-io]` takes it from
-  `zodl-inc/slipstream@13cc8f56`, the head of zodl-inc/slipstream#26: the 0.4.0-pre.2 release plus
+  `zodl-inc/slipstream@c8c7a12c`, the head of zodl-inc/slipstream#27: the 0.4.0-pre.2 release plus
   zodl-inc/slipstream#30, the NU7 block cadence and the move to the librustzcash release, which
-  includes the engine facades' implementation of `WalletWrite::set_account_name`. The patch is
-  replaced by the release that contains them. #30 fixes stale graft-buffer rows that could put
+  includes the engine facades' implementation of `WalletWrite::set_account_name`, and on top of
+  those the restore anchor's resolution of a server tip or tree-state height above `i32::MAX` like
+  an unreachable server (see the `zcashlc_slipstream_restore_anchor` entry under Fixed). The patch
+  is replaced by the release that contains them. #30 fixes stale graft-buffer rows that could put
   commitment-tree leaves at the wrong position, or keep a shard out of the tree, after a stopped
   pass, a reorg or an account import.
 - `zcashlc_slipstream_stop` and `zcashlc_slipstream_start` now call the engine for the bounded
@@ -924,6 +926,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `zcashlc_slipstream_wallet_summary` no longer returns the empty sentinel during the ~30 s gap after
   a restore completes, and once NU6.3 is active reports the collapsed recovery balance in the
   Ironwood pool rather than Orchard.
+- `zcashlc_slipstream_restore_anchor` resolves a server tip or tree-state height above `i32::MAX`
+  as it does an unreachable server: a restore gets `max(fallback_checkpoint_height, birthday + 1)`
+  and a new wallet gets `height` 0 with a null `treestate`. It used to return such a height as the
+  server reported it.
 - `zcashlc_migration_*` read-write entry points no longer create the wallet database, or any table
   in it, when asked about a wallet that does not exist or was never initialized; they return an
   error instead (a stray table used to make an empty file look like a wallet).

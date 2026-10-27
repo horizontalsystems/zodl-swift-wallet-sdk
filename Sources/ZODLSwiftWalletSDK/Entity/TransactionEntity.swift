@@ -180,6 +180,20 @@ public enum ZcashTransaction {
     }
 }
 
+extension ZcashTransaction.Fetched {
+    /// What `LightWalletService.fetchTransaction` answers for a transaction that a server returned at `serverHeight`.
+    ///
+    /// The transaction is mined only at a height the SDK can use, see `BlockHeight.init(minedServerHeight:)`. At any other
+    /// height it is returned all the same, unmined, with the status `.notInMainChain`.
+    static func returned(rawID: Data, raw: Data, atServerHeight serverHeight: UInt64) -> (tx: ZcashTransaction.Fetched, status: TransactionStatus) {
+        let minedHeight = BlockHeight(minedServerHeight: serverHeight)
+        return (
+            tx: ZcashTransaction.Fetched(rawID: rawID, minedHeight: minedHeight.map { UInt32($0) }, raw: raw),
+            status: minedHeight.map { TransactionStatus.mined($0) } ?? .notInMainChain
+        )
+    }
+}
+
 extension ZcashTransaction.Output {
     enum Column {
         static let rawID = SQLite.Expression<Blob>("txid")
