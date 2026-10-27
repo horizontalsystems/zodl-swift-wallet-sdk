@@ -6,6 +6,8 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 # Unreleased
 
+# 7.0.0 - 2026-10-27
+
 ## Fixed
 
 - Refused stale migration submissions now persist recovery state: `advanceStep()` returns `.reevaluate`
