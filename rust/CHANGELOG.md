@@ -786,7 +786,7 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   therefore trail a just-mined broadcast by at most one such pass. Reads no longer contend with
   proving.
 - The crate now builds against the NU7 release of the `librustzcash` crates and the `zodl-slipstream`
-  0.4.0-pre.2 engine. Its `rust-version` is 1.97, up from 1.91: building `libzcashlc` from source needs
+  0.4.0 engine. Its `rust-version` is 1.97, up from 1.91: building `libzcashlc` from source needs
   Rust 1.97 or newer.
 - Every unified address, UFVK and UIVK string a `zcashlc_*` function returns is ZIP 316
   revision 0, with every receiver or item the value carries, as before the NU7 move. Revision 2
@@ -795,15 +795,15 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `zcashlc_init_data_database` applies one more wallet-database migration. It changes stored data only, not
   the schema, and cannot be reverted. No address that `zcashlc_get_current_address` or
   `zcashlc_get_next_available_address` returns changes, and an older build can still open the database.
-- `zodl-slipstream` is now required as `=0.4.0-pre.2`, and `[patch.crates-io]` takes it from
-  `zodl-inc/slipstream@c8c7a12c`, the head of zodl-inc/slipstream#27: the 0.4.0-pre.2 release plus
-  zodl-inc/slipstream#30, the NU7 block cadence and the move to the librustzcash release, which
-  includes the engine facades' implementation of `WalletWrite::set_account_name`, and on top of
-  those the restore anchor's resolution of a server tip or tree-state height above `i32::MAX` like
-  an unreachable server (see the `zcashlc_slipstream_restore_anchor` entry under Fixed). The patch
-  is replaced by the release that contains them. #30 fixes stale graft-buffer rows that could put
-  commitment-tree leaves at the wrong position, or keep a shard out of the tree, after a stopped
-  pass, a reorg or an account import.
+- `zodl-slipstream` is now required as `=0.4.0`, and `[patch.crates-io]` takes it from
+  the signed `zodl_slipstream-0.4.0` release at `zodl-inc/slipstream@8591b758`. The Git patch
+  remains until 0.4.0 is published to crates.io. This release includes the NU7 block cadence,
+  the move to the librustzcash release, the engine facades' implementation of
+  `WalletWrite::set_account_name`, and the restore anchor's resolution of a server tip or
+  tree-state height above `i32::MAX` like an unreachable server (see the
+  `zcashlc_slipstream_restore_anchor` entry under Fixed). It also fixes stale graft-buffer rows
+  that could put commitment-tree leaves at the wrong position, or keep a shard out of the tree,
+  after a stopped pass, a reorg or an account import.
 - `zcashlc_slipstream_stop` and `zcashlc_slipstream_start` now call the engine for the bounded
   stop that proves the wallet file quiescent, which zodl-inc/slipstream#28 moved into the engine;
   that change also adds the stop for a wallet change.

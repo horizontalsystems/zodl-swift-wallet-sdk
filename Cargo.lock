@@ -8728,8 +8728,8 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zodl-slipstream"
-version = "0.4.0-pre.2"
-source = "git+https://github.com/zodl-inc/slipstream.git?rev=ca5298548cdf30d84cd7ea64d38aaf46629f4e64#ca5298548cdf30d84cd7ea64d38aaf46629f4e64"
+version = "0.4.0"
+source = "git+https://github.com/zodl-inc/slipstream.git?rev=8591b758ca0919058035a2453b41e035f84b2402#8591b758ca0919058035a2453b41e035f84b2402"
 dependencies = [
  "ff 0.14.0",
  "futures-util",
@@ -8769,7 +8769,7 @@ dependencies = [
 [[package]]
 name = "zodl-slipstream-gpuhash"
 version = "0.1.2"
-source = "git+https://github.com/zodl-inc/slipstream.git?rev=ca5298548cdf30d84cd7ea64d38aaf46629f4e64#ca5298548cdf30d84cd7ea64d38aaf46629f4e64"
+source = "git+https://github.com/zodl-inc/slipstream.git?rev=8591b758ca0919058035a2453b41e035f84b2402#8591b758ca0919058035a2453b41e035f84b2402"
 dependencies = [
  "bytemuck",
  "ff 0.14.0",
