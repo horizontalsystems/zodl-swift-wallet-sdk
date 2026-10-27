@@ -77,7 +77,7 @@ use zcash_primitives::{
     block::BlockHash,
     merkle_tree::HashSer,
     transaction::builder::BundlePadding,
-    transaction::{Transaction, TxId},
+    transaction::{Transaction, TxId, TxVersion},
 };
 use zcash_proofs::prover::LocalTxProver;
 use zcash_protocol::{
@@ -117,6 +117,7 @@ mod ledger;
 mod migration;
 mod migration_engine;
 mod migration_finalize;
+mod migration_gate;
 mod migration_keystone;
 mod migration_plan_cache;
 mod migration_turnstile;
@@ -130,6 +131,7 @@ mod voting;
 mod os_log;
 
 use crate::error_report::{ClassifiedError, ErrorKind};
+use crate::migration_gate::{SubmissionRefusal, check_submittable};
 use crate::tor::{TorRuntime, http::with_http_timeout};
 
 fn unwrap_exc_or<T>(exc: Result<T, ()>, def: T) -> T {
@@ -2607,6 +2609,94 @@ pub unsafe extern "C" fn zcashlc_decrypt_and_store_transaction(
                 Ok(1)
             }
             Err(e) => Err(anyhow!("Error while decrypting transaction: {}", e)),
+        }
+    });
+    unwrap_exc_or(res, -1)
+}
+
+/// Checks whether a raw transaction can be valid in the next block, so that nothing is submitted
+/// that no block can include.
+///
+/// A block accepts only a transaction built for the consensus branch its own height is under, and
+/// only one that has not expired by then. A transaction the wallet created before a network upgrade
+/// and has not sent yet can fail either test by the time it goes out. The next block is judged at
+/// one past the higher of the wallet's chain tip and `submission_server_height`, the latest block
+/// height of the server the transaction is about to be submitted to, which the caller reads on the
+/// connection it submits over, just before it calls this: the wallet lags every block it has not
+/// synced yet, and the server may lag the wallet. A wallet that has no chain tip yet is judged by
+/// the server's height alone.
+///
+/// The transaction is parsed with `Transaction::read(tx, BranchId::for_height(params, next))`.
+/// Only a v5 or later encoding commits to its consensus branch, so only for such a transaction is
+/// the branch it carries compared with the next block's. Earlier encodings carry none, and just
+/// their expiry height is judged. These validity checks apply at every height.
+///
+/// The wallet database is opened read-only and nothing is written to it.
+///
+/// Returns:
+/// - 0 if the transaction can be valid in the next block.
+/// - 1 if it is built for another consensus branch than the next block is under.
+/// - 2 if it has expired by the next block.
+/// - -1 on error, with the last error set: `submission_server_height` is negative or no block
+///   height (the caller could not read it, which fails closed), no block can follow it, the
+///   network is unknown, the wallet database does not exist or cannot be read, or the bytes are no
+///   transaction. The caller must not submit the transaction.
+///
+/// # Safety
+///
+/// - `db_data` must be non-null and valid for reads for `db_data_len` bytes, and it must have an
+///   alignment of `1`. Its contents must be a string representing a valid system path in the
+///   operating system's preferred representation.
+/// - The memory referenced by `db_data` must not be mutated for the duration of the function call.
+/// - The total size `db_data_len` must be no larger than `isize::MAX`. See the safety
+///   documentation of pointer::offset.
+/// - `tx` must be valid for reads for `tx_len` bytes, and it must have an alignment of `1`. It may
+///   be null when `tx_len` is 0, which is a transaction that cannot be parsed.
+/// - The memory referenced by `tx` must not be mutated for the duration of the function call.
+/// - The total size `tx_len` must be no larger than `isize::MAX`. See the safety
+///   documentation of pointer::offset.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zcashlc_check_transaction_submittable(
+    db_data: *const u8,
+    db_data_len: usize,
+    network_id: u32,
+    tx: *const u8,
+    tx_len: usize,
+    submission_server_height: i64,
+) -> i32 {
+    let res = catch_panic(|| {
+        let network = parse_network(network_id)?;
+        // Validated before the wallet is opened: a height that is not one fails closed, whatever the
+        // transaction is.
+        let server_height = migration::known_submission_server_height(submission_server_height)?;
+
+        let db_path = Path::new(OsStr::from_bytes(unsafe {
+            slice::from_raw_parts(db_data, db_data_len)
+        }));
+        require_wallet_db(db_path, "checking whether a transaction can be submitted")?;
+        let wallet = unsafe { wallet_db_read_only(system_rng(), db_data, db_data_len, network)? };
+        // A wallet that has not synced has no tip, and then the server's height alone decides.
+        let tip = migration::known_chain_tip(&wallet)?.unwrap_or(server_height);
+        let next_height = migration::submission_target(tip, server_height)?;
+
+        let tx_bytes: &[u8] = if tx_len == 0 {
+            &[]
+        } else {
+            unsafe { slice::from_raw_parts(tx, tx_len) }
+        };
+        // The consensus branch ID passed in matters only to a transaction that does not encode one:
+        // v4 and below attach it to the parsed value. A v5 or later transaction ignores the
+        // argument and parses the value from its encoding.
+        let tx = Transaction::read(tx_bytes, BranchId::for_height(&network, next_height))?;
+        let encoded_branch = match tx.version() {
+            TxVersion::Sprout(_) | TxVersion::V3 | TxVersion::V4 => None,
+            _ => Some(u32::from(tx.consensus_branch_id())),
+        };
+
+        match check_submittable(&network, encoded_branch, tx.expiry_height(), next_height) {
+            Ok(()) => Ok(0),
+            Err(SubmissionRefusal::WrongBranch) => Ok(1),
+            Err(SubmissionRefusal::Expired) => Ok(2),
         }
     });
     unwrap_exc_or(res, -1)
@@ -6910,6 +7000,322 @@ mod tests {
             stored_account_name(&db_path, &account_uuid).as_deref(),
             Some(FIXTURE_ACCOUNT_NAME)
         );
+    }
+
+    // ----- zcashlc_check_transaction_submittable -----
+    //
+    // The check judges a raw transaction against the next block, the one after the higher of the
+    // wallet's chain tip and the height the submission server reports. Mainnet activates NU7 at
+    // 3,543,405, so the next block is under NU6.3 up to a server at 3,543,403 and under NU7 from
+    // a server at 3,543,404 on.
+
+    /// The wallet database of a test, kept in a directory that goes away with the test.
+    struct SubmissionFixture {
+        _dir: tempfile::TempDir,
+        path: std::path::PathBuf,
+        network_id: u32,
+    }
+
+    impl SubmissionFixture {
+        /// An initialized wallet database on the network `network_id` names, with its chain tip at
+        /// `tip`, or with no chain tip at all.
+        fn new(network_id: u32, tip: Option<u32>) -> Self {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("wallet.sqlite");
+            let fixture = SubmissionFixture {
+                _dir: dir,
+                path,
+                network_id,
+            };
+            let path_bytes = fixture.path_bytes();
+            let init = unsafe {
+                zcashlc_init_data_database(
+                    path_bytes.as_ptr(),
+                    path_bytes.len(),
+                    std::ptr::null(),
+                    0,
+                    network_id,
+                )
+            };
+            assert_eq!(init, 0, "the wallet database initializes");
+            if let Some(tip) = tip {
+                fixture.set_tip(tip);
+            }
+            fixture
+        }
+
+        fn mainnet(tip: u32) -> Self {
+            Self::new(NETWORK_ID_MAINNET, Some(tip))
+        }
+
+        fn path_bytes(&self) -> &[u8] {
+            self.path.to_str().expect("a utf-8 path").as_bytes()
+        }
+
+        /// Moves the wallet's chain tip to `tip`. A wallet's tip only moves forward.
+        fn set_tip(&self, tip: u32) {
+            let path_bytes = self.path_bytes();
+            assert!(
+                unsafe {
+                    zcashlc_update_chain_tip(
+                        path_bytes.as_ptr(),
+                        path_bytes.len(),
+                        tip as i32,
+                        self.network_id,
+                    )
+                },
+                "the chain tip updates"
+            );
+        }
+
+        /// What the submission check answers for `raw` with the server at `server_height`.
+        fn check(&self, raw: &[u8], server_height: i64) -> i32 {
+            check_submittable_at(self.path_bytes(), self.network_id, raw, server_height)
+        }
+    }
+
+    fn check_submittable_at(
+        db_data: &[u8],
+        network_id: u32,
+        raw: &[u8],
+        server_height: i64,
+    ) -> i32 {
+        unsafe {
+            zcashlc_check_transaction_submittable(
+                db_data.as_ptr(),
+                db_data.len(),
+                network_id,
+                raw.as_ptr(),
+                raw.len(),
+                server_height,
+            )
+        }
+    }
+
+    /// The wire encoding of a transaction with no inputs or outputs, in the format of `version`,
+    /// built for `branch` and expiring at `expiry`.
+    fn empty_transaction(version: TxVersion, branch: BranchId, expiry: u32) -> Vec<u8> {
+        use zcash_primitives::transaction::{Authorized, TransactionData};
+
+        let expiry = BlockHeight::from_u32(expiry);
+        let data = match version {
+            TxVersion::V6 => TransactionData::<Authorized>::from_parts_v6(
+                branch, 0, expiry, None, None, None, None,
+            ),
+            version => TransactionData::<Authorized>::from_parts(
+                version, branch, 0, expiry, None, None, None, None,
+            ),
+        };
+        let mut raw = Vec::new();
+        data.freeze()
+            .expect("the empty transaction freezes")
+            .write(&mut raw)
+            .expect("the empty transaction serializes");
+        raw
+    }
+
+    fn empty_v6_transaction(branch: BranchId, expiry: u32) -> Vec<u8> {
+        empty_transaction(TxVersion::V6, branch, expiry)
+    }
+
+    /// The message the last FFI call left behind, which the caller reads before the next call.
+    fn last_error() -> String {
+        ffi_helpers::error_handling::take_last_error()
+            .expect("a failed check records a last error")
+            .to_string()
+    }
+
+    /// The check answers 0 for a transaction that can be valid in the next block, 1 for one built
+    /// for another branch, 2 for an expired one, and -1 when it cannot judge, which is a refusal
+    /// to submit as well.
+    #[test]
+    fn check_transaction_submittable_codes() {
+        let fixture = SubmissionFixture::mainnet(3_543_000);
+        let old_branch = empty_v6_transaction(BranchId::Nu6_3, 3_594_240);
+
+        // The server is on the last block under NU6.3, so the next block is the one before NU7.
+        assert_eq!(fixture.check(&old_branch, 3_543_403), 0);
+        // One block later the next block is the activation block, which only NU7 transactions fit.
+        assert_eq!(fixture.check(&old_branch, 3_543_404), 1);
+
+        // It can still be mined in the block at its expiry height, and no longer after it.
+        let expiring = empty_v6_transaction(BranchId::Nu7, 3_600_000);
+        assert_eq!(fixture.check(&expiring, 3_599_999), 0);
+        assert_eq!(fixture.check(&expiring, 3_600_000), 2);
+
+        // A height that is not one fails closed, and says why.
+        assert_eq!(fixture.check(&old_branch, -1), -1);
+        assert!(
+            last_error().contains("the submission server's height is unknown"),
+            "an unknown server height is reported as such"
+        );
+
+        // Bytes that are no transaction cannot be judged.
+        assert_eq!(fixture.check(&[0u8; 3], 3_543_403), -1);
+        assert!(!last_error().is_empty());
+    }
+
+    /// The wallet may be ahead of the server it submits to, and the block a transaction is mined in
+    /// is never earlier than the wallet's tip.
+    #[test]
+    fn check_transaction_submittable_uses_the_wallet_tip_when_it_is_higher() {
+        let fixture = SubmissionFixture::mainnet(3_543_000);
+        let old_branch = empty_v6_transaction(BranchId::Nu6_3, 3_594_240);
+        assert_eq!(
+            fixture.check(&old_branch, 3_543_000),
+            0,
+            "both stand on a block under NU6.3"
+        );
+
+        fixture.set_tip(3_543_404);
+
+        assert_eq!(
+            fixture.check(&old_branch, 3_543_000),
+            1,
+            "the wallet's tip makes the next block the activation block, the server's height does not"
+        );
+    }
+
+    /// A wallet that has not synced yet has no tip, and then the server's height is all there is to
+    /// judge by.
+    #[test]
+    fn check_transaction_submittable_uses_the_server_height_alone_without_a_wallet_tip() {
+        let fixture = SubmissionFixture::new(NETWORK_ID_MAINNET, None);
+        let old_branch = empty_v6_transaction(BranchId::Nu6_3, 3_594_240);
+
+        assert_eq!(fixture.check(&old_branch, 3_543_403), 0);
+        assert_eq!(fixture.check(&old_branch, 3_543_404), 1);
+    }
+
+    /// The activation height is the network's own, not mainnet's.
+    #[test]
+    fn check_transaction_submittable_uses_the_networks_own_activation_height() {
+        let fixture = SubmissionFixture::new(NETWORK_ID_TESTNET, Some(4_465_000));
+        let old_branch = empty_v6_transaction(BranchId::Nu6_3, 4_500_000);
+        let new_branch = empty_v6_transaction(BranchId::Nu7, 4_500_000);
+
+        // Testnet activates NU7 at 4,465,026.
+        assert_eq!(fixture.check(&old_branch, 4_465_024), 0);
+        assert_eq!(fixture.check(&new_branch, 4_465_024), 1);
+        assert_eq!(fixture.check(&old_branch, 4_465_025), 1);
+        assert_eq!(fixture.check(&new_branch, 4_465_025), 0);
+    }
+
+    /// Only a v5 or later encoding commits to its consensus branch, so only its branch can be
+    /// compared. Before v5 the encoding has none to compare, and just the expiry is judged.
+    #[test]
+    fn check_transaction_submittable_compares_the_branch_only_for_v5_and_later() {
+        let fixture = SubmissionFixture::mainnet(3_543_000);
+        // The next block is the activation block.
+        let server = 3_543_404;
+
+        for version in [TxVersion::V5, TxVersion::V6] {
+            let old_branch = empty_transaction(version, BranchId::Nu6_3, 3_600_000);
+            assert_eq!(fixture.check(&old_branch, server), 1, "{version:?}");
+        }
+
+        let v4 = empty_transaction(TxVersion::V4, BranchId::Nu6_3, 3_600_000);
+        assert_eq!(fixture.check(&v4, server), 0, "v4 commits to no branch");
+        let expired_v4 = empty_transaction(TxVersion::V4, BranchId::Nu6_3, 3_543_000);
+        assert_eq!(fixture.check(&expired_v4, server), 2, "v4 still expires");
+    }
+
+    /// An expiry height of 0 is no expiry at all, and a transaction that is wrong on both counts is
+    /// reported for its branch.
+    #[test]
+    fn check_transaction_submittable_treats_expiry_zero_as_none_and_reports_the_branch_first() {
+        let fixture = SubmissionFixture::mainnet(3_543_000);
+
+        let never_expires = empty_v6_transaction(BranchId::Nu7, 0);
+        assert_eq!(fixture.check(&never_expires, 3_700_000), 0);
+
+        // Wrong on both counts: built for the old branch, and expired by the next block.
+        let both = empty_v6_transaction(BranchId::Nu6_3, 3_543_000);
+        assert_eq!(fixture.check(&both, 3_543_404), 1);
+    }
+
+    /// A valid transaction remains submittable through the final preactivation block.
+    #[test]
+    fn check_transaction_submittable_accepts_valid_work_until_activation() {
+        let fixture = SubmissionFixture::mainnet(3_543_000);
+        let old_branch = empty_v6_transaction(BranchId::Nu6_3, 3_594_240);
+
+        // Both next blocks are still under the transaction's NU6.3 branch.
+        assert_eq!(fixture.check(&old_branch, 3_543_356), 0);
+        assert_eq!(fixture.check(&old_branch, 3_543_403), 0);
+    }
+
+    /// Everything the check cannot judge fails closed: -1, with the reason left for the caller, and
+    /// nothing created on the way.
+    #[test]
+    fn check_transaction_submittable_fails_closed_when_it_cannot_judge() {
+        let fixture = SubmissionFixture::mainnet(3_543_000);
+        let raw = empty_v6_transaction(BranchId::Nu6_3, 3_594_240);
+        assert_eq!(
+            fixture.check(&raw, 3_543_403),
+            0,
+            "the control is submittable"
+        );
+
+        // A server height that is no block height is unknown, whatever the C caller passes.
+        for height in [i64::MIN, -1, i64::from(u32::MAX) + 1, i64::MAX] {
+            assert_eq!(fixture.check(&raw, height), -1, "server height {height}");
+            assert!(last_error().contains("unknown"), "server height {height}");
+        }
+        // The highest block height there can be is followed by no block.
+        assert_eq!(fixture.check(&raw, i64::from(u32::MAX)), -1);
+        assert!(last_error().contains("no block can follow"));
+
+        // A network that does not exist.
+        assert_eq!(
+            check_submittable_at(fixture.path_bytes(), 99, &raw, 3_543_403),
+            -1
+        );
+        assert!(last_error().contains("Invalid network type"));
+
+        // No transaction at all, with the null pointer a caller with an empty buffer may pass.
+        assert_eq!(
+            unsafe {
+                zcashlc_check_transaction_submittable(
+                    fixture.path_bytes().as_ptr(),
+                    fixture.path_bytes().len(),
+                    fixture.network_id,
+                    std::ptr::null(),
+                    0,
+                    3_543_403,
+                )
+            },
+            -1
+        );
+        assert!(!last_error().is_empty());
+
+        // A transaction that is cut short.
+        assert_eq!(fixture.check(&raw[..raw.len() - 1], 3_543_403), -1);
+        assert!(!last_error().is_empty());
+    }
+
+    /// The check opens the wallet to read its tip and must neither create a wallet database where
+    /// there is none nor name its path in the error.
+    #[test]
+    fn check_transaction_submittable_without_a_wallet_database_creates_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("missing.sqlite");
+        let raw = empty_v6_transaction(BranchId::Nu6_3, 3_594_240);
+
+        let result = check_submittable_at(
+            path.to_str().unwrap().as_bytes(),
+            NETWORK_ID_MAINNET,
+            &raw,
+            3_543_403,
+        );
+
+        assert_eq!(result, -1);
+        let error = last_error();
+        assert!(
+            !error.contains(path.to_str().unwrap()),
+            "the error must not leak the database path: {error}"
+        );
+        assert!(!path.exists(), "the check must not create the database");
     }
 }
 

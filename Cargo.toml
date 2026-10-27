@@ -209,7 +209,7 @@ strip = false
 # zodl-inc/slipstream#27's head, stacked on #26's: 0.4.0-pre.2 plus main's graft-buffer fixes, the
 # NU7 block cadence and the move to the release, and on top of them the restore anchor's resolution
 # of a server height above i32::MAX like an unreachable server, which no release carries yet.
-zodl-slipstream = { git = "https://github.com/zodl-inc/slipstream.git", rev = "c8c7a12cc6294878b63c9a65b889f3ffaae2292d" }
+zodl-slipstream = { git = "https://github.com/zodl-inc/slipstream.git", rev = "ca5298548cdf30d84cd7ea64d38aaf46629f4e64" }
 
 # DO NOT ALTER THIS COMMENT
 #

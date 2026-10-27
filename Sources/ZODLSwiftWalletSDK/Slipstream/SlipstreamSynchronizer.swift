@@ -2352,6 +2352,17 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         try await migrationHost.migration(for: accountUUID).advanceStep()
     }
 
+    public func setMigrationNetworkUpgradeGateBypass(_ isBypassed: Bool) async {
+        // Wallet-scoped: the host's one holder is shared by every account's migration.
+        await migrationHost.setUpgradeGateBypass(isBypassed)
+    }
+
+    public func migrationAvailability() async throws -> MigrationAvailability {
+        // Wallet-scoped (the gate depends on the chain alone), so this lives on the host, which
+        // passes its own bypass holder's value, not on a per-account actor.
+        try await migrationHost.migrationAvailability()
+    }
+
     public func migrationProgress(accountUUID: AccountUUID) async throws -> MigrationProgress? {
         try await migrationHost.migration(for: accountUUID).migrationProgress()
     }
@@ -2469,8 +2480,12 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         try await migrationHost.migration(for: accountUUID).hasInvalidTransfers()
     }
 
-    public func restartCurrentMigrationStep(accountUUID: AccountUUID) async throws -> MigrationSchedule {
+    public func restartCurrentMigrationStep(accountUUID: AccountUUID) async throws -> MigrationRestartOutcome {
         try await migrationHost.migration(for: accountUUID).restartCurrentMigrationStep()
+    }
+
+    public func cancelMigrationRun(accountUUID: AccountUUID) async throws {
+        try await migrationHost.migration(for: accountUUID).cancelMigrationRun()
     }
 
     public func refreshStaleMigrationTransfers(accountUUID: AccountUUID, usk: UnifiedSpendingKey?) async throws -> MigrationSchedule {
@@ -3081,6 +3096,7 @@ private extension SlipstreamSynchronizer {
                     Task { await self.engine.notifyTxChange() }
                     return TransactionSubmitResult.success(txId: transaction.txId)
                 } catch ZcashError.serviceSubmitFailed(let error) {
+                    // The server could not be reached. That includes its height not being readable, the first request of a submission.
                     submitFailed = true
                     return TransactionSubmitResult.grpcFailure(txId: transaction.txId, error: error)
                 } catch TransactionEncoderError.submitError(let code, let message) {
@@ -3090,6 +3106,11 @@ private extension SlipstreamSynchronizer {
                     }
                     submitFailed = true
                     return TransactionSubmitResult.submitFailure(txId: transaction.txId, code: code, description: message)
+                } catch TransactionEncoderError.notSubmittable(let refusal) {
+                    // The SDK refused to submit the transaction because it cannot be valid in the next block. Nothing reached the
+                    // network, so there is no server to ask whether it knows the transaction.
+                    submitFailed = true
+                    return TransactionSubmitResult.submitFailure(txId: transaction.txId, code: refusal.code, description: refusal.description)
                 }
             }
         })
