@@ -8,13 +8,6 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 # 7.0.0 - 2026-10-27
 
-## Fixed
-
-- Refused stale migration submissions now persist recovery state: `advanceStep()` returns `.reevaluate`
-  until scanning reaches the higher observed wallet/server tip, then resumes the existing interruption
-  or rebuild handling. No transaction is submitted or recorded in the wallet, and caller signatures
-  are unchanged.
-
 ## Added
 
 - `TargetBlockSpacing(network:)` describes a network's proof-of-work target spacing: 150 seconds a block
@@ -145,8 +138,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails is neither submitted nor recorded in the wallet, and the call throws
   `ZcashError.migrationSubmissionRefused(_:)` with the reason: sync, then crank `migrationAdvanceStep(accountUUID:)`
   again to learn what becomes of the run (for `submitNoteSplit` the run it committed stays). The crank judges the
-  run at the wallet's own chain tip and the check at the higher of that and the server's height, so a wallet that
-  is behind the server is offered the same transaction again until it has synced. The wallet is now touched
+  run at the wallet's own chain tip and the check at the higher of that and the server's height. A refusal of
+  active proved work persists that observed tip, so the crank returns `.reevaluate` until scanning reaches it,
+  then resumes interruption or rebuild handling. A failure to persist that state throws the store error instead.
+  The wallet is now touched
   only once the connection is up and the height is read, so `ZcashError.migrationTorUnavailable`, which these
   calls threw after the transaction was taken, is thrown before it, and `submitNoteSplit` no longer commits and
   signs a run before it knows the server can be reached. That makes `submitNoteSplit` contact the submission
@@ -215,6 +210,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Fixed
 
+- Refused stale migration submissions now persist recovery state:
+  `Synchronizer.migrationAdvanceStep(accountUUID:)` returns `.reevaluate` until scanning reaches the higher
+  observed wallet/server tip, then resumes interruption or rebuild handling. No transaction is submitted or
+  recorded in the wallet, and caller signatures are unchanged.
 - `performMigrationBroadcast(accountUUID:_:options:)` and `takeMigrationPreparation(accountUUID:byTxid:)` no
   longer serve a transaction of a run that has ended. An instruction a crank issued before
   `cancelMigrationRun(accountUUID:)` (or before the run completed, failed or was superseded) could still be
