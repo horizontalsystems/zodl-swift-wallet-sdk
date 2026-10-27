@@ -1121,7 +1121,8 @@ final class MigrationLogicTests: ZcashTestCase {
             accountUUID: accountA,
             broadcaster: fakeBroadcaster,
             syncGate: gate,
-            logger: logger
+            logger: logger,
+            spacing: TargetBlockSpacing(networkType: .testnet)
         )
 
         do {
@@ -1175,7 +1176,8 @@ final class MigrationLogicTests: ZcashTestCase {
             accountUUID: account,
             broadcaster: ScriptedBroadcaster(script: .throwing(ZcashError.migrationTorUnavailable)),
             syncGate: makeGate(account: account, clock: TestClock(referenceDate)),
-            logger: logger
+            logger: logger,
+            spacing: TargetBlockSpacing(networkType: .testnet)
         )
     }
 

@@ -323,7 +323,13 @@ extension ZcashTransaction.Overview {
 
         guard let expiryHeight = self.expiryHeight else { return nil }
         if expiryHeight != -1 {
-            return max(expiryHeight - ZcashSDK.expiryOffset - ZcashSDK.defaultStaleTolerance, network.saplingActivationHeight)
+            // Only the expiry height of an unmined transaction is known. A transaction with the default expiry has
+            // it set from its target height with a delta NU7 changes from 40 to 120 blocks; inverting that delta
+            // recovers the target its notes were anchored behind. A ZIP 318 canonical crossing has a rolling expiry
+            // instead, which the inversion would turn into a target, and so an anchor, that is too late. Nothing
+            // read from the database reaches this branch today: its mined height is nil, not -1, until it is mined.
+            let targetHeight = TargetBlockSpacing(network: network).defaultTxTargetHeight(forExpiryHeight: expiryHeight)
+            return max(targetHeight - ZcashSDK.defaultStaleTolerance, network.saplingActivationHeight)
         }
 
         return nil

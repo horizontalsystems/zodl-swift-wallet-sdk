@@ -86,9 +86,7 @@ use zcash_client_backend::wallet::{LockOwner, OutputRef};
 use zcash_client_sqlite::AccountUuid;
 use zcash_client_sqlite::error::SqliteClientError;
 use zcash_client_sqlite::pool_migration::orchard_ironwood::Error as PoolMigrationStoreError;
-use zcash_protocol::consensus::{
-    BLOCKS_PER_HOUR, BlockHeight, Network, NetworkUpgrade, Parameters,
-};
+use zcash_protocol::consensus::{BlockHeight, Network, NetworkUpgrade, Parameters};
 use zcash_protocol::value::Zatoshis;
 use zcash_protocol::{PoolType, ShieldedPool, TxId};
 
@@ -101,7 +99,9 @@ use zcash_pool_migration::satisfiability::{
     Advance, AdvanceConfig, DuenessTargets, ReorgSettleDepth, ReplanThreshold, UnsatisfiableKind,
     advance_migration,
 };
-use zcash_pool_migration::scheduling::{WakeupParams, WakeupScheduleError};
+use zcash_pool_migration::scheduling::{
+    BlockSpacing, PROVABLE_ANCHOR_DEPTH, WakeupParams, WakeupScheduleError,
+};
 use zcash_pool_migration::signing_rounds::{
     NextFit, PREPARATION_ACTIONS, PlannedTx, SigningRoundBudget, SigningRoundStrategy,
     TRANSFER_ACTIONS, action_weight,
@@ -669,17 +669,27 @@ fn schedule_rows(
 /// The schedule's duration in hours, measured from `now` — the same reference height the
 /// encoder stamps into each row's `anchor_height` (`now_reference`) — to the LAST scheduled
 /// broadcast (#1806: was the first-to-last broadcast span, which structurally excluded the wait
-/// until the first transfer fires). Empty schedule, or every height at/behind `now`, is `0`
-/// (saturating, never underflows).
-fn estimated_duration_hours(
+/// until the first transfer fires), in the target time of the blocks between them. Empty
+/// schedule, or every height at/behind `now`, is `0` (saturating, never underflows).
+fn estimated_duration_hours<P: Parameters>(
+    params: &P,
     broadcast_heights: impl Iterator<Item = BlockHeight>,
     now: BlockHeight,
 ) -> u32 {
-    let now = u32::from(now);
-    broadcast_heights
-        .map(u32::from)
-        .max()
-        .map_or(0, |max| max.saturating_sub(now) / BLOCKS_PER_HOUR)
+    target_hours_until(params, broadcast_heights.max(), now)
+}
+
+/// The whole hours of target time from `now` to `last`, `0` when absent or not after `now`. At
+/// 75-second blocks this is exactly the old 48 blocks to the hour.
+fn target_hours_until<P: Parameters>(
+    params: &P,
+    last: Option<BlockHeight>,
+    now: BlockHeight,
+) -> u32 {
+    last.map_or(0, |last| {
+        let seconds = crate::block_spacing::target_seconds_between(params, now, last).max(0);
+        u32::try_from(seconds / 3_600).unwrap_or(u32::MAX)
+    })
 }
 
 /// The number of preparation transactions a plan commits (across all layers). Delegates to the
@@ -787,7 +797,8 @@ fn preparation_steps_from_state(state: &MigrationState) -> Vec<FfiMigrationPrepa
 /// the DTO's `anchor_height` field: with ZIP 374 the real anchor is drawn per transfer and
 /// installed at proving time, so the field now carries the "now" height the platform's duration
 /// math measures waits from — it is NOT a commitment-tree anchor.
-fn encode_schedule_from_plan(
+fn encode_schedule_from_plan<P: Parameters>(
+    params: &P,
     plan: &MigrationPlan,
     now_reference: BlockHeight,
     plan_handle: migration_plan_cache::PlanHandle,
@@ -810,6 +821,7 @@ fn encode_schedule_from_plan(
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     let estimated = estimated_duration_hours(
+        params,
         plan.schedule().iter().map(|e| e.broadcast_height()),
         now_reference,
     );
@@ -860,17 +872,20 @@ fn stored_transfers(state: &MigrationState) -> Vec<&MigrationTransaction> {
 }
 
 /// The schedule-duration estimate derived from STORED transfer rows, in hours, measured from
-/// `now` to the LATEST stored `scheduled_height` — the state-side counterpart of
-/// [`estimated_duration_hours`], used by the state-encoded schedule DTO
-/// ([`encode_schedule_from_state`]) to compute the value the platform displays. Empty, or every
-/// height at/behind `now`, is `0` (saturating, never underflows).
-fn stored_duration_hours(transfers: &[&MigrationTransaction], now: BlockHeight) -> u32 {
-    let now = u32::from(now);
-    transfers
-        .iter()
-        .map(|t| u32::from(t.scheduled_height()))
-        .max()
-        .map_or(0, |max| max.saturating_sub(now) / BLOCKS_PER_HOUR)
+/// `now` to the LATEST stored `scheduled_height`, in the target time of the blocks between them —
+/// the state-side counterpart of [`estimated_duration_hours`], used by the state-encoded schedule
+/// DTO ([`encode_schedule_from_state`]) to compute the value the platform displays. Empty, or
+/// every height at/behind `now`, is `0` (saturating, never underflows).
+fn stored_duration_hours<P: Parameters>(
+    params: &P,
+    transfers: &[&MigrationTransaction],
+    now: BlockHeight,
+) -> u32 {
+    target_hours_until(
+        params,
+        transfers.iter().map(|t| t.scheduled_height()).max(),
+        now,
+    )
 }
 
 /// Marshal the STORED run's full transfer subset into the platform's schedule DTO — the
@@ -883,12 +898,13 @@ fn stored_duration_hours(transfers: &[&MigrationTransaction], now: BlockHeight) 
 /// [`stored_duration_hours`]'s doc). The DTO carries the `0` "no plan" handle: this schedule is
 /// backed by durable, already-committed state, not by a cached proposal, and the commit-shaped
 /// calls resume that stored state without consulting a handle.
-fn encode_schedule_from_state(
+fn encode_schedule_from_state<P: Parameters>(
+    params: &P,
     state: &MigrationState,
     now_reference: BlockHeight,
 ) -> anyhow::Result<*mut FfiMigrationSchedule> {
     let mut transfers = stored_transfers(state);
-    let estimated = stored_duration_hours(&transfers, now_reference);
+    let estimated = stored_duration_hours(params, &transfers, now_reference);
     transfers.sort_by_key(|t| t.scheduled_height());
     let rows = transfers
         .into_iter()
@@ -1448,12 +1464,6 @@ fn ceremony_preparation_pick(
 
 // ----- progress derivation (pure; unit-tested) -----
 
-/// The fallback bound (blocks past `recorded_at_height`) an unmined immediate run is treated as
-/// pending until, when the wallet database does not know (or no longer knows) the transaction's
-/// real expiry height: the typical wallet transaction-expiry delta, so a run that the wallet's own
-/// history never corroborates does not linger forever before the banner re-offers.
-const IMMEDIATE_RUN_FALLBACK_EXPIRY_DELTA: u32 = 40;
-
 /// An immediate-run row resolved against the wallet database (see [`resolve_immediate_run`]),
 /// pre-computed by the caller so [`immediate_run_pending`] stays pure and unit-testable without a
 /// wallet database.
@@ -1469,13 +1479,13 @@ struct ImmediateRunLookup {
 }
 
 impl ImmediateRunLookup {
-    /// The height beyond which this run, if still unmined, is treated as expired: the wallet's own
-    /// recorded expiry when known, otherwise the fallback delta past the record height.
-    fn expiry_bound(&self) -> BlockHeight {
+    /// The wallet's recorded expiry when known, otherwise the record height plus the default expiry
+    /// delta of a transaction targeting the block after it (40, or 120 once NU7 is active there),
+    /// so an uncorroborated run does not linger forever before the banner re-offers.
+    fn expiry_bound<P: Parameters>(&self, params: &P) -> BlockHeight {
         self.expiry_height.unwrap_or_else(|| {
-            BlockHeight::from(
-                u32::from(self.recorded_at_height) + IMMEDIATE_RUN_FALLBACK_EXPIRY_DELTA,
-            )
+            self.recorded_at_height
+                + crate::block_spacing::default_tx_expiry_delta(params, self.recorded_at_height + 1)
         })
     }
 }
@@ -1517,12 +1527,16 @@ fn active_run_progress(state: &MigrationState) -> (u32, u32, Option<BlockHeight>
 }
 
 /// Whether an immediate-run row still counts as PENDING at `tip`: unmined and not past its expiry
-/// bound (the wallet's own recorded expiry when known, otherwise the fallback delta past the
+/// bound (the wallet's own recorded expiry when known, otherwise the default expiry delta past the
 /// record height — see [`ImmediateRunLookup::expiry_bound`]). A mined run is CONSUMED (the sweep
 /// zeroed the balance; nothing to report) and an expired unmined one is ignored (the banner
 /// re-offers) — both report NO progress.
-fn immediate_run_pending(run: &ImmediateRunLookup, tip: BlockHeight) -> bool {
-    run.mined_height.is_none() && tip <= run.expiry_bound()
+fn immediate_run_pending<P: Parameters>(
+    params: &P,
+    run: &ImmediateRunLookup,
+    tip: BlockHeight,
+) -> bool {
+    run.mined_height.is_none() && tip <= run.expiry_bound(params)
 }
 
 /// The amount a stored transfer CROSSES into Ironwood, or `None` for a preparation transaction
@@ -2462,6 +2476,30 @@ fn remaining_orchard(ctx: &mut CallCtx) -> anyhow::Result<Zatoshis> {
         .ok_or_else(|| anyhow!("spendable Orchard balance overflows"))
 }
 
+/// The drive-level policy for [`advance_migration`] on the network of `params`, at the chain tip
+/// `tip`.
+///
+/// ZIP 318 states the schedule's durations in reference blocks, blocks at the 75-second target
+/// spacing. The block spacing is how the drive turns them into blocks: from the network's NU7
+/// activation height each reference block spans three blocks, so a duration keeps its length in
+/// time on either side of the activation.
+///
+/// The reorg settle depth is how many blocks the scanned chain must stand past a displaced step's
+/// anchor before the displacement counts as permanent: [`PROVABLE_ANCHOR_DEPTH`] reference blocks,
+/// 10, about 12.5 minutes. Upstream leaves the depth to the caller and says it should track the
+/// block spacing. The depth is a plain block count, so it is converted at one height only, the
+/// tip: 10 blocks below the network's NU7 activation and 30 from it. The stretch of chain the
+/// depth measures lasts longer than 12.5 minutes where it reaches back over blocks from before
+/// the activation, 75 seconds each: for the first 30 blocks after the activation, and while the
+/// scan trails the tip across it. So the depth errs long, never short.
+pub(crate) fn advance_config<P: Parameters>(params: &P, tip: BlockHeight) -> AdvanceConfig {
+    let spacing = BlockSpacing::for_network(params);
+    AdvanceConfig::new(
+        ReorgSettleDepth::new(PROVABLE_ANCHOR_DEPTH * spacing.blocks_per_reference_block(tip)),
+        spacing,
+    )
+}
+
 /// One verified crank of the engine's drive: builds the store adapter, judges dueness at the
 /// scanned target plus the FFI's optional `estimated_tip` (`-1` = none), and returns the
 /// engine's `Advance` with every determination it made already persisted.
@@ -2486,15 +2524,14 @@ fn drive_advance(
     state: &mut MigrationState,
     estimated_tip: i64,
 ) -> anyhow::Result<Advance> {
-    let targets = dueness_targets(ctx.tip()?, estimated_tip);
+    let tip = ctx.tip()?;
+    let targets = dueness_targets(tip, estimated_tip);
     let mut store = account_store(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
     advance_migration(
         &mut store,
         state,
         targets,
-        &AdvanceConfig::new(ReorgSettleDepth::new(
-            zcash_pool_migration::scheduling::PROVABLE_ANCHOR_DEPTH,
-        )),
+        &advance_config(&ctx.network, tip),
         // librustzcash #2910: re-spreading a missed broadcast schedule draws fresh
         // inter-broadcast gaps, so advancing needs entropy.
         rng,
@@ -2503,9 +2540,9 @@ fn drive_advance(
 }
 
 /// Advances the stored run with upstream's public satisfiability API, using scanned and estimated
-/// targets plus the provable-anchor reorg-settle depth. Every upstream step marshals onto its own
-/// discriminant — Reevaluate and Replan included (bare, as upstream carries them; the collapsed
-/// Attend projection is retired).
+/// targets plus the reorg settle depth that [`advance_config`] derives from the chain tip. Every
+/// upstream step marshals onto its own discriminant — Reevaluate and Replan included (bare, as
+/// upstream carries them; the collapsed Attend projection is retired).
 ///
 /// Returns NULL **with no error recorded** when `get_migration()` returns `None` — no run is
 /// stored, so there is nothing to advance and no step to report. Distinguish that benign NULL
@@ -2664,7 +2701,7 @@ pub unsafe extern "C" fn zcashlc_migration_progress(
         let tip = ctx.tip()?;
         let run = resolve_immediate_run(&ctx.wallet, row)
             .map_err(|e| anyhow!("wallet transaction lookup failed: {e}"))?;
-        let value = if immediate_run_pending(&run, tip) {
+        let value = if immediate_run_pending(&ctx.network, &run, tip) {
             FfiMigrationProgress {
                 is_present: true,
                 completed_transfers: 0,
@@ -3562,7 +3599,7 @@ pub unsafe extern "C" fn zcashlc_migration_propose_transfers(
         };
         match plan_and_cache(&mut system_rng(), &mut ctx, false)? {
             Some((plan, reference_height, handle)) => {
-                encode_schedule_from_plan(&plan, reference_height, handle)
+                encode_schedule_from_plan(&ctx.network, &plan, reference_height, handle)
             }
             None => Ok(encode_empty_schedule()),
         }
@@ -4057,7 +4094,7 @@ pub unsafe extern "C" fn zcashlc_migration_restart_step(
         }
         match plan_and_cache(&mut system_rng(), &mut ctx, false)? {
             Some((plan, reference_height, handle)) => {
-                encode_schedule_from_plan(&plan, reference_height, handle)
+                encode_schedule_from_plan(&ctx.network, &plan, reference_height, handle)
             }
             None => Ok(encode_empty_schedule()),
         }
@@ -4146,7 +4183,7 @@ pub unsafe extern "C" fn zcashlc_migration_refresh_stale_transfers(
         let expired = state.expired_transactions(DuenessTargets::at(target));
         if expired.is_empty() {
             // Nothing to rebuild: the stored schedule IS current — serve it for re-display.
-            return encode_schedule_from_state(&state, tip);
+            return encode_schedule_from_state(&ctx.network, &state, tip);
         }
 
         let mut rng = system_rng();
@@ -4179,7 +4216,7 @@ pub unsafe extern "C" fn zcashlc_migration_refresh_stale_transfers(
         backend
             .replace_migration(&state)
             .map_err(|e| anyhow!("migration store write failed: {e}"))?;
-        encode_schedule_from_state(&state, tip)
+        encode_schedule_from_state(&ctx.network, &state, tip)
     });
     unwrap_exc_or_null(res)
 }
@@ -5223,7 +5260,7 @@ mod tests {
     #[test]
     fn immediate_run_unmined_within_expiry_is_pending() {
         let run = immediate_lookup(100, None, Some(500));
-        assert!(immediate_run_pending(&run, h(300)));
+        assert!(immediate_run_pending(&Network::MainNetwork, &run, h(300)));
     }
 
     #[test]
@@ -5231,22 +5268,86 @@ mod tests {
         // A mined immediate sweep is CONSUMED — the swept balance is zero and there is nothing
         // for the app to acknowledge, so it reports no progress at all.
         let run = immediate_lookup(100, Some(250), Some(500));
-        assert!(!immediate_run_pending(&run, h(300)));
+        assert!(!immediate_run_pending(&Network::MainNetwork, &run, h(300)));
     }
 
     #[test]
     fn immediate_run_expired_unmined_is_not_pending() {
         let run = immediate_lookup(100, None, Some(200));
-        assert!(!immediate_run_pending(&run, h(300)));
+        assert!(!immediate_run_pending(&Network::MainNetwork, &run, h(300)));
     }
 
     #[test]
     fn immediate_run_unknown_expiry_uses_fallback_bound() {
         let run = immediate_lookup(100, None, None);
         // Still within the fallback bound (100 + 40 = 140).
-        assert!(immediate_run_pending(&run, h(140)));
+        assert!(immediate_run_pending(&Network::MainNetwork, &run, h(140)));
         // Past the fallback bound: expired.
-        assert!(!immediate_run_pending(&run, h(141)));
+        assert!(!immediate_run_pending(&Network::MainNetwork, &run, h(141)));
+    }
+
+    #[test]
+    fn immediate_run_fallback_bound_is_the_default_expiry_delta_after_the_record_height() {
+        let run = immediate_lookup(TESTNET_NU7 + 10, None, None);
+        assert!(immediate_run_pending(
+            &Network::TestNetwork,
+            &run,
+            h(TESTNET_NU7 + 130)
+        ));
+        assert!(!immediate_run_pending(
+            &Network::TestNetwork,
+            &run,
+            h(TESTNET_NU7 + 131)
+        ));
+        // Recorded one block before activation: its target is the activation block, so 120.
+        let at_activation = immediate_lookup(TESTNET_NU7 - 1, None, None);
+        assert!(immediate_run_pending(
+            &Network::TestNetwork,
+            &at_activation,
+            h(TESTNET_NU7 + 119)
+        ));
+        assert!(!immediate_run_pending(
+            &Network::TestNetwork,
+            &at_activation,
+            h(TESTNET_NU7 + 120)
+        ));
+        // Two blocks before: the target precedes activation, so 40.
+        let before = immediate_lookup(TESTNET_NU7 - 2, None, None);
+        assert!(immediate_run_pending(
+            &Network::TestNetwork,
+            &before,
+            h(TESTNET_NU7 + 38)
+        ));
+        assert!(!immediate_run_pending(
+            &Network::TestNetwork,
+            &before,
+            h(TESTNET_NU7 + 39)
+        ));
+    }
+
+    // ----- characterization at mainnet heights (75 s blocks from Blossom until NU7 activates at
+    // 3,543,405, 25 s blocks from it); each goes through one helper. -----
+
+    fn mainnet_immediate_run_pending(recorded_at: u32, tip: u32) -> bool {
+        immediate_run_pending(
+            &Network::MainNetwork,
+            &immediate_lookup(recorded_at, None, None),
+            h(tip),
+        )
+    }
+
+    #[test]
+    fn mainnet_immediate_run_without_a_known_expiry_is_pending_for_40_blocks() {
+        assert!(mainnet_immediate_run_pending(3_000_000, 3_000_040));
+        assert!(!mainnet_immediate_run_pending(3_000_000, 3_000_041));
+    }
+
+    #[test]
+    fn mainnet_immediate_run_without_a_known_expiry_is_pending_for_120_blocks_from_nu7() {
+        // Recorded one block before mainnet's NU7 activation at 3,543,405: the transaction's target
+        // is the activation block, so it gets the 120-block default expiry delta.
+        assert!(mainnet_immediate_run_pending(3_543_404, 3_543_524));
+        assert!(!mainnet_immediate_run_pending(3_543_404, 3_543_525));
     }
 
     #[test]
@@ -5295,7 +5396,13 @@ mod tests {
     #[test]
     fn schedule_rows_sort_chronologically_with_prep_offset() {
         let mut rng = StdRng::seed_from_u64(7);
-        let schedule = scheduling::schedule(&SchedulingParams::ZIP_318, h(1_000), 5, &mut rng);
+        let schedule = scheduling::schedule(
+            &SchedulingParams::ZIP_318,
+            &BlockSpacing::UNIFORM,
+            h(1_000),
+            5,
+            &mut rng,
+        );
         // The engine hands the crossing values straight over; they are already net of the fee
         // buffer that pays each transfer's own fee.
         let crossing_values: Vec<Zatoshis> = (1..=5).map(|i| zat(i * 100_000_000)).collect();
@@ -5331,7 +5438,13 @@ mod tests {
         let expected_total: u64 = crossing_values.iter().map(|z| u64::from(*z)).sum();
 
         let mut rng_a = StdRng::seed_from_u64(1);
-        let schedule_a = scheduling::schedule(&SchedulingParams::ZIP_318, h(1_000), 5, &mut rng_a);
+        let schedule_a = scheduling::schedule(
+            &SchedulingParams::ZIP_318,
+            &BlockSpacing::UNIFORM,
+            h(1_000),
+            5,
+            &mut rng_a,
+        );
         let rows_a = schedule_rows(
             &planned_transfers(0, &schedule_a),
             &crossing_values,
@@ -5340,7 +5453,13 @@ mod tests {
         .unwrap();
 
         let mut rng_b = StdRng::seed_from_u64(99);
-        let schedule_b = scheduling::schedule(&SchedulingParams::ZIP_318, h(1_000), 5, &mut rng_b);
+        let schedule_b = scheduling::schedule(
+            &SchedulingParams::ZIP_318,
+            &BlockSpacing::UNIFORM,
+            h(1_000),
+            5,
+            &mut rng_b,
+        );
         let rows_b = schedule_rows(
             &planned_transfers(0, &schedule_b),
             &crossing_values,
@@ -5375,7 +5494,13 @@ mod tests {
     #[test]
     fn schedule_rows_reject_length_mismatch() {
         let mut rng = StdRng::seed_from_u64(7);
-        let schedule = scheduling::schedule(&SchedulingParams::ZIP_318, h(1_000), 3, &mut rng);
+        let schedule = scheduling::schedule(
+            &SchedulingParams::ZIP_318,
+            &BlockSpacing::UNIFORM,
+            h(1_000),
+            3,
+            &mut rng,
+        );
         let crossing_values = vec![zat(100)];
         assert!(
             schedule_rows(
@@ -5407,6 +5532,7 @@ mod tests {
         .unwrap();
         let schedule = scheduling::schedule(
             &SchedulingParams::ZIP_318,
+            &BlockSpacing::UNIFORM,
             h(1_000),
             crossing_values.len(),
             &mut rng,
@@ -5439,7 +5565,7 @@ mod tests {
     fn estimated_duration_hours_is_measured_from_now_to_the_last_broadcast() {
         let heights = [h(1_000_336), h(1_000_432)];
         assert_eq!(
-            estimated_duration_hours(heights.into_iter(), h(1_000_000)),
+            estimated_duration_hours(&Network::MainNetwork, heights.into_iter(), h(1_000_000)),
             9
         );
     }
@@ -5447,7 +5573,7 @@ mod tests {
     #[test]
     fn estimated_duration_hours_empty_schedule_is_zero() {
         assert_eq!(
-            estimated_duration_hours(std::iter::empty(), h(1_000_000)),
+            estimated_duration_hours(&Network::MainNetwork, std::iter::empty(), h(1_000_000)),
             0
         );
     }
@@ -5458,7 +5584,7 @@ mod tests {
         // `0` rather than underflowing.
         let heights = [h(900_000), h(950_000), h(1_000_000)];
         assert_eq!(
-            estimated_duration_hours(heights.into_iter(), h(1_000_000)),
+            estimated_duration_hours(&Network::MainNetwork, heights.into_iter(), h(1_000_000)),
             0
         );
     }
@@ -5484,19 +5610,86 @@ mod tests {
     fn stored_duration_hours_is_measured_from_now_to_the_last_scheduled_height() {
         let a = transfer_at(0, 1_000_336);
         let b = transfer_at(1, 1_000_432);
-        assert_eq!(stored_duration_hours(&[&a, &b], h(1_000_000)), 9);
+        assert_eq!(
+            stored_duration_hours(&Network::MainNetwork, &[&a, &b], h(1_000_000)),
+            9
+        );
     }
 
     #[test]
     fn stored_duration_hours_empty_is_zero() {
-        assert_eq!(stored_duration_hours(&[], h(1_000_000)), 0);
+        assert_eq!(
+            stored_duration_hours(&Network::MainNetwork, &[], h(1_000_000)),
+            0
+        );
     }
 
     #[test]
     fn stored_duration_hours_all_overdue_is_zero() {
         let a = transfer_at(0, 900_000);
         let b = transfer_at(1, 950_000);
-        assert_eq!(stored_duration_hours(&[&a, &b], h(1_000_000)), 0);
+        assert_eq!(
+            stored_duration_hours(&Network::MainNetwork, &[&a, &b], h(1_000_000)),
+            0
+        );
+    }
+
+    fn mainnet_duration_hours(broadcast_heights: &[u32], now: u32) -> u32 {
+        estimated_duration_hours(
+            &Network::MainNetwork,
+            broadcast_heights.iter().copied().map(h),
+            h(now),
+        )
+    }
+
+    fn mainnet_stored_duration_hours(scheduled_heights: &[u32], now: u32) -> u32 {
+        let owned: Vec<MigrationTransaction> = scheduled_heights
+            .iter()
+            .enumerate()
+            .map(|(id, &height)| transfer_at(u32::try_from(id).unwrap(), height))
+            .collect();
+        let refs: Vec<&MigrationTransaction> = owned.iter().collect();
+        stored_duration_hours(&Network::MainNetwork, &refs, h(now))
+    }
+
+    #[test]
+    fn mainnet_duration_hours_count_48_blocks_an_hour() {
+        for hours in [mainnet_duration_hours, mainnet_stored_duration_hours] {
+            assert_eq!(hours(&[3_000_047], 3_000_000), 0);
+            assert_eq!(hours(&[3_000_048], 3_000_000), 1);
+            assert_eq!(hours(&[3_000_100, 3_001_000], 3_000_000), 20);
+            assert_eq!(hours(&[3_034_560], 3_000_000), 720);
+            assert_eq!(hours(&[2_999_000], 3_000_000), 0);
+        }
+    }
+
+    const TESTNET_NU7: u32 = 4_465_026;
+
+    #[test]
+    fn duration_hours_count_each_block_at_its_own_spacing() {
+        // From NU7 an hour is 144 blocks, not 48.
+        assert_eq!(
+            estimated_duration_hours(
+                &Network::TestNetwork,
+                [h(TESTNET_NU7 + 144)].into_iter(),
+                h(TESTNET_NU7)
+            ),
+            1
+        );
+        let transfer = transfer_at(0, TESTNET_NU7 + 287);
+        assert_eq!(
+            stored_duration_hours(&Network::TestNetwork, &[&transfer], h(TESTNET_NU7)),
+            1
+        );
+        // 48 blocks of 75 s plus 144 of 25 s are two hours (the old math said four).
+        assert_eq!(
+            estimated_duration_hours(
+                &Network::TestNetwork,
+                [h(TESTNET_NU7 + 143)].into_iter(),
+                h(TESTNET_NU7 - 49)
+            ),
+            2
+        );
     }
 
     /// The DTO-constructing encode path end to end: `encode_schedule_from_state` must thread its
@@ -5544,14 +5737,35 @@ mod tests {
             AnchorBucketInterval::ZIP_318,
         );
 
-        let schedule_ptr =
-            encode_schedule_from_state(&state, h(1_000_000)).expect("encoding must succeed");
+        let schedule_ptr = encode_schedule_from_state(&Network::MainNetwork, &state, h(1_000_000))
+            .expect("encoding must succeed");
         let schedule = unsafe { &*schedule_ptr };
         assert_eq!(schedule.estimated_duration_hours, 9);
         assert_eq!(
             schedule.preparations_len, 0,
             "no preparation-kind transaction is stored in this fixture"
         );
+        unsafe { zcashlc_free_migration_schedule(schedule_ptr) };
+    }
+
+    /// The testnet twin of the test above, at a post-NU7 height: `encode_schedule_from_state` must
+    /// pass its `params` through to the duration math. A transfer 287 blocks after `now` is 7,175 s
+    /// of 25-second blocks, one hour; at 48 blocks to the hour it would be five.
+    #[test]
+    fn encode_schedule_from_state_counts_post_nu7_blocks_at_their_own_spacing() {
+        let state = test_state(
+            MigrationStatus::InProgress,
+            &[],
+            &[MigrationTxState::Signed],
+            TESTNET_NU7 + 287,
+            TESTNET_NU7 + 10_000,
+        );
+
+        let schedule_ptr =
+            encode_schedule_from_state(&Network::TestNetwork, &state, h(TESTNET_NU7))
+                .expect("encoding must succeed");
+        let schedule = unsafe { &*schedule_ptr };
+        assert_eq!(schedule.estimated_duration_hours, 1);
         unsafe { zcashlc_free_migration_schedule(schedule_ptr) };
     }
 
@@ -11077,6 +11291,66 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    // ----- the drive's configuration (`advance_config`) -----
+
+    /// The drive converts the schedule's durations into blocks with the spacing of the network it
+    /// runs on, which changes at that network's NU7 activation.
+    #[test]
+    fn advance_config_spaces_blocks_by_the_networks_nu7_activation() {
+        assert_eq!(
+            advance_config(&Network::MainNetwork, h(3_543_405)).block_spacing(),
+            BlockSpacing::with_nu7_activation(BlockHeight::from_u32(3_543_405))
+        );
+        assert_eq!(
+            advance_config(&Network::TestNetwork, h(4_465_026)).block_spacing(),
+            BlockSpacing::with_nu7_activation(BlockHeight::from_u32(4_465_026))
+        );
+    }
+
+    /// A chain that follows mainnet, except that NU7 never activates on it.
+    #[derive(Clone)]
+    struct NoNu7;
+
+    impl Parameters for NoNu7 {
+        fn network_type(&self) -> zcash_protocol::consensus::NetworkType {
+            Network::MainNetwork.network_type()
+        }
+
+        fn activation_height(&self, nu: NetworkUpgrade) -> Option<BlockHeight> {
+            match nu {
+                NetworkUpgrade::Nu7 => None,
+                nu => Network::MainNetwork.activation_height(nu),
+            }
+        }
+    }
+
+    /// The reorg settle depth is 10 reference blocks, converted to blocks at the chain tip: 10
+    /// blocks below the network's NU7 activation and 30 from it, the same 12.5 minutes. A chain
+    /// on which NU7 never activates keeps 10 blocks at every height.
+    #[test]
+    fn advance_config_scales_the_settle_depth_at_the_networks_nu7_activation() {
+        assert_eq!(
+            advance_config(&Network::MainNetwork, h(3_543_404)).reorg_settle_depth(),
+            ReorgSettleDepth::new(10)
+        );
+        assert_eq!(
+            advance_config(&Network::MainNetwork, h(3_543_405)).reorg_settle_depth(),
+            ReorgSettleDepth::new(30)
+        );
+        assert_eq!(
+            advance_config(&Network::TestNetwork, h(4_465_025)).reorg_settle_depth(),
+            ReorgSettleDepth::new(10)
+        );
+        assert_eq!(
+            advance_config(&Network::TestNetwork, h(4_465_026)).reorg_settle_depth(),
+            ReorgSettleDepth::new(30)
+        );
+        assert_eq!(
+            advance_config(&NoNu7, h(5_000_000)).reorg_settle_depth(),
+            ReorgSettleDepth::new(10)
+        );
+    }
+
     // ----- advance step (`zcashlc_migration_advance_step`, the verbatim next_step conduit) -----
 
     /// Sets the fixture chain tip to the file's usual 3,600,000.
@@ -11469,6 +11743,140 @@ mod tests {
             "mining is chain-derived: nothing is height-schedulable"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The step [`zcashlc_migration_advance_step`] serves over a run whose one transaction is a
+    /// BROADCAST transfer anchored at `boundary`, on a wallet whose chain tip is `chain_tip` and
+    /// which has scanned through `scanned`: `Ok(step)`, or `Err(message)` with the error the call
+    /// recorded when it returns NULL.
+    ///
+    /// The answer reads the drive's reorg settle depth. Upstream judges a broadcast's anchor
+    /// displaced only once `scanned - boundary` reaches that depth, and judging parses the stored
+    /// PCZT. This fixture's placeholder bytes fail the parse (see
+    /// [`advance_step_outlook_reports_next_work`]), so a judged row errors where an unjudged one
+    /// yields `Waiting`: a boundary one block either side of the depth tells the depth exactly,
+    /// with no real proven PCZT. [`assert_anchor_judged`] checks the errored side.
+    fn advance_step_for_a_broadcast_anchored_at(
+        chain_tip: u32,
+        scanned: u32,
+        boundary: u32,
+    ) -> Result<u32, String> {
+        // A database per scenario: the tests run in parallel, and the prefix names the file.
+        let path = init_fixture_db(&format!(
+            "zcashlc_advance_step_settle_{chain_tip}_{scanned}_{boundary}"
+        ));
+        let path_bytes = path.to_str().unwrap().as_bytes();
+        let account = create_fixture_account(&path);
+        // The scanned range goes first: `mark_fixture_scanned_through` replaces the whole scan
+        // queue, so a tip set before it would collapse to the scanned height. Set after, the tip
+        // extends the queue past the scanned range.
+        mark_fixture_scanned_through(&path, scanned);
+        assert!(
+            unsafe {
+                crate::zcashlc_update_chain_tip(
+                    path_bytes.as_ptr(),
+                    path_bytes.len(),
+                    chain_tip as i32,
+                    NETWORK_ID_MAINNET,
+                )
+            },
+            "chain-tip update must succeed"
+        );
+        let state = custom_state(
+            MigrationStatus::InProgress,
+            vec![tx_row(
+                0,
+                MigrationTxKind::Transfer { crossing: 0 },
+                &[],
+                3_100_000,
+                4_000_000,
+                Some(boundary),
+                MigrationTxState::Broadcast {
+                    txid: TxId::from_bytes([9u8; 32]),
+                },
+            )],
+        );
+        store_fixture_state(&path, &account, &state);
+
+        // Cleared first, so that the message read after a NULL is this call's own.
+        ffi_helpers::error_handling::clear_last_error();
+        let ptr = unsafe {
+            zcashlc_migration_advance_step(
+                path_bytes.as_ptr(),
+                path_bytes.len(),
+                account.as_ptr(),
+                NETWORK_ID_MAINNET,
+                -1,
+            )
+        };
+        let outcome = if ptr.is_null() {
+            Err(ffi_helpers::error_handling::error_message()
+                .unwrap_or_else(|| "NULL with no error recorded".to_owned()))
+        } else {
+            let step = unsafe { &*ptr }.step;
+            unsafe { zcashlc_free_migration_advance_step(ptr) };
+            Ok(step)
+        };
+        let _ = std::fs::remove_file(&path);
+        outcome
+    }
+
+    /// Asserts that `outcome` is the failure to read this fixture's placeholder PCZT, which the
+    /// call reaches only once upstream judges the broadcast's anchor. The error names the stored
+    /// PCZT (upstream words it "corrupt stored value for pczt"), which tells that failure from
+    /// any other reason the call can return NULL, and from a step.
+    #[track_caller]
+    fn assert_anchor_judged(outcome: Result<u32, String>, what: &str) {
+        assert!(
+            matches!(&outcome, Err(error) if error.contains("pczt")),
+            "{what}: expected the stored-PCZT failure, got {outcome:?}"
+        );
+    }
+
+    /// From NU7 a block is a third of a reference block, so the drive treats a displacement of a
+    /// broadcast's anchor as permanent only once the scanned chain stands 30 blocks past it: the
+    /// same 12.5 minutes as the 10 blocks below the activation. Mainnet activates NU7 at 3,543,405.
+    #[test]
+    fn advance_step_settles_a_displacement_after_30_blocks_from_nu7() {
+        assert_eq!(
+            advance_step_for_a_broadcast_anchored_at(3_600_000, 3_600_000, 3_599_971),
+            Ok(ZCASHLC_ADVANCE_STEP_WAITING),
+            "an anchor 29 blocks back has not settled"
+        );
+        assert_anchor_judged(
+            advance_step_for_a_broadcast_anchored_at(3_600_000, 3_600_000, 3_599_970),
+            "an anchor 30 blocks back is judged, which reads the placeholder PCZT and errors",
+        );
+    }
+
+    /// Below the activation a reference block is one block, so the depth stays at 10 blocks.
+    #[test]
+    fn advance_step_settles_a_displacement_after_10_blocks_below_nu7() {
+        assert_eq!(
+            advance_step_for_a_broadcast_anchored_at(3_543_000, 3_543_000, 3_542_991),
+            Ok(ZCASHLC_ADVANCE_STEP_WAITING),
+            "an anchor 9 blocks back has not settled"
+        );
+        assert_anchor_judged(
+            advance_step_for_a_broadcast_anchored_at(3_543_000, 3_543_000, 3_542_990),
+            "an anchor 10 blocks back is judged, which reads the placeholder PCZT and errors",
+        );
+    }
+
+    /// The depth is converted at the chain tip, not at the scanned height: a wallet still
+    /// scanning below the activation, whose chain tip is already past it, settles after exactly
+    /// 30 blocks, not 10 and not more.
+    #[test]
+    fn advance_step_scales_the_settle_depth_by_the_chain_tip() {
+        assert_eq!(
+            advance_step_for_a_broadcast_anchored_at(3_600_000, 3_543_000, 3_542_971),
+            Ok(ZCASHLC_ADVANCE_STEP_WAITING),
+            "an anchor 29 blocks back has not settled while the tip is past the activation"
+        );
+        assert_anchor_judged(
+            advance_step_for_a_broadcast_anchored_at(3_600_000, 3_543_000, 3_542_970),
+            "an anchor 30 blocks back is judged while the tip is past the activation",
+        );
     }
 
     // ----- progress (`zcashlc_migration_progress` — the standalone derivation) -----
@@ -12487,7 +12895,8 @@ mod tests {
     /// One advance over a three-transfer backlog: the released row lands at the SCANNED target
     /// (release means executable — a proof rests on scanned chain data), and it is the only row
     /// servable there afterwards; the other two moved later by the same lag, so the gap between
-    /// them survives unchanged.
+    /// them survives unchanged. The lag spans mainnet's NU7 activation, so "unchanged" is in
+    /// time: the gaps keep their reference blocks, and each of those now spans three blocks.
     ///
     /// The backlog is `Signed`, so the released row comes back as a schedule-due `Prove` target
     /// rather than a BROADCAST instruction. The trigger, the release and the deferral are the
@@ -12500,7 +12909,8 @@ mod tests {
         let (path, account) = init_delivery_fixture("zcashlc_next_due_respread");
         let path_bytes = path.to_str().unwrap().as_bytes();
         // Three transfers, all scheduled far below the scanned target (3,600,001) — the wallet
-        // slept through the whole window. Their drawn gaps are 100 and 200 blocks.
+        // slept through the whole window. Their drawn gaps are 100 and 200 blocks, which below
+        // mainnet's NU7 activation at 3,543,405 are also 100 and 200 reference blocks.
         let transfer = |id: u32, scheduled: u32| {
             provable_tx_row(
                 id,
@@ -12564,21 +12974,24 @@ mod tests {
             3_600_001,
             "the release lands at the scanned target, where the wallet can execute it"
         );
-        // The lag is 3,600,001 - 3,500,000 = 100,001 blocks; every deferred row moves by it.
+        // Every deferred row moves by the lag, the time from 3,500,000 to 3,600,001. NU7 activates
+        // inside that span, so the rows keep their gaps in time, not in blocks: the released row
+        // is followed after 100 and after 300 reference blocks, and each of those spans three
+        // blocks past the activation.
         assert_eq!(
             stored_scheduled_height(&stored, 1),
-            3_600_101,
+            3_600_301,
             "the first deferred row moves later by the full lag"
         );
         assert_eq!(
             stored_scheduled_height(&stored, 2),
-            3_600_301,
+            3_600_901,
             "the second deferred row moves later by the same lag"
         );
         assert_eq!(
             stored_scheduled_height(&stored, 2) - stored_scheduled_height(&stored, 1),
-            200,
-            "the drawn inter-broadcast gap survives the wallet's absence unchanged"
+            600,
+            "the drawn inter-broadcast gap, 200 reference blocks, survives the wallet's absence"
         );
         let _ = std::fs::remove_file(&path);
     }

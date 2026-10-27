@@ -104,7 +104,8 @@ final class OrchardMigrationHostTests: ZcashTestCase {
                     now: { clock!.now },
                     logger: logger
                 ),
-                logger: logger
+                logger: logger,
+                spacing: TargetBlockSpacing(networkType: .testnet)
             )
         }
 
@@ -116,6 +117,7 @@ final class OrchardMigrationHostTests: ZcashTestCase {
             tickInterval: 3600,
             now: { clockValue.now },
             logger: logger,
+            spacing: TargetBlockSpacing(networkType: .testnet),
             actorFactory: perAccountFactory
         )
 
@@ -236,6 +238,7 @@ final class OrchardMigrationHostTests: ZcashTestCase {
                 broadcaster: broadcaster,
                 syncGate: gate,
                 logger: logger,
+                spacing: TargetBlockSpacing(networkType: .testnet),
                 now: { clockValue.now }
             )
         }
@@ -246,6 +249,7 @@ final class OrchardMigrationHostTests: ZcashTestCase {
             tickInterval: 3600,
             now: { clockValue.now },
             logger: logger,
+            spacing: TargetBlockSpacing(networkType: .testnet),
             actorFactory: capturingFactory
         )
 
@@ -485,13 +489,49 @@ final class OrchardMigrationHostTests: ZcashTestCase {
         XCTAssertEqual(fallback, ChainTipEstimator.fallbackSecondsPerBlock)
     }
 
+    /// With no samples, the fallback is the target spacing of the block after the max scanned
+    /// height, on the host's network: testnet NU7 + 10 is in NU7's 25 s era. The mock decouples
+    /// the two reads; in a wallet both read the `blocks` table, so no samples with a scanned height
+    /// takes a concurrent scan racing or blocking the samples read, and the fallback is 75 s in
+    /// practice.
+    func testEstimatedSecondsPerBlockFallsBackToTheSpacingAtTheScannedHeight() async throws {
+        let welding = ZcashRustBackendWeldingMock()
+        welding.migrationBlockRateSamplesWindowReturnValue = []
+        welding.maxScannedHeightReturnValue = 4_465_036
+        let host = makeHost(welding: welding, broadcaster: ScriptedBroadcaster(script: .throwing(ZcashError.migrationTorUnavailable)))
+        let fallback = try await host.estimatedSecondsPerBlock()
+        XCTAssertEqual(fallback, 25)
+    }
+
+    /// The public pair stays consistent across NU7: 60 s a block, 0.8 of the 75 s target, projects
+    /// 1200 s from nu7 - 10 to nu7 + 32, and the rate reported with that tip is the one after it,
+    /// 0.8 of NU7's 25 s, not the 60 s measured before activation.
+    func testEstimatedSecondsPerBlockIsTheRateAfterTheProjectedTipAcrossNU7() async throws {
+        let nu7: BlockHeight = 4_465_026
+        let welding = ZcashRustBackendWeldingMock()
+        let base = Int64(referenceDate.timeIntervalSince1970)
+        welding.migrationBlockRateSamplesWindowReturnValue = [
+            MigrationBlockRateSample(height: nu7 - 11, unixTime: base - 60),
+            MigrationBlockRateSample(height: nu7 - 10, unixTime: base)
+        ]
+        clock.now = referenceDate.addingTimeInterval(1_200)
+        let host = makeHost(welding: welding, broadcaster: ScriptedBroadcaster(script: .throwing(ZcashError.migrationTorUnavailable)))
+
+        let tip = try await host.estimatedChainTip()
+        let secondsPerBlock = try await host.estimatedSecondsPerBlock()
+
+        XCTAssertEqual(tip, nu7 + 32)
+        XCTAssertEqual(secondsPerBlock, 20)
+    }
+
     // MARK: - Helpers
 
     private func makeHost(
         welding: ZcashRustBackendWeldingMock,
         broadcaster: any MigrationBroadcasting,
         tickInterval: TimeInterval = 3600,
-        gateTickInterval: TimeInterval = 3600
+        gateTickInterval: TimeInterval = 3600,
+        spacing: TargetBlockSpacing = TargetBlockSpacing(networkType: .testnet)
     ) -> OrchardMigrationHost {
         // `isSyncBlocked()`/`syncBlockedStream` unconditionally read `migrationBlockRateSamples`
         // (`ChainTipEstimator`'s raw input) while computing the wallet-scope predicate; default it
@@ -509,6 +549,7 @@ final class OrchardMigrationHostTests: ZcashTestCase {
             tickInterval: tickInterval,
             now: { clockValue.now },
             logger: logger,
+            spacing: spacing,
             actorFactory: makeActorFactory(welding: welding, gateTickInterval: gateTickInterval)
         )
     }
@@ -531,7 +572,8 @@ final class OrchardMigrationHostTests: ZcashTestCase {
                     now: { clockValue.now },
                     logger: logger
                 ),
-                logger: logger
+                logger: logger,
+                spacing: TargetBlockSpacing(networkType: .testnet)
             )
         }
     }

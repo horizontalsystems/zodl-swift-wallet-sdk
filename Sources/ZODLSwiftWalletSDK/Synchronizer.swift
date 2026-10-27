@@ -699,8 +699,9 @@ public protocol Synchronizer: AnyObject {
         network: NetworkType
     ) async -> LightWalletEndpoint?
 
-    /// Takes a given date and finds out the closes checkpoint's height for it.
-    /// Each checkpoint has a timestamp stored so it can be used for the calculations.
+    /// The height of the newest bundled checkpoint whose time is strictly before `date`, a safe birthday for a
+    /// wallet created then; the newest checkpoint for a date at or after its time, and Sapling activation when
+    /// no checkpoint precedes `date`.
     func estimateBirthdayHeight(for date: Date) -> BlockHeight
 
     /// Takes a given height and finds out the closes checkpoint's timestamp for it.
@@ -1121,7 +1122,9 @@ public protocol Synchronizer: AnyObject {
     func nextMigrationWake(accountUUID: AccountUUID) async -> MigrationNextWork?
 
     /// The wall-clock ESTIMATED chain tip, projected from the most recently scanned blocks'
-    /// header times (the measured-block-rate estimator behind `useEstimatedTip`). Falls back to
+    /// header times (the measured-block-rate estimator behind `useEstimatedTip`). A projection
+    /// that reaches a target spacing change, such as NU7 activation, counts the blocks past it at
+    /// their own spacing, keeping the speed the chain showed relative to its target. Falls back to
     /// the wallet's max SCANNED height when no samples exist. WALLET-scoped, like the batching
     /// group: the projection reads the shared blocks table, so it takes no account — one answer
     /// serves every account.
@@ -1129,12 +1132,16 @@ public protocol Synchronizer: AnyObject {
     ///   block, so no tip exists to estimate from.
     func estimatedMigrationChainTip() async throws -> BlockHeight
 
-    /// The measured seconds-per-block over the most recently scanned blocks: the mean of the last
-    /// up-to-100 consecutive header-time deltas, clamped to [5, 150] s, falling back to 75 s (the
-    /// target spacing) when fewer than two samples exist. Use it to convert
-    /// ``migrationSyncWakeups(accountUUID:)`` heights into wall-clock OS timers. WALLET-scoped
-    /// like ``estimatedMigrationChainTip()`` — the measurement reads the shared blocks table, so
-    /// it takes no account.
+    /// The measured seconds-per-block: the chain's speed relative to the target time of up to the
+    /// last 1000 scanned blocks, expressed in the target spacing of the block after
+    /// ``estimatedMigrationChainTip()`` and clamped to [5, 150] s scaled by that spacing over 75 s
+    /// ([5/3, 50] s at NU7's 25 s). When no rate can be measured it is that block's target
+    /// spacing (25 s from NU7 activation), or 75 s for a wallet that has never scanned. Use it to
+    /// convert ``migrationSyncWakeups(accountUUID:)`` heights into wall-clock OS timers.
+    /// ``TargetBlockSpacing/estimatedSeconds(from:to:secondsPerBlock:)`` does so from
+    /// ``estimatedMigrationChainTip()``, across a spacing change too. WALLET-scoped like
+    /// ``estimatedMigrationChainTip()`` — the measurement reads the shared blocks table, so it
+    /// takes no account.
     func estimatedMigrationSecondsPerBlock() async throws -> Double
 
     /// The LIVE status of every committed migration transaction for `accountUUID`, keyed by its

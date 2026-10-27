@@ -582,9 +582,10 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         passGeneration += 1
         let birthday = BlockHeight(initializer.walletBirthday)
         // [v2.1 Phase 2] Tip freshness ([#1591]) is ENGINE-OWNED (snapshot.tipFresh, E-2):
-        // the FFI start() captures the refresh baseline and keeps freshness across a <120 s
-        // stop→start hop — the SDKFlags.sdkStarted()/chainTipAtRunStart parity machinery
-        // this block used to carry is deleted.
+        // the FFI start() captures the refresh baseline and keeps freshness across a stop→start
+        // hop shorter than 1.6 target block intervals (120 s before NU7, 40 s from it) — the
+        // SDKFlags.sdkStarted()/chainTipAtRunStart parity machinery this block used to carry is
+        // deleted.
         // B4: a new run starts with a fresh stall-watchdog window. [MOB-1850] The recovery
         // BUDGET only resets when the app is starting a run of its own: the stall recovery
         // restarts the pass by calling this very method, and letting that call clear the
@@ -690,7 +691,8 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
             ))
         }
         // [v2.1 Phase 2] Re-masking after a stop is ENGINE-OWNED: the FFI stop() stamps the
-        // moment, and a start() more than 120 s later re-masks via snapshot.tipFresh (E-2).
+        // moment, and a start() more than 1.6 target block intervals later (120 s before NU7,
+        // 40 s from it) re-masks via snapshot.tipFresh (E-2).
         // [MOB-1850] Nothing is stacked on this stop — no wallet write, no second handle — so a
         // non-quiescent one changes nothing here beyond what a reader of the logs should know:
         // the pass is stopped either way, and an engine writer that outlives it has only the
@@ -1613,9 +1615,10 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
         // re-scan as a genuine 0→100% climb (the `forceCounterProgressUntilDone` host bypass
         // is deleted). One host job remains: RESTART the pass — the follow loop only
         // re-syncs when the server tip advances (`session.rs` `should_resync`), so without a
-        // restart the re-scan would wait for the next block (≤ ~75 s). A restart hiccup must
-        // never fail an otherwise-successful import, so it is not rethrown here — but it must
-        // not go unreported either, so `publishStoppedWithError` puts it on the state stream.
+        // restart the re-scan would wait for the next block (about 75 s before NU7, 25 s from it).
+        // A restart hiccup must never fail an otherwise-successful import, so it is not rethrown
+        // here — but it must not go unreported either, so `publishStoppedWithError` puts it on the
+        // state stream.
         initializer.logger.debug(
             "[#1755] importAccount: wasRunning=\(wasRunning) "
             + (wasRunning ? "→ restarting sync pass now to surface the re-scan" : "→ next start() will re-scan")
@@ -2797,8 +2800,11 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
 
     /// Ranks `endpoints` by `getInfo` round-trip time, ascending (best first), applying the
     /// same health checks as `SDKSynchronizer`'s benchmark: chain name, consensus branch id,
-    /// and the loose synced-height check — all skipped for custom networks, mirroring
-    /// `ValidateServerAction`. Delegates to ephemeral gRPC connections.
+    /// and the loose synced-height check. A custom-parameter network may reach servers that
+    /// identify with a different base chain and report a nonstandard consensus branch id, so
+    /// only the chain-name and branch-id checks are skipped for it, mirroring
+    /// `ValidateServerAction`; the synced-height check runs for every network. Delegates to
+    /// ephemeral gRPC connections.
     // TODO: [#1755] Hook into Tor when torEnabled; for now direct mode is used.
     private func measureEndpoints(
         endpoints: [LightWalletEndpoint],
@@ -2818,6 +2824,7 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
             }
 
             let isCustomNetwork = initializer.network.customActivationHeights != nil
+            let spacing = TargetBlockSpacing(network: initializer.network)
 
             for await result in group {
                 guard let (endpoint, elapsed, info) = result, elapsed > 0 else { continue }
@@ -2841,8 +2848,8 @@ public actor SlipstreamSynchronizer: AwaitableStopSynchronizer {
                 }
 
                 // Rule out servers that are syncing, stuck, or probably on the wrong fork.
-                // Deliberately loose — `info.estimatedHeight` may be quite inaccurate.
-                guard info.blockHeight + ZcashSDK.syncedThresholdBlocks >= info.estimatedHeight else {
+                // Deliberately loose — `info.estimatedHeight` may be quite inaccurate; see `ServerSyncCheck`.
+                guard ServerSyncCheck.isSynced(blockHeight: info.blockHeight, estimatedHeight: info.estimatedHeight, spacing: spacing) else {
                     continue
                 }
 

@@ -1046,6 +1046,7 @@ public class SDKSynchronizer: AwaitableStopSynchronizer {
             // ValidateServerAction. Without the skip every candidate would be ruled out and this API
             // would always return an empty list for custom networks.
             let isCustomNetwork = initializer.network.customActivationHeights != nil
+            let spacing = TargetBlockSpacing(network: initializer.network)
 
             for await result in group {
                 // rule out results where calls failed
@@ -1075,11 +1076,9 @@ public class SDKSynchronizer: AwaitableStopSynchronizer {
                     }
                 }
 
-                // Rule out servers that are syncing, stuck, or probably on the wrong fork.
-                // To avoid falsely ruling out all servers this can only be a very loose check
-                // (i.e. `ZcashSDK.syncedThresholdBlocks` should not be too small),
-                // because `info.estimatedHeight` may be quite inaccurate.
-                guard info.blockHeight + ZcashSDK.syncedThresholdBlocks >= info.estimatedHeight else {
+                // Rule out servers that are syncing, stuck, or probably on the wrong fork. This can only be a
+                // very loose check, because `info.estimatedHeight` may be quite inaccurate; see `ServerSyncCheck`.
+                guard ServerSyncCheck.isSynced(blockHeight: info.blockHeight, estimatedHeight: info.estimatedHeight, spacing: spacing) else {
                     continue
                 }
 
