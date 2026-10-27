@@ -150,10 +150,8 @@ incrementalmerkletree = { version = "0.9", default-features = false }
 
 # Slipstream engine — the alternative sync engine the SlipstreamSynchronizer
 # drives, published to crates.io as `zodl-slipstream` from zodl-inc/slipstream.
-# The `[patch.crates-io]` entry below replaces 0.4.0-pre.2 with a zodl-inc/slipstream revision
-# built on the librustzcash release, the same generation as this package, so the graph stays a
-# single family instance.
-slipstream-core = { version = "=0.4.0-pre.2", package = "zodl-slipstream" }
+# The `[patch.crates-io]` entry below pins the 0.4.0 release until registry publication.
+slipstream-core = { version = "=0.4.0", package = "zodl-slipstream" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 base64 = "0.22"
 hex = "0.4"
@@ -201,15 +199,10 @@ lto = true
 strip = false
 
 [patch.crates-io]
-# To build against an unreleased slipstream revision, patch it in here by COMMIT HASH rather than a
-# branch: a branch pin silently follows a force-push, so a build can pick up code nobody reviewed,
-# whereas a stale hash fails loudly. The revision must be built against the librustzcash generation
-# the versions above declare.
-#
-# zodl-inc/slipstream#27's head, stacked on #26's: 0.4.0-pre.2 plus main's graft-buffer fixes, the
-# NU7 block cadence and the move to the release, and on top of them the restore anchor's resolution
-# of a server height above i32::MAX like an unreachable server, which no release carries yet.
-zodl-slipstream = { git = "https://github.com/zodl-inc/slipstream.git", rev = "ca5298548cdf30d84cd7ea64d38aaf46629f4e64" }
+# Pin the signed zodl_slipstream-0.4.0 release tag by immutable commit hash.
+# Keep the Git patch until 0.4.0 is published to crates.io. This release uses the same
+# librustzcash generation as the versions above, keeping a single family instance.
+zodl-slipstream = { git = "https://github.com/zodl-inc/slipstream.git", rev = "8591b758ca0919058035a2453b41e035f84b2402" }
 
 # DO NOT ALTER THIS COMMENT
 #
