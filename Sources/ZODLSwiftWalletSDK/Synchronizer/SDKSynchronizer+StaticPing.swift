@@ -8,6 +8,7 @@
 //  ranking must use the instance `evaluateBestOf` instead.
 
 import Foundation
+import libzcashlc
 
 extension SDKSynchronizer {
     public struct EndpointPingResult: Sendable {
@@ -27,6 +28,13 @@ extension SDKSynchronizer {
         /// Protocol identifier, see consensus/upgrades.cpp. Informational; normalize with
         /// `ConsensusBranchID.fromString(_:)` before comparing values across servers.
         public let consensusBranchID: String
+    }
+
+    /// Consensus branch the local rules expect at `height`, for comparing against
+    /// `EndpointPingResult.consensusBranchID` (as `evaluateBestOf` does); nil if unknown.
+    public static func consensusBranchID(at height: BlockHeight, networkType: NetworkType) -> ConsensusBranchID? {
+        let branchID = zcashlc_branch_id_for_height(Int32(clamping: height), networkType.networkId)
+        return branchID == -1 ? nil : branchID
     }
 
     /// Parallel probe; failing endpoints are omitted, results arrive in completion order.
